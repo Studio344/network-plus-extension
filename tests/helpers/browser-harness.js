@@ -311,7 +311,9 @@ function browserArguments(profileDirectory) {
     '--disable-extensions',
     '--no-default-browser-check',
     '--no-first-run',
-    '--no-sandbox',
+    // Linux CI runs inside an isolated runner. Keep the browser sandbox on
+    // macOS, where Edge without it can stop delivering animation frames.
+    ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     'about:blank',
   ];
 }
