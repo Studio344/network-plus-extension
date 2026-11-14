@@ -9210,6 +9210,20 @@ describe('atomic stream HAR protocol', () => {
     fail(done);
   });
 
+  test.each(['response body text', 'response headers', 'response encoding', 'request params'])('rejects malformed full entry %s', (field) => {
+    const pair = connect();
+    const { done, message } = request(pair);
+    const entry = makeEntry();
+    if (field === 'response body text') entry.response.content.text = { payload: 'not a string' };
+    if (field === 'response headers') entry.response.headers = 'not an array';
+    if (field === 'response encoding') entry.response.content.encoding = 'gzip';
+    if (field === 'request params') entry.request.postData.params = { name: 'payload', value: 'not an array' };
+    pair.viewer.handleMessage(result(message, JSON.stringify(entry)));
+    fail(done);
+    pair.viewer.handleMessage(result(message, JSON.stringify(makeEntry())));
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
   test('metadata-only snapshot accepts omitted and genuinely empty body states', () => {
     for (const empty of [false, true]) {
       const pair = connect();

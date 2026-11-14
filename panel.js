@@ -17768,15 +17768,30 @@ const _NetworkPlus = (function () {
         !['WS', 'SSE'].includes(entry.request.method) || typeof entry.request.url !== 'string' ||
         !Number.isFinite(entry.request.bodySize) || !Number.isFinite(entry.response.bodySize) ||
         !Number.isFinite(entry.response.content.size)) return false;
+    const { request, response } = entry;
+    const { content } = response;
+    const postData = request.postData;
+    const isNamedValues = (values) => values === undefined || (Array.isArray(values) &&
+      values.every((item) => isRecord(item) && typeof item.name === 'string' && typeof item.value === 'string'));
+    const isBody = (body) => (body.text === undefined || typeof body.text === 'string') &&
+      (body.encoding === undefined || (body.encoding === 'base64' && typeof body.text === 'string')) &&
+      (body.mimeType === undefined || typeof body.mimeType === 'string');
+    const isPostData = (body) => isRecord(body) && isBody(body) && (body.params === undefined ||
+      (Array.isArray(body.params) && body.params.every((param) =>
+        isRecord(param) && typeof param.name === 'string' && Object.values(param).every((value) => typeof value === 'string'),
+      )));
+    if (!isNamedValues(request.headers) || !isNamedValues(response.headers) || !isNamedValues(request.queryString) ||
+        !isBody(content) ||
+        (entry.timings !== undefined && (!isRecord(entry.timings) ||
+          !Object.values(entry.timings).every(Number.isFinite))) ||
+        (postData !== undefined && !isPostData(postData))) return false;
     const frames = entry._webSocketMessages;
     if (frames !== undefined &&
         (!includeBodies || entry.request.method !== 'WS' || !Array.isArray(frames) ||
           frames.length > HAR_WS_MESSAGE_IMPORT_LIMIT || !frames.every(isBoundedHarWebSocketMessage))) return false;
     if (includeBodies) return true;
-    const postData = entry.request.postData;
-    const responseText = entry.response.content.text;
-    return (responseText === undefined || responseText === '') &&
-      (postData === undefined || (isRecord(postData) && postData.params === undefined &&
+    return content.encoding === undefined && (content.text === undefined || content.text === '') &&
+      (postData === undefined || (postData.params === undefined && postData.encoding === undefined &&
         (postData.text === OMISSION_MARKER || postData.text === '')));
   }
 
