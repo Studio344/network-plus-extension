@@ -204,7 +204,7 @@ const assertLiveCommitFallbackContract = (source) => {
   ) {
     throw new Error('Live scheduling must flush high-water before arming max-wait and coalescing the frame.');
   }
-  const frameStart = scheduleBlock.indexOf('window.requestAnimationFrame(() => {');
+  const frameStart = scheduleBlock.indexOf('scheduleCaptureRender(() => {');
   const frameBlock = scheduleBlock.slice(frameStart);
   if (
     frameStart < 0 ||

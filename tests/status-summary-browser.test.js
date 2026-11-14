@@ -100,7 +100,7 @@ async function startPanelBrowser(profilePrefix) {
         '--disable-extensions',
         '--no-default-browser-check',
         '--no-first-run',
-        '--no-sandbox',
+        ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
         panelUrl,
       ],
       { stdio: 'ignore' },
@@ -1704,17 +1704,14 @@ browserTest(
             if (records.some((record) => record.type === 'childList')) mutationBatches += 1;
           });
           observer.observe(tbody, { childList: true });
-          // The burst arms two commit paths: the next frame and the 250ms
-          // max-wait timer. A starved runner can start that frame later than
-          // 250ms while the main thread idles, so the timer evicts rows 1-100
-          // in its own task and the frame appends in a second mutation batch.
-          // That path belongs to the max-wait scenario; hold the timer here so
-          // this one always measures the frame, and prove the frame cancelled it.
+          // Hold the commit and render fallback timers so this scenario
+          // always measures a single frame and can verify the frame cancelled both.
           const heldFallbacks = new Map();
           const originalSetTimeout = window.setTimeout;
           const originalClearTimeout = window.clearTimeout;
           window.setTimeout = function (callback, delay, ...args) {
-            if (!new Error().stack.includes('armPendingLiveCommitTimer')) {
+            const stack = new Error().stack;
+            if (!stack.includes('armPendingLiveCommitTimer') && !stack.includes('scheduleCaptureRender')) {
               return originalSetTimeout.call(window, callback, delay, ...args);
             }
             const id = -(heldFallbacks.size + 1);
@@ -1925,6 +1922,7 @@ browserTest(
       await cdp.send('Page.navigate', { url: maxWaitPanelUrl });
       await waitForLiveNetworkListener(cdp, maxWaitPanelUrl);
       await installControllableLiveScheduler(cdp);
+      await evaluate(cdp, "Object.defineProperty(document, 'hidden', { configurable: true, value: true }); true");
 
       const suspendedFrameResult = await evaluate(
         cdp,
@@ -2068,6 +2066,7 @@ browserTest(
             frameCount: window.__networkPlusSchedulerSnapshot().frameCount,
             pendingCount: state.pendingLiveRows.length,
           };
+          delete document.hidden;
           const frameRan = await window.__networkPlusRunNextFrame();
           await waitForPrefetch();
           await Promise.resolve();
@@ -2160,7 +2159,10 @@ browserTest(
         expect.objectContaining({
           cleanupQueries: 1,
           mutationBatches: 1,
-          maxWaitFallbacks: [{ delay: 250, cancelled: true }],
+          maxWaitFallbacks: [
+            { delay: 250, cancelled: true },
+            { delay: 300, cancelled: true },
+          ],
           rowCount: 5000,
           uniqueRowCount: 5000,
           firstRowId: 101,

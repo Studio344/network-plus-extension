@@ -41,6 +41,7 @@ const _NetworkPlus = (function () {
   // Cap on in-pane (detail view) search hits so pathological bodies stay responsive.
   const PANE_SEARCH_MAX_HITS = 1500;
   const LIVE_COMMIT_MAX_WAIT_MS = 250;
+  const LIVE_RENDER_MAX_WAIT_MS = 300;
   const LIVE_PENDING_HIGH_WATER_MARK = 5000;
   const RESPONSE_CONTENT_TIMEOUT_MS = 10000;
   // Foreground details and HAR work bypass these slots, so the total can be 4 plus distinct foreground operations.
@@ -600,27 +601,34 @@ const _NetworkPlus = (function () {
 
   function initializeDataSafetyDialog() {
     const dialog = $('#dataSafetyDialog');
-    $('#dataSafetyCancelBtn').addEventListener('click', () => dialog.close('cancel'));
-    dialog.addEventListener('cancel', () => {
-      pendingFullOutboundAction = null;
-    });
-    dialog.addEventListener('click', (event) => {
-      if (event.target === dialog) dialog.close('backdrop');
-    });
-    dialog.addEventListener('close', () => {
+    const finishClose = () => {
+      if (dialog.open) return;
       pendingFullOutboundAction = null;
       const trigger = dataSafetyDialogTrigger;
       dataSafetyDialogTrigger = null;
       if (trigger && trigger.focus && trigger.isConnected !== false) trigger.focus();
+    };
+    const closeDialog = (reason) => {
+      dialog.close(reason);
+      finishClose();
+    };
+    $('#dataSafetyCancelBtn').addEventListener('click', () => closeDialog('cancel'));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeDialog('cancel');
     });
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) closeDialog('backdrop');
+    });
+    dialog.addEventListener('close', finishClose);
     $('#dataSafetySanitizedBtn').addEventListener('click', () => {
       const scope = readExportScopeChoice();
-      dialog.close('sanitized');
+      closeDialog('sanitized');
       exportHAR({ mode: 'sanitized', scope });
     });
     $('#dataSafetyCsvBtn').addEventListener('click', () => {
       const scope = readExportScopeChoice();
-      dialog.close('csv');
+      closeDialog('csv');
       exportCsv(scope);
     });
     $('#dataSafetyFullBtn').addEventListener('click', () => {
@@ -639,7 +647,7 @@ const _NetworkPlus = (function () {
       const action = pendingFullOutboundAction;
       pendingFullOutboundAction = null;
       $('#dataSafetyConfirmBtn').disabled = true;
-      dialog.close('confirmed');
+      closeDialog('confirmed');
       if (!action) return;
       Promise.resolve()
         .then(() => action())
@@ -5922,6 +5930,23 @@ const _NetworkPlus = (function () {
     }
     state.liveRowsAwaitingRender.push(...liveRows);
     return liveRows;
+  }
+
+  function scheduleCaptureRender(render) {
+    let timer;
+    const frame = window.requestAnimationFrame(() => {
+      clearTimeout(timer);
+      render();
+    });
+    // Visible DevTools and mirror panels can miss frames. Hidden panels
+    // still commit retained data and repaint on their next animation frame.
+    if (!document.hidden) {
+      timer = setTimeout(() => {
+        if (document.hidden) return;
+        window.cancelAnimationFrame(frame);
+        render();
+      }, LIVE_RENDER_MAX_WAIT_MS);
+    }
   }
 
   function recordSkippedImportRows(skippedCount) {
@@ -20732,7 +20757,7 @@ const _NetworkPlus = (function () {
       }
       if (pendingResponseSearchFrame) return;
       pendingResponseSearchFrame = true;
-      window.requestAnimationFrame(() => {
+      scheduleCaptureRender(() => {
         pendingResponseSearchFrame = false;
         if (!hasActiveSearchKeywords(state.search.keywords, state.search.options)) return;
         renderGridAfterSearchChange();
@@ -20823,7 +20848,7 @@ const _NetworkPlus = (function () {
       }
       if (pendingLiveFrame) return;
       pendingLiveFrame = true;
-      window.requestAnimationFrame(() => {
+      scheduleCaptureRender(() => {
         pendingLiveFrame = false;
         const shouldScrollToBottom = pendingScrollToBottom && state.autoScroll;
         pendingScrollToBottom = false;
@@ -20864,7 +20889,7 @@ const _NetworkPlus = (function () {
       const repaintCompletedRows = () => {
         if (completionFrame) return;
         completionFrame = true;
-        window.requestAnimationFrame(() => {
+        scheduleCaptureRender(() => {
           completionFrame = false;
           commitPendingLiveRows();
           const changed = new Set(completedRows);
@@ -21182,7 +21207,7 @@ const _NetworkPlus = (function () {
         mirrorChangedRows.add(row);
         if (mirrorUpdateFrame) return;
         mirrorUpdateFrame = true;
-        window.requestAnimationFrame(() => {
+        scheduleCaptureRender(() => {
           mirrorUpdateFrame = false;
           commitPendingLiveRows();
           const changed = new Set(mirrorChangedRows);
