@@ -205,6 +205,155 @@ const answerCommand = (cdp, commandId, control) =>
   );
 
 browserTest(
+  'combined stream updates keep pop-out bodies and structured HAR exports current',
+  async () => {
+    const host = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: HOST_STUB + `
+        class SyntheticSocket {
+          constructor() { this.readyState = 0; this.listeners = {}; }
+          addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+          send(data) {
+            if (this.readyState !== 1) throw new DOMException('Synthetic socket is connecting', 'InvalidStateError');
+            return 'accepted';
+          }
+          emit(type, event = {}) {
+            if (type === 'open') this.readyState = 1;
+            if (type === 'close') this.readyState = 3;
+            for (const listener of this.listeners[type] || []) listener(event);
+          }
+        }
+        window.WebSocket = SyntheticSocket;
+        const originalEval = chrome.devtools.inspectedWindow.eval;
+        chrome.devtools.inspectedWindow.eval = (source, callback) => {
+          if (source === 'window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []') {
+            callback(window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []);
+          } else if (source === 'window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []') {
+            callback([]);
+          } else originalEval(source, callback);
+        };
+        const push = window.__fromHost.push.bind(window.__fromHost);
+        window.__fromHost.push = (message) => push(JSON.parse(JSON.stringify(message)));
+      `,
+    });
+    let viewer;
+    const traffic = [];
+    try {
+      viewer = await launchPanelPage({
+        executable: browserExecutable, query: '?view=window&src=7', initScript: VIEWER_STUB,
+      });
+      await attachScriptedHostPort(viewer.cdp);
+      const relay = async () => {
+        const requests = await evaluate(viewer.cdp, 'window.__sentToHost.splice(0)');
+        if (requests.length) {
+          traffic.push(...requests);
+          await evaluate(host.cdp, `${JSON.stringify(requests)}.forEach(window.__hostPortListener); true`);
+        }
+        const replies = await evaluate(host.cdp, 'window.__fromHost.splice(0)');
+        if (replies.length) {
+          traffic.push(...replies);
+          await evaluate(viewer.cdp, `${JSON.stringify(replies)}.forEach(window.__send); true`);
+        }
+      };
+      const wait = async (page, expression) => {
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+          await relay();
+          const value = await evaluate(page.cdp, expression);
+          if (value) return value;
+          await delay(25);
+        }
+        throw new Error('Combined stream/export fixture did not reach: ' + expression);
+      };
+      await relay();
+      await evaluate(host.cdp, "document.querySelector('#wsCaptureBtn').click(); true");
+      const wrapper = await evaluate(host.cdp, "window.__evals.find((source) => source.startsWith('(function pageWebSocketWrapper('))");
+      expect(typeof wrapper).toBe('string');
+      // Execute the production page wrapper against a wholly synthetic socket.
+      expect(await evaluate(host.cdp, wrapper)).toBe('installed');
+      expect(await evaluate(host.cdp, `(() => {
+        window.__socket = new WebSocket('wss://synthetic.invalid/combined');
+        try { window.__socket.send('rejected-private'); } catch (error) { return error.name; }
+        return 'unexpected success';
+      })()`)).toBe('InvalidStateError');
+      const rowState = `(() => {
+        const rows = document.querySelectorAll('#tbody tr[data-row-id]');
+        return rows.length === 1 ? { id: rows[0].dataset.rowId,
+          status: rows[0].querySelector('[data-col-id="status"]').textContent } : null;
+      })()`;
+      const initial = await wait(viewer, `(() => { const row = ${rowState}; return row?.status === 'Connecting' && row; })()`);
+      expect(await evaluate(host.cdp, `(() => {
+        window.__socket.emit('open');
+        const result = window.__socket.send('accepted-private');
+        window.__socket.emit('message', { data: 'first-private' });
+        return result;
+      })()`)).toBe('accepted');
+      const opened = await wait(viewer, `(() => { const row = ${rowState}; return row?.status === 'Open' && row; })()`);
+      expect(opened.id).toBe(initial.id);
+      await evaluate(viewer.cdp, "document.querySelector('#tbody tr').click(); document.querySelector('#res-tab-raw').click(); true");
+      await wait(viewer, "document.querySelector('#res-raw').textContent.includes('first-private')");
+      await evaluate(host.cdp, "window.__socket.emit('message', { data: 'later-private' }); true");
+      await wait(viewer, "document.querySelector('#res-raw').textContent.includes('later-private')");
+      await evaluate(host.cdp, "window.__socket.emit('close', { code: 1000, reason: 'finished' }); true");
+      const closed = await wait(viewer, `(() => { const row = ${rowState}; return row?.status === 'Closed' && row; })()`);
+      expect(closed.id).toBe(initial.id);
+
+      for (const page of [host, viewer]) {
+        await evaluate(page.cdp, `(() => {
+          window.__exports = [];
+          URL.createObjectURL = (blob) => { window.__exports.push(blob); return 'blob:synthetic-combination-har'; };
+          HTMLAnchorElement.prototype.click = () => {};
+          return true;
+        })()`);
+      }
+      const exportHar = async (page, mode) => {
+        const index = await evaluate(page.cdp, `(() => {
+          const index = window.__exports.length;
+          document.querySelector('#exportHarBtn').click();
+          document.querySelector(${JSON.stringify(mode === 'full' ? '#dataSafetyFullBtn' : '#dataSafetySanitizedBtn')}).click();
+          ${mode === 'full' ? "document.querySelector('#dataSafetyConfirmBtn').click();" : ''}
+          return index;
+        })()`);
+        await wait(page, `window.__exports.length === ${index + 1} && !document.querySelector('#exportHarBtn').disabled`);
+        return evaluate(page.cdp, `window.__exports[${index}].text().then((text) => JSON.parse(text).log.entries[0])`, true);
+      };
+      const hostEntry = await exportHar(host, 'full');
+      const viewerEntry = await exportHar(viewer, 'full');
+      expect(viewerEntry._webSocketMessages).toEqual(hostEntry._webSocketMessages);
+      expect(viewerEntry._webSocketMessages.map(({ type, data }) => [type, data])).toEqual([
+        ['send', 'accepted-private'], ['receive', 'first-private'], ['receive', 'later-private'],
+      ]);
+      expect(viewerEntry.request.postData).toEqual(hostEntry.request.postData);
+      expect(viewerEntry.response.content).toEqual(hostEntry.response.content);
+      expect(viewerEntry.response.statusText).toBe('Closed');
+      expect(viewerEntry.request.bodySize).toBe(hostEntry.request.bodySize);
+      expect(viewerEntry.response.bodySize).toBe(26);
+      expect(viewerEntry.response.content.size).toBe(26);
+      expect(viewerEntry.response.content.text.match(/later-private/g)).toHaveLength(1);
+      expect(JSON.stringify(viewerEntry)).not.toContain('rejected-private');
+
+      await evaluate(viewer.cdp, 'window.__hostListeners.disconnect.forEach((listener) => listener()); true');
+      await attachScriptedHostPort(viewer.cdp);
+      await relay();
+      expect(await evaluate(viewer.cdp, rowState)).toEqual(closed);
+      const afterReconnect = await exportHar(viewer, 'full');
+      expect(afterReconnect._webSocketMessages).toEqual(viewerEntry._webSocketMessages);
+      expect(afterReconnect.response.content).toEqual(viewerEntry.response.content);
+      const start = traffic.length;
+      const sanitized = await exportHar(viewer, 'sanitized');
+      expect(sanitized._webSocketMessages).toBeUndefined();
+      expect(sanitized._networkPlus.webSocketFramesOmitted).toBe(3);
+      expect(JSON.stringify(sanitized)).not.toMatch(/accepted-private|first-private|later-private|rejected-private/);
+      expect(traffic.slice(start).some((message) => 'frames' in message || message.type === 'body-request')).toBe(false);
+    } finally {
+      if (viewer) await viewer.close();
+      await host.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
   'WebSocket and SSE keep their row IDs through lifecycle updates and mirror reconnection',
   async () => {
     const host = await launchPanelPage({
