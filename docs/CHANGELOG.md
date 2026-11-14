@@ -4,6 +4,18 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🐛 **Live capture display** — refresh visible request rows, pending responses, and search results when the browser delays a render frame.
+- 🐛 **Export keyboard focus** — restore focus to the invoking control immediately when the export dialog closes.
+- 🐛 **Live stream HAR export** — keep each stream entry’s captured body, sizes, and WebSocket frames from the same revision.
+- 🐛 **Stream mirroring** — update WebSocket and SSE rows in place and reconcile connection state when the pop-out reconnects.
+- 🐛 **WebSocket capture** — omit sent-frame records when the browser’s `send()` throws.
+- 🐛 **Import status** — show HAR and SAZ import progress and request counts in the selected language.
+- ⚡ **Body and Raw search** — bound highlight planning and count collapsed matches without building a list of every match.
+- 🐛 **HAR round-trip** — preserve form parameters, request encoding, and distinct response byte counts and compression.
+- 🐛 **Import notices** — localize Japanese failure reasons and retention notices while preserving diagnostic and capture data.
+
+- 🐛 **Pop-out HAR export** — preserve captured WebSocket frames in full exports and report omitted frames in sanitized exports.
+- 🐛 **Comparison body notices** — show request and response body availability in the selected language.
 - ⚡ **Large HAR import** — stream entries and pace pop-out transfers to avoid loading the entire file as one string.
 - ✨ **Pending requests** — show requests waiting for a response in DevTools and the pop-out, then update the same row on completion.
 - ✨ **Offline workspace** — open saved captures from the browser’s extension menu, including from New Tab.

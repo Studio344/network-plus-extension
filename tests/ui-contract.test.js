@@ -204,7 +204,7 @@ const assertLiveCommitFallbackContract = (source) => {
   ) {
     throw new Error('Live scheduling must flush high-water before arming max-wait and coalescing the frame.');
   }
-  const frameStart = scheduleBlock.indexOf('window.requestAnimationFrame(() => {');
+  const frameStart = scheduleBlock.indexOf('scheduleCaptureRender(() => {');
   const frameBlock = scheduleBlock.slice(frameStart);
   if (
     frameStart < 0 ||
@@ -1821,7 +1821,7 @@ describe('release trust static contracts', () => {
     const scheduleEnd = js.indexOf('const scheduleLiveRows', scheduleStart);
     const scheduleBlock = js.slice(scheduleStart, scheduleEnd);
     expect(scheduleBlock).toContain('pendingResponseSearchFrame');
-    expect(scheduleBlock).toContain('window.requestAnimationFrame');
+    expect(scheduleBlock).toContain('scheduleCaptureRender(() => {');
     expect(scheduleBlock).toContain('hasActiveSearchKeywords(state.search.keywords, state.search.options)');
     // Renders the header with the body: a late body that turns a keyword's
     // Match column on must not leave the header naming the old column set.
@@ -2196,8 +2196,12 @@ describe('outbound data-safety static contracts', () => {
   test('uses native dialog focus, Escape, close restoration, and debounced polite feedback', () => {
     expect(js).toContain("if (!dialog.open) dialog.showModal();");
     expect(js).toContain("dialog.addEventListener('cancel'");
-    expect(js).toContain("dialog.addEventListener('close'");
-    expect(js).toContain("if (event.target === dialog) dialog.close('backdrop');");
+    const closeStart = js.indexOf('const finishClose =', js.indexOf('function initializeDataSafetyDialog()'));
+    const closeEnd = js.indexOf("$('#dataSafetySanitizedBtn').addEventListener", closeStart);
+    const closeBlock = js.slice(closeStart, closeEnd);
+    expect(closeBlock).toContain("dialog.addEventListener('close', finishClose);");
+    expect(closeBlock).toContain("if (event.target === dialog) closeDialog('backdrop');");
+    expect(closeBlock).toContain('dialog.close(reason);\n      finishClose();');
     expect(js).toContain('if (trigger && trigger.focus && trigger.isConnected !== false) trigger.focus();');
     expect(js).toContain('const DATA_SAFETY_ANNOUNCE_MS = 500;');
     expect(js).toContain("const el = $('#dataSafetyStatus');");
@@ -4169,16 +4173,18 @@ describe('method badge contracts', () => {
 describe('stream capture contracts (WebSocket + SSE)', () => {
   test('WS conversations round-trip through HAR with honest losses and sanitized omission', () => {
     expect(js).toContain('function recordWsFrame(row, frame) {');
-    expect(js).toContain('entry._webSocketMessages = r._wsFrames.map((frame) => {');
+    expect(js).toContain('frames: r._wsFrames.map(toHarWebSocketMessage),');
+    expect(js).toContain('entry._webSocketMessages = webSocket.frames;');
     // Chrome-shaped output: epoch seconds, opcode 1 text, opcode 2 binary
     // without data, fidelity losses declared on the entry.
     expect(js).toContain('time: Number.isFinite(frame.time) ? frame.time / 1000 : 0,');
-    expect(js).toContain('if (!frame.binary) message.data = frame.data;');
-    expect(js).toContain('binaryFramesWithoutPayload: binaryFrames,');
+    expect(js).toContain("if (!frame.binary) message.data = String(frame.data ?? '').slice(0, WS_FRAME_PREVIEW_CHARS);");
+    expect(js).toContain('binaryFramesWithoutPayload: webSocket.binaryFramesWithoutPayload,');
     // SSE rows never get the WebSocket-entry key.
     expect(js).toContain("if (row.method !== 'SSE') {");
     // Sanitized output stays allowlist-built and marks the omission.
-    expect(js).toContain('webSocketFramesOmitted: entry._webSocketMessages.length,');
+    expect(js).toContain('Number.isSafeInteger(webSocketFramesOmitted) && webSocketFramesOmitted > 0');
+    expect(js).toContain('webSocketFramesOmitted: webSocket.count');
   });
 
   test('capture is an explicit statusbar opt-in that names its own limits', () => {
