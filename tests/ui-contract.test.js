@@ -1821,7 +1821,7 @@ describe('release trust static contracts', () => {
     const scheduleEnd = js.indexOf('const scheduleLiveRows', scheduleStart);
     const scheduleBlock = js.slice(scheduleStart, scheduleEnd);
     expect(scheduleBlock).toContain('pendingResponseSearchFrame');
-    expect(scheduleBlock).toContain('window.requestAnimationFrame');
+    expect(scheduleBlock).toContain('scheduleCaptureRender(() => {');
     expect(scheduleBlock).toContain('hasActiveSearchKeywords(state.search.keywords, state.search.options)');
     // Renders the header with the body: a late body that turns a keyword's
     // Match column on must not leave the header naming the old column set.
@@ -2196,8 +2196,12 @@ describe('outbound data-safety static contracts', () => {
   test('uses native dialog focus, Escape, close restoration, and debounced polite feedback', () => {
     expect(js).toContain("if (!dialog.open) dialog.showModal();");
     expect(js).toContain("dialog.addEventListener('cancel'");
-    expect(js).toContain("dialog.addEventListener('close'");
-    expect(js).toContain("if (event.target === dialog) dialog.close('backdrop');");
+    const closeStart = js.indexOf('const finishClose =', js.indexOf('function initializeDataSafetyDialog()'));
+    const closeEnd = js.indexOf("$('#dataSafetySanitizedBtn').addEventListener", closeStart);
+    const closeBlock = js.slice(closeStart, closeEnd);
+    expect(closeBlock).toContain("dialog.addEventListener('close', finishClose);");
+    expect(closeBlock).toContain("if (event.target === dialog) closeDialog('backdrop');");
+    expect(closeBlock).toContain('dialog.close(reason);\n      finishClose();');
     expect(js).toContain('if (trigger && trigger.focus && trigger.isConnected !== false) trigger.focus();');
     expect(js).toContain('const DATA_SAFETY_ANNOUNCE_MS = 500;');
     expect(js).toContain("const el = $('#dataSafetyStatus');");
