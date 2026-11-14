@@ -7172,13 +7172,20 @@ browserTest(
     try {
       await waitForLiveNetworkListener(page.cdp);
       const observed = await evaluate(page.cdp, `(async () => {${WAIT_FOR_IN_PAGE}
-        for (const path of ['/hidden-first', '/match-a', '/hidden-middle', '/match-b', '/hidden-last']) {
-          globalThis.__networkPlusLiveListener({
-            startedDateTime: '2026-01-15T12:00:00.000Z', time: 20,
-            request: { method: 'GET', url: 'https://example.test' + path, headers: [] },
-            response: { status: 200, headers: [], content: { size: 0, mimeType: 'text/plain' } },
-            getContent(callback) { callback('', ''); },
-          });
+        // Withhold the native frame for this burst to exercise the visible-view fallback.
+        const requestAnimationFrame = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+        try {
+          for (const path of ['/hidden-first', '/match-a', '/hidden-middle', '/match-b', '/hidden-last']) {
+            globalThis.__networkPlusLiveListener({
+              startedDateTime: '2026-01-15T12:00:00.000Z', time: 20,
+              request: { method: 'GET', url: 'https://example.test' + path, headers: [] },
+              response: { status: 200, headers: [], content: { size: 0, mimeType: 'text/plain' } },
+              getContent(callback) { callback('', ''); },
+            });
+          }
+        } finally {
+          window.requestAnimationFrame = requestAnimationFrame;
         }
         if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 5, 1200)) {
           throw new Error('The five-row navigation fixture did not render.');
@@ -7231,7 +7238,7 @@ browserTest(
         document.querySelector('#exportHarBtn').click();
         const selectedExportCount = document.querySelector('#dataSafetyScopeSelectedCount').textContent;
         document.querySelector('#dataSafetyCancelBtn').click();
-        if (!await waitFor(() => document.activeElement?.id === 'exportHarBtn', 1000)) {
+        if (document.activeElement?.id !== 'exportHarBtn') {
           throw new Error('The export dialog did not restore focus.');
         }
 
