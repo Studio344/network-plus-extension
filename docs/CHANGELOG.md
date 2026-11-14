@@ -4,6 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🐛 **Live stream HAR export** — keep each stream entry’s captured body, sizes, and WebSocket frames from the same revision.
 - 🐛 **Stream mirroring** — update WebSocket and SSE rows in place and reconcile connection state when the pop-out reconnects.
 - 🐛 **WebSocket capture** — omit sent-frame records when the browser’s `send()` throws.
 - 🐛 **Import status** — show HAR and SAZ import progress and request counts in the selected language.

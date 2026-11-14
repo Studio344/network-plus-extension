@@ -205,6 +205,141 @@ const answerCommand = (cdp, commandId, control) =>
   );
 
 browserTest(
+  'full pop-out HAR keeps one stream revision when an older export reply arrives after a live update',
+  async () => {
+    const host = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: HOST_STUB + `
+        window.__wsEvents = [];
+        const originalEval = chrome.devtools.inspectedWindow.eval;
+        chrome.devtools.inspectedWindow.eval = (source, callback) => {
+          if (source === 'window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []') {
+            callback(window.__wsEvents.splice(0));
+          } else if (source === 'window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []') {
+            callback([]);
+          } else originalEval(source, callback);
+        };
+        const push = window.__fromHost.push.bind(window.__fromHost);
+        window.__fromHost.push = (message) => push(JSON.parse(JSON.stringify(message)));
+      `,
+    });
+    let viewer;
+    try {
+      viewer = await launchPanelPage({
+        executable: browserExecutable, query: '?view=window&src=7', initScript: VIEWER_STUB,
+      });
+      await attachScriptedHostPort(viewer.cdp);
+      let holdExport = false;
+      const heldResults = [];
+      const deferredFrameRequests = [];
+      const deliveredRows = [];
+      const forward = (messages) => evaluate(viewer.cdp, `${JSON.stringify(messages)}.forEach(window.__send); true`);
+      const relay = async () => {
+        const requests = await evaluate(viewer.cdp, 'window.__sentToHost.splice(0)');
+        const readyRequests = [];
+        for (const request of requests) {
+          // The old protocol fetched body and frame metadata separately.
+          // Hold its frame request until after the next captured revision.
+          if (holdExport && request.type === 'ws-export-request') deferredFrameRequests.push(request);
+          else readyRequests.push(request);
+        }
+        if (readyRequests.length) await evaluate(host.cdp, `${JSON.stringify(readyRequests)}.forEach(window.__hostPortListener); true`);
+        const replies = await evaluate(host.cdp, 'window.__fromHost.splice(0)');
+        const readyReplies = [];
+        for (const reply of replies) {
+          // The atomic protocol samples a complete stream entry at the host.
+          // Hold that real snapshot too, so it must survive a newer row push.
+          if (holdExport && ['body-result', 'stream-har-result'].includes(reply.type)) heldResults.push(reply);
+          else {
+            if (reply.type === 'row') deliveredRows.push(reply.row);
+            readyReplies.push(reply);
+          }
+        }
+        if (readyReplies.length) await forward(readyReplies);
+      };
+      const wait = async (predicate, description) => {
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+          await relay();
+          const value = await predicate();
+          if (value) return value;
+          await delay(25);
+        }
+        throw new Error('Atomic stream HAR fixture did not reach: ' + description);
+      };
+      await relay();
+      await evaluate(host.cdp, `(() => {
+        window.__wsEvents.push(
+          { socketId: 6, kind: 'ws-open-attempt', at: 1700000000000, url: 'wss://synthetic.invalid/atomic' },
+          { socketId: 6, kind: 'ws-open', at: 1700000000001 },
+          { socketId: 6, kind: 'ws-sent', at: 1700000000002, preview: 'old-send' },
+          { socketId: 6, kind: 'ws-received', at: 1700000000003, preview: 'old-private' },
+        );
+        document.querySelector('#wsCaptureBtn').click();
+        return true;
+      })()`);
+      await wait(() => evaluate(viewer.cdp, "document.querySelectorAll('#tbody tr[data-row-id]').length === 1"), 'initial mirrored stream');
+      const original = deliveredRows.at(-1);
+      expect(original.response.bodySize).toBe(11);
+      holdExport = true;
+      await evaluate(viewer.cdp, `(() => {
+        window.__exports = [];
+        URL.createObjectURL = (blob) => { window.__exports.push(blob); return 'blob:synthetic-atomic-har'; };
+        HTMLAnchorElement.prototype.click = () => {};
+        document.querySelector('#exportHarBtn').click();
+        document.querySelector('#dataSafetyFullBtn').click();
+        document.querySelector('#dataSafetyConfirmBtn').click();
+        return true;
+      })()`);
+      await wait(() => heldResults.length > 0, 'an actual export response held before the update');
+      expect(JSON.stringify(heldResults)).toContain('old-private');
+      expect(JSON.stringify(heldResults)).not.toContain('new-private');
+      await evaluate(host.cdp, `window.__wsEvents.push(
+        { socketId: 6, kind: 'ws-sent', at: 1700000000004, preview: 'new-send' },
+        { socketId: 6, kind: 'ws-received', at: 1700000000005, preview: 'new-private' }
+      ); true`);
+      const updated = await wait(() => deliveredRows.find((row) => row.id === original.id && row.streamRevision > original.streamRevision), 'newer revision delivered while the export response is withheld');
+      expect(updated.response.bodySize).toBe(22);
+      expect(updated.request.postData.text).toContain('new-send');
+      expect(await evaluate(viewer.cdp, 'window.__exports.length')).toBe(0);
+
+      holdExport = false;
+      await forward(heldResults);
+      if (deferredFrameRequests.length) await evaluate(host.cdp, `${JSON.stringify(deferredFrameRequests)}.forEach(window.__hostPortListener); true`);
+      await wait(() => evaluate(viewer.cdp, "window.__exports.length === 1 && !document.querySelector('#exportHarBtn').disabled"), 'completed full export');
+      const entry = await evaluate(viewer.cdp, 'window.__exports[0].text().then((text) => JSON.parse(text).log.entries[0])', true);
+      expect(entry.response.content.text).toContain('old-private');
+      const includesNewRevision = entry.response.content.text.includes('new-private');
+      const expectedFrames = [
+        { type: 'send', time: 1700000000.002, opcode: 1, data: 'old-send' },
+        { type: 'receive', time: 1700000000.003, opcode: 1, data: 'old-private' },
+      ];
+      if (includesNewRevision) expectedFrames.push(
+        { type: 'send', time: 1700000000.004, opcode: 1, data: 'new-send' },
+        { type: 'receive', time: 1700000000.005, opcode: 1, data: 'new-private' },
+      );
+      expect({
+        frames: entry._webSocketMessages,
+        bodySize: entry.response.bodySize,
+        contentSize: entry.response.content.size,
+        requestIncludesNewRevision: entry.request.postData.text.includes('new-send'),
+      }).toEqual({
+        frames: expectedFrames,
+        bodySize: includesNewRevision ? 22 : 11,
+        contentSize: includesNewRevision ? 22 : 11,
+        requestIncludesNewRevision: includesNewRevision,
+      });
+      expect(entry.request.bodySize).toBe(entry.request.postData.text.length);
+      expect(entry.response.content.text.match(/old-private/g)).toHaveLength(1);
+    } finally {
+      if (viewer) await viewer.close();
+      await host.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
   'combined stream updates keep pop-out bodies and structured HAR exports current',
   async () => {
     const host = await launchPanelPage({
@@ -640,6 +775,75 @@ browserTest(
     } finally {
       if (viewer) await viewer.close();
       await host.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'legacy live-stream HAR exports omit unavailable snapshots before and after disconnect',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable, query: '?view=window&src=7', initScript: VIEWER_STUB,
+    });
+    try {
+      await attachScriptedHostPort(page.cdp);
+      const row = wireRow(1);
+      Object.assign(row, { streamRevision: 1, webSocket: true });
+      Object.assign(row.request, {
+        method: 'WS', url: 'wss://synthetic.invalid/legacy-live', bodySize: 31,
+        postData: { mimeType: 'text/plain', text: 'private legacy live request' },
+      });
+      Object.assign(row.response, {
+        status: '', statusText: 'Open', httpVersion: 'WS', headers: [], bodySize: 23,
+        content: { mimeType: 'websocket', size: 23 },
+      });
+      await evaluate(page.cdp, `(() => {
+        window.__send({ type: 'snapshot-start', generation: 1, total: 1, session: 'legacy-live-host',
+          protocolVersion: 2, webSocketExport: true });
+        window.__send({ type: 'snapshot-rows', generation: 1, rows: [${JSON.stringify(row)}] });
+        window.__send({ type: 'snapshot-end', generation: 1 });
+        window.__exports = [];
+        URL.createObjectURL = (blob) => { window.__exports.push(blob); return 'blob:synthetic-legacy-live-har'; };
+        HTMLAnchorElement.prototype.click = () => {};
+        return true;
+      })()`);
+      expect(await waitForImportResult(page.cdp, "document.querySelectorAll('#tbody tr[data-row-id]').length === 1"))
+        .toBe(true);
+      for (const disconnected of [false, true]) {
+        const index = await evaluate(page.cdp, `(() => {
+          ${disconnected ? 'window.__hostListeners.disconnect.forEach((listener) => listener());' : ''}
+          const index = window.__exports.length;
+          document.querySelector('#exportHarBtn').click();
+          document.querySelector('#dataSafetyFullBtn').click();
+          document.querySelector('#dataSafetyConfirmBtn').click();
+          return index;
+        })()`);
+        expect(await waitForImportResult(page.cdp, `window.__exports.length === ${index + 1} && !document.querySelector('#exportHarBtn').disabled`))
+          .toBe(true);
+        const har = await evaluate(page.cdp, `window.__exports[${index}].text().then(JSON.parse)`, true);
+        expect(har.log.entries).toHaveLength(1);
+        const entry = har.log.entries[0];
+        expect(entry).toMatchObject({
+          startedDateTime: row.startedDateTime, time: row.time,
+          request: { method: 'WS', url: row.request.url, bodySize: 31 },
+          response: { statusText: 'Open', httpVersion: 'WS', bodySize: 23, content: { size: 23, mimeType: 'websocket' } },
+          _networkPlus: {
+            streamHarExport: { snapshotUnavailable: true },
+            webSocketExport: { mirrorFramesUnavailable: true },
+          },
+        });
+        expect(entry.request.postData).toBeUndefined();
+        expect(entry.response.content.text).toBeUndefined();
+        expect(entry._webSocketMessages).toBeUndefined();
+        expect(JSON.stringify(har)).not.toContain('private legacy live request');
+        expect(await evaluate(page.cdp, 'document.querySelector("#statusText").textContent'))
+          .toContain('Stream data was omitted for 1 requests because a consistent snapshot was unavailable.');
+      }
+      expect(await evaluate(page.cdp, `window.__sentToHost.filter((message) =>
+        ['body-request', 'ws-export-request', 'stream-har-request'].includes(message.type))`)).toEqual([]);
+    } finally {
+      await page.close();
     }
   },
   TEST_TIMEOUT_MS,

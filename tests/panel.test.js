@@ -9056,6 +9056,304 @@ describe('mirror WebSocket export protocol', () => {
   });
 });
 
+describe('atomic stream HAR protocol', () => {
+  const makeRow = (method = 'WS') => ({
+    id: 7, method, url: method === 'WS' ? 'wss://synthetic.invalid/atomic' : 'https://synthetic.invalid/events',
+    startedDateTime: '2026-11-14T00:00:00.000Z', duration: 50, status: method === 'WS' ? 101 : 200,
+    statusText: 'Open', protocol: 'HTTP/1.1', type: 'text/plain', requestHeaders: [], responseHeaders: [],
+    requestPostData: { mimeType: 'text/plain', text: 'private-request😀' }, requestBodySize: 19,
+    responseContent: 'private-response', responseContentState: 'cached', responseContentEncoding: '',
+    responseBodySize: 120, responseContentSize: 900, responseCompression: 780, size: 120,
+    _wsSocketId: 9, _streamRevision: 4,
+    ...(method === 'WS' ? { _wsFrames: [{ type: 'receive', time: 1000, binary: false, data: 'private-frame' }] } : {}),
+  });
+  const makeEntry = () => np.buildHarLogFromRows([makeRow()]).log.entries[0];
+  const makeLargeEntry = () => {
+    const row = makeRow();
+    row._wsFrames = Array.from({ length: 350 }, (_unused, index) => ({ type: 'receive', time: index, data: 'x'.repeat(1024), binary: false }));
+    return np.buildHarLogFromRows([row]).log.entries[0];
+  };
+  const connect = (capability = true) => {
+    const sent = [];
+    const viewer = np.createMirrorViewerSession({
+      postMessage: (message) => sent.push(message), appendWireRow: () => {}, applyWireSnapshot: () => {},
+      getLocalCount: () => 1, getLocalMaxId: () => 7,
+    });
+    viewer.handleMessage({ type: 'snapshot-start', generation: 1, session: 'host-atomic', total: 1,
+      webSocketExport: true, streamHarExport: capability });
+    viewer.handleMessage({ type: 'snapshot-rows', generation: 1, rows: [{ id: 7, streamRevision: 2 }] });
+    viewer.handleMessage({ type: 'snapshot-end', generation: 1 });
+    return { viewer, sent };
+  };
+  const request = (pair, includeBodies = true, minimumRevision = 2, session = 'host-atomic') => {
+    const done = jest.fn();
+    pair.viewer.requestStreamHar(7, session, minimumRevision, includeBodies, done);
+    return { done, message: pair.sent.find((message) => message.type === 'stream-har-request') };
+  };
+  const result = (message, data, overrides = {}) => ({
+    type: 'stream-har-result', requestId: message.requestId, viewer: message.viewer,
+    rowId: message.rowId, session: message.session, ok: true, revision: 4,
+    offset: 0, total: data.length, data, ...overrides,
+  });
+  const fail = (done) => {
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(done.mock.calls[0][1]).toBeFalsy();
+  };
+
+  test('assembles one atomic entry only when all UTF-16 chunks arrive, without a separate body request', () => {
+    const pair = connect();
+    expect(pair.sent).toEqual([]);
+    const { done, message } = request(pair);
+    expect(message).toMatchObject({ type: 'stream-har-request', rowId: 7, session: 'host-atomic', minimumRevision: 2, includeBodies: true });
+    const entry = makeLargeEntry();
+    const serialized = JSON.stringify(entry);
+    // The first chunk contains an astral character: offsets count UTF-16,
+    // not the different UTF-8 byte length of that same chunk.
+    const split = 256 * 1024;
+    expect(serialized.slice(0, split)).toContain('😀');
+    pair.viewer.handleMessage(result(message, serialized.slice(0, split), { total: serialized.length }));
+    expect(done).not.toHaveBeenCalled();
+    pair.viewer.handleMessage(result(message, serialized.slice(split), { offset: split, total: serialized.length }));
+    expect(done).toHaveBeenCalledWith(null, entry);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(pair.sent.filter((item) => item.type === 'body-request' || item.type === 'ws-export-request')).toEqual([]);
+  });
+
+  test('accepts an exact 256 Ki-unit chunk and retains independent HAR size metadata', () => {
+    const pair = connect();
+    const { done, message } = request(pair);
+    const entry = makeLargeEntry();
+    const serialized = JSON.stringify(entry);
+    expect(serialized.length).toBeGreaterThan(256 * 1024);
+    for (let offset = 0; offset < serialized.length; offset += 256 * 1024) {
+      pair.viewer.handleMessage(result(message, serialized.slice(offset, offset + 256 * 1024), { offset, total: serialized.length }));
+    }
+    expect(done).toHaveBeenCalledWith(null, entry);
+    const response = done.mock.calls[0][1].response;
+    expect([response.bodySize, response.content.size, response.content.compression]).toEqual([120, 900, 780]);
+  });
+
+  test.each([false, undefined])('a host with only legacy frame export fails immediately: atomic capability %s', (capability) => {
+    const pair = connect(capability === undefined ? false : capability);
+    if (capability === undefined) {
+      pair.viewer.handleMessage({ type: 'snapshot-start', generation: 2, session: 'host-atomic', total: 0, webSocketExport: true });
+      pair.viewer.handleMessage({ type: 'snapshot-end', generation: 2 });
+    }
+    const { done } = request(pair);
+    fail(done);
+    expect(pair.sent).toEqual([]);
+  });
+
+  test('a row from a stale session fails before sending a request', () => {
+    const pair = connect();
+    const { done } = request(pair, true, 2, 'old-host');
+    fail(done);
+    expect(pair.sent).toEqual([]);
+  });
+
+  test('foreign identity and unknown request replies cannot settle the current snapshot', () => {
+    const pair = connect();
+    const { done, message } = request(pair);
+    const data = JSON.stringify(makeEntry());
+    for (const identity of [{ viewer: 'other' }, { viewer: undefined }, { requestId: message.requestId + 1 }, { rowId: 8 }, { session: 'other' }]) {
+      pair.viewer.handleMessage(result(message, data, identity));
+    }
+    expect(done).not.toHaveBeenCalled();
+    pair.viewer.handleMessage(result(message, data));
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done.mock.calls[0][0]).toBeNull();
+  });
+
+  test.each([
+    ['host failure', { ok: false }],
+    ['missing success flag', { ok: undefined }],
+    ['stale revision', { revision: 1 }],
+    ['missing revision', { revision: undefined }],
+    ['fractional revision', { revision: 4.5 }],
+    ['unsafe revision', { revision: Number.MAX_SAFE_INTEGER + 1 }],
+    ['negative offset', { offset: -1 }],
+    ['nonzero first offset', { offset: 1 }],
+    ['fractional total', { total: 1.5 }],
+    ['zero total', { total: 0 }],
+    ['excess total', { total: 16 * 1024 * 1024 + 1 }],
+    ['non-string chunk', { data: { private: 'payload' } }],
+    ['empty chunk', { data: '' }],
+    ['short nonfinal chunk', { total: 256 * 1024 + 1 }],
+    ['excess chunk', { data: 'x'.repeat(256 * 1024 + 1), total: 256 * 1024 + 1 }],
+    ['chunk overruns total', { total: 1 }],
+  ])('rejects malformed snapshot transport: %s', (_label, overrides) => {
+    const pair = connect();
+    const { done, message } = request(pair);
+    pair.viewer.handleMessage(result(message, JSON.stringify(makeEntry()), overrides));
+    fail(done);
+    pair.viewer.handleMessage(result(message, JSON.stringify(makeEntry())));
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['offset', 'total', 'revision'])('rejects a later chunk that changes %s', (field) => {
+    const pair = connect();
+    const { done, message } = request(pair);
+    const data = JSON.stringify(makeLargeEntry());
+    const split = 256 * 1024;
+    pair.viewer.handleMessage(result(message, data.slice(0, split), { total: data.length }));
+    expect(done).not.toHaveBeenCalled();
+    const drift = { offset: 0, total: data.length + 1, revision: 5 };
+    pair.viewer.handleMessage(result(message, data.slice(split), { offset: split, total: data.length, [field]: drift[field] }));
+    fail(done);
+  });
+
+  test.each(['not JSON', 'null', '[]', '{}', '{"request":{},"response":null}'])('rejects a complete invalid HAR entry: %s', (data) => {
+    const pair = connect();
+    const { done, message } = request(pair);
+    pair.viewer.handleMessage(result(message, data));
+    fail(done);
+  });
+
+  test('metadata-only snapshot accepts omitted and genuinely empty body states', () => {
+    for (const empty of [false, true]) {
+      const pair = connect();
+      const { done, message } = request(pair, false);
+      expect(message.includeBodies).toBe(false);
+      const entry = np.sanitizeHar(np.buildHarLogFromRows([makeRow()])).log.entries[0];
+      if (empty) {
+        entry.request.postData.text = '';
+        entry.response.content.text = '';
+      }
+      pair.viewer.handleMessage(result(message, JSON.stringify(entry)));
+      expect(done).toHaveBeenCalledWith(null, entry);
+    }
+  });
+
+  test.each(['request text', 'request params', 'response text', 'frames'])('metadata-only snapshot rejects raw %s', (field) => {
+    const pair = connect();
+    const { done, message } = request(pair, false);
+    const entry = np.sanitizeHar(np.buildHarLogFromRows([makeRow()])).log.entries[0];
+    if (field === 'request text') entry.request.postData.text = 'private-transcript';
+    if (field === 'request params') entry.request.postData.params = [{ name: 'private', value: 'payload' }];
+    if (field === 'response text') entry.response.content.text = 'private-transcript';
+    if (field === 'frames') entry._webSocketMessages = [{ type: 'receive', time: 1, opcode: 1, data: 'private-frame' }];
+    pair.viewer.handleMessage(result(message, JSON.stringify(entry)));
+    fail(done);
+  });
+
+  test.each(['disconnect', 'replacement', 'timeout'])('%s fails once and rejects late snapshot completion', (kind) => {
+    jest.useFakeTimers();
+    try {
+      const pair = connect();
+      const { done, message } = request(pair);
+      const data = JSON.stringify(makeLargeEntry());
+      const split = 256 * 1024;
+      pair.viewer.handleMessage(result(message, data.slice(0, split), { total: data.length }));
+      if (kind === 'disconnect') pair.viewer.failPendingBodyRequests('Disconnected.');
+      if (kind === 'replacement') {
+        pair.viewer.handleMessage({ type: 'snapshot-start', generation: 2, session: 'host-new', total: 0, streamHarExport: true });
+        pair.viewer.handleMessage({ type: 'snapshot-end', generation: 2 });
+      }
+      if (kind === 'timeout') jest.runOnlyPendingTimers();
+      fail(done);
+      pair.viewer.handleMessage(result(message, data.slice(split), { offset: split, total: data.length }));
+      expect(done).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each(['WS', 'SSE'])('host emits a body-free %s snapshot with canonical size metadata', (method) => {
+    const row = makeRow(method);
+    row.url += '?token=private-query-secret';
+    row.requestHeaders = [{ name: 'Authorization', value: 'Bearer private-authorization-secret' }];
+    row.requestPostData.params = [{ name: 'private-param', value: 'private-value' }];
+    const sent = [];
+    const fetchBodyForRow = jest.fn();
+    const host = np.createMirrorHostSession({ postMessage: (message) => sent.push(message), getRows: () => [row], isPaused: () => false, fetchBodyForRow });
+    host.sendSnapshot();
+    const start = sent.find((message) => message.type === 'snapshot-start');
+    expect(start.streamHarExport).toBe(true);
+    host.handleMessage({ type: 'stream-har-request', rowId: 7, session: start.session, viewer: 'proof-viewer', requestId: 9, minimumRevision: 4, includeBodies: false });
+    const chunks = sent.filter((message) => message.type === 'stream-har-result');
+    expect(chunks.length).toBeGreaterThan(0);
+    const entry = JSON.parse(chunks.map((chunk) => chunk.data).join(''));
+    expect(JSON.stringify(entry)).not.toContain('private-');
+    expect(new URL(entry.request.url).searchParams.get('token')).toBe(np.REDACTION_MARKER);
+    expect(entry.request.queryString).toContainEqual({ name: 'token', value: np.REDACTION_MARKER });
+    expect(entry.request.headers).toEqual([{ name: 'Authorization', value: np.REDACTION_MARKER }]);
+    expect(entry.request.postData.params).toBeUndefined();
+    expect(entry.request.postData.text).toBe(np.OMISSION_MARKER);
+    expect([undefined, '']).toContain(entry.response.content.text);
+    expect(entry._webSocketMessages).toBeUndefined();
+    expect([entry.response.bodySize, entry.response.content.size, entry.response.content.compression]).toEqual([120, 900, 780]);
+    expect(chunks.every((chunk) => chunk.revision === 4 && chunk.ok === true)).toBe(true);
+    expect(fetchBodyForRow).not.toHaveBeenCalled();
+  });
+
+  test.each(['WS', 'SSE'])('linked host and viewer export one complete %s entry on demand', (method) => {
+    const row = makeRow(method);
+    const expected = np.buildHarLogFromRows([row]).log.entries[0];
+    const sent = [];
+    const fetchBodyForRow = jest.fn();
+    let host;
+    const viewer = np.createMirrorViewerSession({
+      postMessage: (message) => { sent.push(message); host.handleMessage(message); },
+      appendWireRow: () => {}, applyWireSnapshot: () => {},
+      getLocalCount: () => 1, getLocalMaxId: () => 7,
+    });
+    host = np.createMirrorHostSession({
+      postMessage: (message) => { sent.push(message); viewer.handleMessage(message); },
+      getRows: () => [row], isPaused: () => false, fetchBodyForRow,
+    });
+    host.sendSnapshot();
+    expect(sent.some((message) => message.type === 'stream-har-result')).toBe(false);
+    const session = sent.find((message) => message.type === 'snapshot-start').session;
+    const done = jest.fn();
+    viewer.requestStreamHar(7, session, 4, true, done);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledWith(null, expected);
+    expect(sent.filter((message) => message.type === 'stream-har-request')).toHaveLength(1);
+    expect(sent.some((message) => message.type === 'body-request' || message.type === 'ws-export-request')).toBe(false);
+    expect(fetchBodyForRow).not.toHaveBeenCalled();
+  });
+
+  test('host chunks retain one frozen entry even if the source mutates during delivery', () => {
+    const row = makeRow();
+    row._wsFrames = Array.from({ length: 350 }, (_unused, index) => ({ type: 'receive', time: index, binary: false, data: 'x'.repeat(1024) }));
+    const expected = np.buildHarLogFromRows([row]).log.entries[0];
+    const sent = [];
+    const host = np.createMirrorHostSession({
+      postMessage: (message) => {
+        sent.push(message);
+        if (message.type === 'stream-har-result' && message.offset === 0) {
+          row._streamRevision = 5; row.statusText = 'Closed'; row.requestPostData.text = 'newer-request';
+          row.responseContent = 'newer-response'; row.responseContentSize = 999;
+          row._wsFrames[349].data = 'newer-frame';
+        }
+      },
+      getRows: () => [row], isPaused: () => false,
+    });
+    host.sendSnapshot();
+    const session = sent.find((message) => message.type === 'snapshot-start').session;
+    host.handleMessage({ type: 'stream-har-request', rowId: 7, session, viewer: 'proof-viewer', requestId: 9, minimumRevision: 4, includeBodies: true });
+    const chunks = sent.filter((message) => message.type === 'stream-har-result');
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.data.length <= 256 * 1024 && chunk.revision === 4)).toBe(true);
+    expect(JSON.parse(chunks.map((chunk) => chunk.data).join(''))).toEqual(expected);
+  });
+
+  test.each(['stale revision', 'not live'])('host refuses %s without returning a partial entry', (kind) => {
+    const row = makeRow();
+    if (kind === 'not live') delete row._wsSocketId;
+    const sent = [];
+    const host = np.createMirrorHostSession({ postMessage: (message) => sent.push(message), getRows: () => [row], isPaused: () => false });
+    host.sendSnapshot();
+    const session = sent.find((message) => message.type === 'snapshot-start').session;
+    host.handleMessage({ type: 'stream-har-request', rowId: 7, session, viewer: 'proof-viewer', requestId: 9, minimumRevision: kind === 'stale revision' ? 5 : 4, includeBodies: true });
+    const replies = sent.filter((message) => message.type === 'stream-har-result');
+    expect(replies).toHaveLength(1);
+    expect(replies[0].ok).toBe(false);
+    expect(replies[0].data).toBeUndefined();
+  });
+});
+
 describe('mirror remote control (command channel + import transfer)', () => {
   const link = (options) => {
     const executed = [];

@@ -2480,22 +2480,22 @@ const _NetworkPlus = (function () {
     return match ? String(match.value || '') : '';
   }
 
-  const WEB_SOCKET_BODY_OMISSION_REASON = 'WebSocket transcripts are available only in confirmed full output.';
+  const STREAM_BODY_OMISSION_REASON = 'Stream transcripts are available only in confirmed full output.';
 
-  function sanitizeRequestPostData(postData, requestHeaders, options, omitWebSocketBody) {
+  function sanitizeRequestPostData(postData, requestHeaders, options, omitStreamBody) {
     if (!postData || typeof postData !== 'object') {
       return { value: null, summary: createSanitizationSummary() };
     }
     const mimeType = postData.mimeType || getHeaderContentType(requestHeaders);
-    const body = omitWebSocketBody && (postData.text || Array.isArray(postData.params))
-      ? omittedBody(WEB_SOCKET_BODY_OMISSION_REASON, false)
+    const body = omitStreamBody && (postData.text || Array.isArray(postData.params))
+      ? omittedBody(STREAM_BODY_OMISSION_REASON, false)
       : sanitizeBody(postData.text, mimeType, postData.encoding, options);
     let summary = body.summary;
     const value = { mimeType: String(mimeType || '') };
     if (body.omitted || !Array.isArray(postData.params) || Object.prototype.hasOwnProperty.call(postData, 'text')) {
       value.text = body.text;
     }
-    if (!omitWebSocketBody && Array.isArray(postData.params)) {
+    if (!omitStreamBody && Array.isArray(postData.params)) {
       const params = sanitizeNamedValues(postData.params);
       value.params = params.value;
       summary = mergeSanitizationSummaries(summary, params.summary);
@@ -2504,7 +2504,7 @@ const _NetworkPlus = (function () {
     return { value, summary };
   }
 
-  function sanitizeResponseContent(content, responseHeaders, options, omitWebSocketBody) {
+  function sanitizeResponseContent(content, responseHeaders, options, omitStreamBody) {
     const source = content && typeof content === 'object' ? content : {};
     const mimeType = source.mimeType || getHeaderContentType(responseHeaders);
     const value = {
@@ -2512,8 +2512,8 @@ const _NetworkPlus = (function () {
       mimeType: String(mimeType || 'application/octet-stream'),
     };
     if (Number.isFinite(source.compression)) value.compression = source.compression;
-    if (omitWebSocketBody && source.text !== '') {
-      const body = omittedBody(WEB_SOCKET_BODY_OMISSION_REASON, false);
+    if (omitStreamBody && source.text !== '') {
+      const body = omittedBody(STREAM_BODY_OMISSION_REASON, false);
       value._networkPlus = { status: 'omitted', reason: body.reason };
       return { value, summary: body.summary };
     }
@@ -2815,10 +2815,11 @@ const _NetworkPlus = (function () {
         const webSocketFramesOmitted = Array.isArray(entry._webSocketMessages)
           ? entry._webSocketMessages.length
           : entry._networkPlus?.webSocketFramesOmitted;
-        const omitWebSocketBody = isWebSocketRequest(request.method, request.url, response.status, response.headers) ||
+        const omitStreamBody = request.method === 'SSE' ||
+          isWebSocketRequest(request.method, request.url, response.status, response.headers) ||
           webSocketFramesOmitted > 0 ||
           entry._networkPlus?.webSocketExport?.mirrorFramesUnavailable === true;
-        const content = sanitizeResponseContent(response.content, response.headers, options, omitWebSocketBody);
+        const content = sanitizeResponseContent(response.content, response.headers, options, omitStreamBody);
         summary = mergeSanitizationSummaries(
           summary,
           url.summary,
@@ -2841,7 +2842,7 @@ const _NetworkPlus = (function () {
           bodySize: Number.isFinite(request.bodySize) ? request.bodySize : -1,
         };
         if (request.postData && typeof request.postData === 'object') {
-          const postData = sanitizeRequestPostData(request.postData, request.headers, options, omitWebSocketBody);
+          const postData = sanitizeRequestPostData(request.postData, request.headers, options, omitStreamBody);
           sanitizedRequest.postData = postData.value;
           summary = mergeSanitizationSummaries(summary, postData.summary);
         }
@@ -8219,6 +8220,10 @@ const _NetworkPlus = (function () {
       en: 'Exported full HAR for {count} selected requests after one-time confirmation.',
       ja: '一度きりの確認のうえ、選択した {count} 件のリクエストを完全 HAR としてエクスポートしました。',
     },
+    statusHarStreamSnapshotsOmitted: {
+      en: 'Stream data was omitted for {count} requests because a consistent snapshot was unavailable.',
+      ja: '同じ時点のデータを取得できなかったため、{count} 件のストリームデータを省略しました。',
+    },
     statusPanelLoaded: {
       en: 'panel.js loaded',
       ja: 'panel.js を読み込みました',
@@ -9625,6 +9630,12 @@ const _NetworkPlus = (function () {
   // Even with JSON escaping, a chunk of previews stays below the snapshot
   // message budget. The host's existing per-conversation frame cap still applies.
   const MIRROR_WS_EXPORT_CHUNK_SIZE = 64;
+  // Escaping a 256 KiB slice again for Runtime.Port stays below the 2 MiB
+  // snapshot message budget. The aggregate covers the existing transcript and
+  // frame caps even when their previews require six-character JSON escapes.
+  const MIRROR_STREAM_HAR_CHUNK_CHARS = 256 * 1024;
+  const MIRROR_STREAM_HAR_TOTAL_CHARS = 16 * 1024 * 1024;
+  const STREAM_HAR_UNAVAILABLE_REASON = 'A consistent stream snapshot is unavailable from the DevTools session.';
 
   function isWebSocketRequest(method, url, status, responseHeaders) {
     return method === 'WS' || /^wss?:/i.test(url) ||
@@ -10070,6 +10081,7 @@ const _NetworkPlus = (function () {
         total: rows.length,
         protocolVersion: MIRROR_PROTOCOL_VERSION,
         webSocketExport: true,
+        streamHarExport: true,
       });
       let chunk = [];
       let chunkChars = 0;
@@ -10128,6 +10140,40 @@ const _NetworkPlus = (function () {
         postMessage({ ...result, offset, frames: chunk, complete: offset + chunk.length === frames.length });
       }
     };
+    const sendStreamHar = ({ requestId, viewer, rowId, session, minimumRevision, includeBodies }) => {
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer ||
+          !Number.isSafeInteger(requestId) || !Number.isSafeInteger(rowId) ||
+          !Number.isSafeInteger(minimumRevision) || minimumRevision < 0 || typeof includeBodies !== 'boolean') return;
+      const result = { type: 'stream-har-result', requestId, viewer, rowId, session };
+      const row = getRows().find((candidate) => candidate.id === rowId && isLiveStreamRow(candidate));
+      const revision = row?._streamRevision || 0;
+      if (!row || revision < minimumRevision) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      // Serialize on the same turn as the row lookup. Later drains can
+      // update the row while the viewer receives this immutable entry.
+      const entry = buildStreamHarEntry(row, includeBodies);
+      if (!includeBodies) {
+        // The viewer applies the usual HAR sanitizer at download time.
+        // Exclude secrets from the snapshot transport itself as well.
+        entry.request.url = sanitizeUrl(entry.request.url).value;
+        entry.request.headers = sanitizeHeaders(entry.request.headers).value;
+        entry.request.queryString = sanitizeNamedValues(entry.request.queryString).value;
+        entry.response.headers = sanitizeHeaders(entry.response.headers).value;
+      }
+      const snapshot = JSON.stringify(entry);
+      if (snapshot.length > MIRROR_STREAM_HAR_TOTAL_CHARS) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      for (let offset = 0; offset < snapshot.length; offset += MIRROR_STREAM_HAR_CHUNK_CHARS) {
+        postMessage({
+          ...result, ok: true, revision, offset, total: snapshot.length,
+          data: snapshot.slice(offset, offset + MIRROR_STREAM_HAR_CHUNK_CHARS),
+        });
+      }
+    };
     const handleMessage = (message) => {
       if (!message || typeof message !== 'object') return;
       if (message.type === 'hello' || message.type === 'snapshot-request') {
@@ -10164,6 +10210,10 @@ const _NetworkPlus = (function () {
       }
       if (message.type === 'ws-export-request') {
         sendWebSocketExport(message);
+        return;
+      }
+      if (message.type === 'stream-har-request') {
+        sendStreamHar(message);
         return;
       }
       if (message.type === 'command') {
@@ -10349,6 +10399,7 @@ const _NetworkPlus = (function () {
     // reconciled.
     let hostSessionToken = null;
     let webSocketExportSupported = false;
+    let streamHarExportSupported = false;
     const settleExport = (requestId, error, payload = null) => {
       const pending = pendingExportCallbacks.get(requestId);
       if (!pending) return;
@@ -10361,11 +10412,13 @@ const _NetworkPlus = (function () {
       // Same discipline commands got: a host that drops the result must not
       // park this entry (and its closure) in the map until disconnect.
       const pending = { type, rowId, callback, ...options };
+      const timeoutReason = {
+        'body-request': 'The DevTools session did not answer the body request in time.',
+        'ws-export-request': 'The DevTools session did not answer the WebSocket export request in time.',
+        'stream-har-request': STREAM_HAR_UNAVAILABLE_REASON,
+      }[type];
       pending.timer = setTimeout(() => settleExport(
-        requestId,
-        new Error(type === 'body-request'
-          ? 'The DevTools session did not answer the body request in time.'
-          : 'The DevTools session did not answer the WebSocket export request in time.'),
+        requestId, new Error(timeoutReason),
       ), RESPONSE_CONTENT_TIMEOUT_MS);
       pendingExportCallbacks.set(requestId, pending);
       if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
@@ -10384,6 +10437,44 @@ const _NetworkPlus = (function () {
         return;
       }
       requestExport('ws-export-request', rowId, callback, { session, includeFrames });
+    };
+    const requestStreamHar = (rowId, session, minimumRevision, includeBodies, callback) => {
+      if (!streamHarExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
+        callback(new Error(STREAM_HAR_UNAVAILABLE_REASON), null);
+        return;
+      }
+      requestExport('stream-har-request', rowId, callback, { session, minimumRevision, includeBodies });
+    };
+    const receiveStreamHar = (message) => {
+      const { requestId, rowId, session, revision, offset, total, data } = message;
+      const pending = pendingExportCallbacks.get(requestId);
+      if (pending?.type !== 'stream-har-request' || rowId !== pending.rowId ||
+          session !== pending.session || message.viewer !== viewerNonce) return;
+      const fail = () => settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
+      if (message.ok !== true || !Number.isSafeInteger(revision) || revision < pending.minimumRevision ||
+          !Number.isSafeInteger(total) || total <= 0 || total > MIRROR_STREAM_HAR_TOTAL_CHARS ||
+          offset !== (pending.received || 0) || offset >= total ||
+          typeof data !== 'string' || data.length !== Math.min(MIRROR_STREAM_HAR_CHUNK_CHARS, total - offset)) {
+        fail();
+        return;
+      }
+      if (!pending.chunks) Object.assign(pending, { revision, total, chunks: [] });
+      if (pending.revision !== revision || pending.total !== total) {
+        fail();
+        return;
+      }
+      pending.chunks.push(data);
+      pending.received = offset + data.length;
+      if (pending.received < total) return;
+      let entry;
+      try {
+        entry = JSON.parse(pending.chunks.join(''));
+      } catch (_error) {
+        fail();
+        return;
+      }
+      if (!isStreamHarEntry(entry, pending.includeBodies)) fail();
+      else settleExport(requestId, null, entry);
     };
     const receiveWebSocketExport = (message) => {
       const { requestId, rowId, session, count, droppedFrames, binaryFramesWithoutPayload, offset, frames, complete } = message;
@@ -10534,12 +10625,14 @@ const _NetworkPlus = (function () {
             sessionChanged,
             session,
             webSocketExport: message.webSocketExport === true,
+            streamHarExport: message.streamHarExport === true,
           };
-          if (sessionChanged || !message.webSocketExport) {
-            for (const [requestId, pending] of pendingExportCallbacks) {
-              if (pending.type === 'ws-export-request') {
-                settleExport(requestId, new Error('The DevTools session changed during the WebSocket export.'));
-              }
+          for (const [requestId, pending] of pendingExportCallbacks) {
+            if (pending.type === 'ws-export-request' && (sessionChanged || !pendingSnapshot.webSocketExport)) {
+              settleExport(requestId, new Error('The DevTools session changed during the WebSocket export.'));
+            }
+            if (pending.type === 'stream-har-request' && (sessionChanged || !pendingSnapshot.streamHarExport)) {
+              settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
             }
           }
           break;
@@ -10561,6 +10654,7 @@ const _NetworkPlus = (function () {
             pendingSnapshot = null;
             hostSessionToken = snapshot.session;
             webSocketExportSupported = snapshot.webSocketExport && Boolean(snapshot.session);
+            streamHarExportSupported = snapshot.streamHarExport && Boolean(snapshot.session);
             applyWireSnapshot(snapshot.rows, { sessionChanged: snapshot.sessionChanged, session: snapshot.session });
           }
           break;
@@ -10599,6 +10693,10 @@ const _NetworkPlus = (function () {
           receiveWebSocketExport(message);
           break;
         }
+        case 'stream-har-result': {
+          receiveStreamHar(message);
+          break;
+        }
         case 'import-ack': {
           if (resultIsForAnotherViewer(message)) return;
           const pending = pendingCommandCallbacks.get(message.commandId);
@@ -10618,6 +10716,7 @@ const _NetworkPlus = (function () {
     const failPendingBodyRequests = (reason) => {
       pendingSnapshot = null;
       webSocketExportSupported = false;
+      streamHarExportSupported = false;
       const failures = Array.from(pendingExportCallbacks.values());
       pendingExportCallbacks.clear();
       for (const pending of failures) {
@@ -10631,7 +10730,10 @@ const _NetworkPlus = (function () {
         pending.callback(new Error(reason));
       }
     };
-    return { handleMessage, requestBody, requestWebSocketExport, sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests };
+    return {
+      handleMessage, requestBody, requestWebSocketExport, requestStreamHar,
+      sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests,
+    };
   }
 
   function fetchResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
@@ -17556,10 +17658,14 @@ const _NetworkPlus = (function () {
     return planSelectedExportRows(state.rows, state.selectedRows, state.selectedRow);
   }
 
-  function buildHarLogFromRows(rows, responseContents, webSocketExports) {
+  function buildHarLogFromRows(rows, responseContents, webSocketExports, streamEntries) {
     const pageref = 'page_1';
     const entries = [];
     for (const r of rows) {
+      if (streamEntries?.has(r)) {
+        entries.push(streamEntries.get(r));
+        continue;
+      }
       const started = r.startedDateTime || new Date().toISOString();
       const url = r.url || '';
       const httpVersion = r.protocol || 'HTTP/2';
@@ -17638,6 +17744,56 @@ const _NetworkPlus = (function () {
     };
   }
 
+  function buildStreamHarEntry(row, includeBodies) {
+    if (includeBodies) return buildHarLogFromRows([row]).log.entries[0];
+    // Only placeholders and counts enter a sanitized snapshot. Keep the
+    // recorded sizes, even though the transcripts themselves are omitted.
+    const postData = row.requestPostData;
+    const snapshot = {
+      ...row,
+      requestPostData: postData ? {
+        mimeType: postData.mimeType,
+        text: postData.text || Array.isArray(postData.params) ? OMISSION_MARKER : '',
+      } : null,
+      responseContent: row.responseContent === '' ? '' : null,
+      responseContentEncoding: '',
+      _wsFrames: null,
+    };
+    const counts = describeWebSocketExport(row);
+    return buildHarLogFromRows([snapshot], null, new Map([[snapshot, counts]])).log.entries[0];
+  }
+
+  function isStreamHarEntry(entry, includeBodies) {
+    if (!isRecord(entry) || !isRecord(entry.request) || !isRecord(entry.response?.content) ||
+        !['WS', 'SSE'].includes(entry.request.method) || typeof entry.request.url !== 'string' ||
+        !Number.isFinite(entry.request.bodySize) || !Number.isFinite(entry.response.bodySize) ||
+        !Number.isFinite(entry.response.content.size)) return false;
+    const frames = entry._webSocketMessages;
+    if (frames !== undefined &&
+        (!includeBodies || entry.request.method !== 'WS' || !Array.isArray(frames) ||
+          frames.length > HAR_WS_MESSAGE_IMPORT_LIMIT || !frames.every(isBoundedHarWebSocketMessage))) return false;
+    if (includeBodies) return true;
+    const postData = entry.request.postData;
+    const responseText = entry.response.content.text;
+    return (responseText === undefined || responseText === '') &&
+      (postData === undefined || (isRecord(postData) && postData.params === undefined &&
+        (postData.text === OMISSION_MARKER || postData.text === '')));
+  }
+
+  function buildUnavailableStreamHarEntry(row) {
+    const snapshot = {
+      ...row,
+      requestPostData: null,
+      responseContent: null,
+      responseContentState: 'unavailable',
+      responseContentReason: STREAM_HAR_UNAVAILABLE_REASON,
+    };
+    const entry = buildHarLogFromRows([snapshot]).log.entries[0];
+    entry._networkPlus = { streamHarExport: { snapshotUnavailable: true } };
+    if (row.method === 'WS') entry._networkPlus.webSocketExport = { mirrorFramesUnavailable: true };
+    return entry;
+  }
+
   // CSV is a sanitized-only, metadata-only view for spreadsheet triage
   // (pivot by domain, histogram durations). Headers and bodies never join
   // it; the full HAR stays the only complete-output path.
@@ -17687,6 +17843,13 @@ const _NetworkPlus = (function () {
       const responseContents = new Map();
       const webSocketExports = new Map();
       const includeWebSocketFrames = outboundPolicy.mode === 'full';
+      const streamEntries = new Map();
+      let unavailableStreamCount = 0;
+      // Local streams need no I/O. Take their snapshots before waiting for
+      // other entries so later drains cannot change their export data.
+      for (const row of rows) {
+        if (isLiveStreamRow(row)) streamEntries.set(row, buildStreamHarEntry(row, includeWebSocketFrames));
+      }
       let unavailableCount = 0;
       // Bodies resolve with small bounded concurrency: a serial walk turns
       // thousands of uncached DevTools round-trips (10 s timeout each)
@@ -17697,6 +17860,18 @@ const _NetworkPlus = (function () {
         Array.from({ length: Math.min(HAR_EXPORT_BODY_CONCURRENCY, pendingRows.length) }, async () => {
           while (pendingRows.length > 0) {
             const row = pendingRows.shift();
+            if (streamEntries.has(row)) continue;
+            if (row._mirrorFetchStreamHar) {
+              const fallback = buildUnavailableStreamHarEntry(row);
+              try {
+                const entry = await row._mirrorFetchStreamHar(row._mirrorStreamRevision || 0, includeWebSocketFrames);
+                streamEntries.set(row, entry);
+              } catch (_error) {
+                streamEntries.set(row, fallback);
+                unavailableStreamCount += 1;
+              }
+              continue;
+            }
             // A sanitized mirror export needs only the count. Fetching the
             // response as usual would also pull the raw transcript over the port.
             const omitMirrorTranscript = !includeWebSocketFrames && Boolean(row._mirrorFetchWebSocketExport);
@@ -17710,7 +17885,7 @@ const _NetworkPlus = (function () {
           }
         }),
       );
-      const fullHar = buildHarLogFromRows(rows, responseContents, webSocketExports);
+      const fullHar = buildHarLogFromRows(rows, responseContents, webSocketExports, streamEntries);
       const har = createOutboundPayload(
         outboundPolicy,
         () => sanitizeHar(fullHar),
@@ -17731,11 +17906,14 @@ const _NetworkPlus = (function () {
           ? 'network-plus-full' + scopeSuffix + '.har'
           : 'network-plus-sanitized' + scopeSuffix + '.har',
       );
+      const streamStatus = unavailableStreamCount > 0
+        ? ' ' + uiTextFormat('statusHarStreamSnapshotsOmitted', { count: unavailableStreamCount })
+        : '';
       if (outboundPolicy.mode === 'full') {
         setStatus(
           uiTextFormat(exportScope === 'selected' ? 'statusExportedFullHarSelected' : 'statusExportedFullHar', {
             count: rows.length,
-          }),
+          }) + streamStatus,
         );
       } else {
         const counts = har.log._networkPlus.counts;
@@ -17749,7 +17927,7 @@ const _NetworkPlus = (function () {
             counts.omittedBodies +
             ' bodies omitted' +
             (unavailableCount > 0 ? ', ' + unavailableCount + ' source bodies unavailable' : '') +
-            '.',
+            '.' + streamStatus,
         );
       }
     } catch (error) {
@@ -20920,6 +21098,17 @@ const _NetworkPlus = (function () {
           new Promise((resolve, reject) => {
             viewerSession.requestBody(row.id, (error, payload) => (error ? reject(error) : resolve(payload)));
           });
+        // Older hosts had no revision on live rows. They still distinguished
+        // a capture with no observed HTTP status from a normalized HAR import.
+        if (row._mirrorStreamRevision != null ||
+            (wireRow.response?.status === '' && (row.method === 'WS' || row.method === 'SSE'))) {
+          row._mirrorFetchStreamHar = (minimumRevision, includeBodies) => new Promise((resolve, reject) => {
+            viewerSession.requestStreamHar(
+              row.id, session, minimumRevision, includeBodies,
+              (error, entry) => (error ? reject(error) : resolve(entry)),
+            );
+          });
+        }
         if (wireRow.webSocket === true || isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders)) {
           row._mirrorFetchWebSocketExport = (includeFrames) => new Promise((resolve, reject) => {
             viewerSession.requestWebSocketExport(
