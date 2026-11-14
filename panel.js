@@ -41,6 +41,7 @@ const _NetworkPlus = (function () {
   // Cap on in-pane (detail view) search hits so pathological bodies stay responsive.
   const PANE_SEARCH_MAX_HITS = 1500;
   const LIVE_COMMIT_MAX_WAIT_MS = 250;
+  const LIVE_RENDER_MAX_WAIT_MS = 300;
   const LIVE_PENDING_HIGH_WATER_MARK = 5000;
   const RESPONSE_CONTENT_TIMEOUT_MS = 10000;
   // Foreground details and HAR work bypass these slots, so the total can be 4 plus distinct foreground operations.
@@ -600,27 +601,34 @@ const _NetworkPlus = (function () {
 
   function initializeDataSafetyDialog() {
     const dialog = $('#dataSafetyDialog');
-    $('#dataSafetyCancelBtn').addEventListener('click', () => dialog.close('cancel'));
-    dialog.addEventListener('cancel', () => {
-      pendingFullOutboundAction = null;
-    });
-    dialog.addEventListener('click', (event) => {
-      if (event.target === dialog) dialog.close('backdrop');
-    });
-    dialog.addEventListener('close', () => {
+    const finishClose = () => {
+      if (dialog.open) return;
       pendingFullOutboundAction = null;
       const trigger = dataSafetyDialogTrigger;
       dataSafetyDialogTrigger = null;
       if (trigger && trigger.focus && trigger.isConnected !== false) trigger.focus();
+    };
+    const closeDialog = (reason) => {
+      dialog.close(reason);
+      finishClose();
+    };
+    $('#dataSafetyCancelBtn').addEventListener('click', () => closeDialog('cancel'));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeDialog('cancel');
     });
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) closeDialog('backdrop');
+    });
+    dialog.addEventListener('close', finishClose);
     $('#dataSafetySanitizedBtn').addEventListener('click', () => {
       const scope = readExportScopeChoice();
-      dialog.close('sanitized');
+      closeDialog('sanitized');
       exportHAR({ mode: 'sanitized', scope });
     });
     $('#dataSafetyCsvBtn').addEventListener('click', () => {
       const scope = readExportScopeChoice();
-      dialog.close('csv');
+      closeDialog('csv');
       exportCsv(scope);
     });
     $('#dataSafetyFullBtn').addEventListener('click', () => {
@@ -639,7 +647,7 @@ const _NetworkPlus = (function () {
       const action = pendingFullOutboundAction;
       pendingFullOutboundAction = null;
       $('#dataSafetyConfirmBtn').disabled = true;
-      dialog.close('confirmed');
+      closeDialog('confirmed');
       if (!action) return;
       Promise.resolve()
         .then(() => action())
@@ -2480,15 +2488,22 @@ const _NetworkPlus = (function () {
     return match ? String(match.value || '') : '';
   }
 
-  function sanitizeRequestPostData(postData, requestHeaders, options) {
+  const STREAM_BODY_OMISSION_REASON = 'Stream transcripts are available only in confirmed full output.';
+
+  function sanitizeRequestPostData(postData, requestHeaders, options, omitStreamBody) {
     if (!postData || typeof postData !== 'object') {
       return { value: null, summary: createSanitizationSummary() };
     }
     const mimeType = postData.mimeType || getHeaderContentType(requestHeaders);
-    const body = sanitizeBody(postData.text, mimeType, postData.encoding, options);
+    const body = omitStreamBody && (postData.text || Array.isArray(postData.params))
+      ? omittedBody(STREAM_BODY_OMISSION_REASON, false)
+      : sanitizeBody(postData.text, mimeType, postData.encoding, options);
     let summary = body.summary;
-    const value = { mimeType: String(mimeType || ''), text: body.text };
-    if (Array.isArray(postData.params)) {
+    const value = { mimeType: String(mimeType || '') };
+    if (body.omitted || !Array.isArray(postData.params) || Object.prototype.hasOwnProperty.call(postData, 'text')) {
+      value.text = body.text;
+    }
+    if (!omitStreamBody && Array.isArray(postData.params)) {
       const params = sanitizeNamedValues(postData.params);
       value.params = params.value;
       summary = mergeSanitizationSummaries(summary, params.summary);
@@ -2497,7 +2512,7 @@ const _NetworkPlus = (function () {
     return { value, summary };
   }
 
-  function sanitizeResponseContent(content, responseHeaders, options) {
+  function sanitizeResponseContent(content, responseHeaders, options, omitStreamBody) {
     const source = content && typeof content === 'object' ? content : {};
     const mimeType = source.mimeType || getHeaderContentType(responseHeaders);
     const value = {
@@ -2505,6 +2520,11 @@ const _NetworkPlus = (function () {
       mimeType: String(mimeType || 'application/octet-stream'),
     };
     if (Number.isFinite(source.compression)) value.compression = source.compression;
+    if (omitStreamBody && source.text !== '') {
+      const body = omittedBody(STREAM_BODY_OMISSION_REASON, false);
+      value._networkPlus = { status: 'omitted', reason: body.reason };
+      return { value, summary: body.summary };
+    }
     if (typeof source.text !== 'string') {
       value._networkPlus = {
         status: 'omitted',
@@ -2800,7 +2820,14 @@ const _NetworkPlus = (function () {
         const requestCookies = sanitizeCookies(request.cookies);
         const responseCookies = sanitizeCookies(response.cookies);
         const queryString = sanitizeNamedValues(request.queryString);
-        const content = sanitizeResponseContent(response.content, response.headers, options);
+        const webSocketFramesOmitted = Array.isArray(entry._webSocketMessages)
+          ? entry._webSocketMessages.length
+          : entry._networkPlus?.webSocketFramesOmitted;
+        const omitStreamBody = request.method === 'SSE' ||
+          isWebSocketRequest(request.method, request.url, response.status, response.headers) ||
+          webSocketFramesOmitted > 0 ||
+          entry._networkPlus?.webSocketExport?.mirrorFramesUnavailable === true;
+        const content = sanitizeResponseContent(response.content, response.headers, options, omitStreamBody);
         summary = mergeSanitizationSummaries(
           summary,
           url.summary,
@@ -2823,7 +2850,7 @@ const _NetworkPlus = (function () {
           bodySize: Number.isFinite(request.bodySize) ? request.bodySize : -1,
         };
         if (request.postData && typeof request.postData === 'object') {
-          const postData = sanitizeRequestPostData(request.postData, request.headers, options);
+          const postData = sanitizeRequestPostData(request.postData, request.headers, options, omitStreamBody);
           sanitizedRequest.postData = postData.value;
           summary = mergeSanitizationSummaries(summary, postData.summary);
         }
@@ -2865,9 +2892,9 @@ const _NetworkPlus = (function () {
         // Frame payloads are body-class data: the allowlist above already
         // keeps _webSocketMessages out of sanitized output, and this marker
         // makes the omission visible in the file instead of silent.
-        if (Array.isArray(entry._webSocketMessages) && entry._webSocketMessages.length > 0) {
+        if (Number.isSafeInteger(webSocketFramesOmitted) && webSocketFramesOmitted > 0) {
           sanitizedEntry._networkPlus = Object.assign({}, sanitizedEntry._networkPlus, {
-            webSocketFramesOmitted: entry._webSocketMessages.length,
+            webSocketFramesOmitted,
           });
         }
         return sanitizedEntry;
@@ -3163,8 +3190,13 @@ const _NetworkPlus = (function () {
 
   // Byte count of a base64 payload without materialising it.
   function base64ByteLength(base64) {
-    const clean = typeof base64 === 'string' ? base64.replace(/[\r\n=]+/g, '') : '';
+    const clean = typeof base64 === 'string' ? base64.replace(/[\t\n\f\r =]+/g, '') : '';
     return Math.floor((clean.length * 3) / 4);
+  }
+
+  function getHarPayloadByteLength(payload) {
+    if (!payload || typeof payload.text !== 'string') return -1;
+    return payload.encoding === 'base64' ? base64ByteLength(payload.text) : getUtf8ByteLength(payload.text);
   }
 
   function buildHarResponseContent(row, responsePayload) {
@@ -3177,9 +3209,12 @@ const _NetworkPlus = (function () {
         : null
     );
     const content = {
-      size: row && row.size ? row.size : 0,
+      size: row && Number.isFinite(row.responseContentSize)
+        ? row.responseContentSize
+        : row && row.size ? row.size : 0,
       mimeType: guessMimeType(row || {}),
     };
+    if (row && Number.isFinite(row.responseCompression)) content.compression = row.responseCompression;
     if (payload) {
       content.text = payload.content;
       if (payload.encoding === 'base64') content.encoding = 'base64';
@@ -3407,6 +3442,37 @@ const _NetworkPlus = (function () {
       lastEnd = entry.end;
     }
     return highlights;
+  }
+
+  // A pane searches one query, so its global regex already visits disjoint
+  // matches in order. Counts need no ranges and rendering needs only a prefix.
+  function scanPaneSearchMatches(text, regex, limit, ranges) {
+    let count = 0;
+    regex.lastIndex = 0;
+    let match;
+    while (count < limit && (match = regex.exec(text)) !== null) {
+      if (match[0].length === 0) {
+        regex.lastIndex += 1;
+        continue;
+      }
+      count += 1;
+      if (ranges) ranges.push({ start: match.index, end: match.index + match[0].length });
+    }
+    regex.lastIndex = 0;
+    return count;
+  }
+
+  function planPaneSearchRanges(text, query, options, limit) {
+    const ranges = [];
+    const { regex } = compileSearchQuery(query, options);
+    // One extra match distinguishes hitting the cap from exceeding it.
+    if (regex) scanPaneSearchMatches(text, regex, limit + 1, ranges);
+    return ranges;
+  }
+
+  function countPaneSearchHits(text, query, options) {
+    const { regex } = compileSearchQuery(query, options);
+    return regex ? scanPaneSearchMatches(text, regex, Infinity) : 0;
   }
 
   // Rows to render given the matches-only toggle: with an active search and the
@@ -3993,6 +4059,28 @@ const _NetworkPlus = (function () {
     return count;
   }
 
+  function normalizeHarPostData(postData) {
+    if (!isRecord(postData)) return null;
+    const normalized = {
+      mimeType: normalizeImportString(postData.mimeType),
+      encoding: postData.encoding === 'base64' ? 'base64' : '',
+    };
+    if (Object.prototype.hasOwnProperty.call(postData, 'text')) {
+      normalized.text = normalizeImportString(postData.text);
+    }
+    if (Array.isArray(postData.params)) {
+      normalized.params = postData.params.map((param) => {
+        const source = isRecord(param) ? param : {};
+        const result = { name: normalizeImportString(source.name) };
+        for (const field of ['value', 'fileName', 'contentType', 'comment']) {
+          if (Object.prototype.hasOwnProperty.call(source, field)) result[field] = normalizeImportString(source[field]);
+        }
+        return result;
+      });
+    }
+    return normalized;
+  }
+
   function normalizeHarEntry(entry) {
     if (!isRecord(entry) || !isRecord(entry.request) || !isRecord(entry.response)) {
       throw createImportError('HAR entries must contain request and response objects.');
@@ -4000,16 +4088,12 @@ const _NetworkPlus = (function () {
     const request = entry.request;
     const response = entry.response;
     const content = isRecord(response.content) ? response.content : {};
-    const postData = isRecord(request.postData)
-      ? {
-        mimeType: normalizeImportString(request.postData.mimeType),
-        text: normalizeImportString(request.postData.text),
-        encoding: request.postData.encoding === 'base64' ? 'base64' : '',
-      }
-      : null;
+    const postData = normalizeHarPostData(request.postData);
     const normalizedContent = { mimeType: normalizeImportString(content.mimeType) };
     const contentSize = normalizeImportNumber(content.size, null);
-    if (contentSize !== null && contentSize >= 0) normalizedContent.size = contentSize;
+    if (contentSize !== null && contentSize >= -1) normalizedContent.size = contentSize;
+    const compression = normalizeImportNumber(content.compression, null);
+    if (compression !== null) normalizedContent.compression = compression;
     if (typeof content.text === 'string') normalizedContent.text = content.text;
     if (content.encoding === 'base64') normalizedContent.encoding = 'base64';
     if (isRecord(content._networkPlus)) {
@@ -5581,15 +5665,25 @@ const _NetworkPlus = (function () {
     }
   }
 
-  function queueRetentionSummary(action) {
-    const retention = state.retention;
-    queueRetentionAnnouncement(
-      action +
+  function formatRetentionSummary(action, retention, source) {
+    if (source === 'import') {
+      return uiTextFormat('importRetentionSummary', {
+        action: localizeImportRetentionAction(action),
+        evictedRequests: retention.evictedRequests,
+        omittedBodies: retention.omittedBodies,
+        evictedBodies: retention.evictedBodies,
+        truncatedBodies: retention.truncatedBodies,
+      });
+    }
+    return action +
         '. Totals: ' + retention.evictedRequests + ' requests evicted, ' +
         retention.omittedBodies + ' bodies omitted, ' +
         retention.evictedBodies + ' cached bodies evicted, and ' +
-        retention.truncatedBodies + ' previews truncated.',
-    );
+        retention.truncatedBodies + ' previews truncated.';
+  }
+
+  function queueRetentionSummary(action, source) {
+    queueRetentionAnnouncement(formatRetentionSummary(action, state.retention, source));
   }
 
   function releaseResponseContent(row, nextState, countEviction) {
@@ -5618,7 +5712,7 @@ const _NetworkPlus = (function () {
       if (!row._responseOmissionCounted) {
         row._responseOmissionCounted = true;
         state.retention.omittedBodies += 1;
-        queueRetentionSummary('Response body omitted by the 1 MiB retention limit');
+        queueRetentionSummary('Response body omitted by the 1 MiB retention limit', row._captureSource);
       }
       updateRetentionStatus();
       throw new Error('Response body omitted for request ' + row.id + ': ' + row.responseContentReason);
@@ -5635,7 +5729,7 @@ const _NetworkPlus = (function () {
       if (state.onResponseContentChanged) state.onResponseContentChanged(oldestRow);
     }
     if (evictedBodyCount > 0) {
-      queueRetentionSummary(evictedBodyCount + ' cached response bodies evicted by the 32 MiB cache limit');
+      queueRetentionSummary(evictedBodyCount + ' cached response bodies evicted by the 32 MiB cache limit', row._captureSource);
     }
     releaseResponseContent(row, 'loading', false);
     row.responseContent = payload.content;
@@ -5838,12 +5932,29 @@ const _NetworkPlus = (function () {
     return liveRows;
   }
 
+  function scheduleCaptureRender(render) {
+    let timer;
+    const frame = window.requestAnimationFrame(() => {
+      clearTimeout(timer);
+      render();
+    });
+    // Visible DevTools and mirror panels can miss frames. Hidden panels
+    // still commit retained data and repaint on their next animation frame.
+    if (!document.hidden) {
+      timer = setTimeout(() => {
+        if (document.hidden) return;
+        window.cancelAnimationFrame(frame);
+        render();
+      }, LIVE_RENDER_MAX_WAIT_MS);
+    }
+  }
+
   function recordSkippedImportRows(skippedCount) {
     if (!Number.isInteger(skippedCount) || skippedCount <= 0) return;
     state.nextId += skippedCount;
     state.retention.evictedRequests += skippedCount;
     updateRetentionStatus();
-    queueRetentionSummary(skippedCount + ' imported requests skipped by the retention limit');
+    queueRetentionSummary(skippedCount + ' imported requests skipped by the retention limit', 'import');
   }
 
   function clearStoredRows() {
@@ -8015,6 +8126,30 @@ const _NetworkPlus = (function () {
       en: 'Response Bodies',
       ja: 'レスポンスボディ',
     },
+    compareBodyEmpty: {
+      en: '(empty body)',
+      ja: '（本文は空です）',
+    },
+    compareBodyMissing: {
+      en: '(no body)',
+      ja: '（本文なし）',
+    },
+    compareBodyOmitted: {
+      en: '(body omitted — exceeded the 1 MiB per-body retention limit)',
+      ja: '（本文を省略しました。本文1件あたりの保持上限 1 MiB を超えています）',
+    },
+    compareBodyEvicted: {
+      en: '(body evicted from the 32 MiB cache — re-select the request to retry)',
+      ja: '（32 MiB のキャッシュから本文が削除されました。再取得するにはリクエストを選び直してください）',
+    },
+    compareBodyUnavailable: {
+      en: '(body not available)',
+      ja: '（本文を取得できません）',
+    },
+    compareBodyTruncated: {
+      en: '(showing {shown} of {total} chars — view full body in the detail panel)',
+      ja: '（{total} 文字のうち {shown} 文字を表示。全文は詳細パネルで確認できます）',
+    },
     // The main workbench divider announces itself in the inspector divider's
     // frame (inspectorHalfPercentValue) with its own noun, so the two
     // separators beside each other read alike in either language.
@@ -8110,6 +8245,10 @@ const _NetworkPlus = (function () {
       en: 'Exported full HAR for {count} selected requests after one-time confirmation.',
       ja: '一度きりの確認のうえ、選択した {count} 件のリクエストを完全 HAR としてエクスポートしました。',
     },
+    statusHarStreamSnapshotsOmitted: {
+      en: 'Stream data was omitted for {count} requests because a consistent snapshot was unavailable.',
+      ja: '同じ時点のデータを取得できなかったため、{count} 件のストリームデータを省略しました。',
+    },
     statusPanelLoaded: {
       en: 'panel.js loaded',
       ja: 'panel.js を読み込みました',
@@ -8149,6 +8288,14 @@ const _NetworkPlus = (function () {
     statusRecording: {
       en: 'Recording...',
       ja: '記録中...',
+    },
+    statusImportInProgress: {
+      en: 'Importing {format}...',
+      ja: '{format} をインポートしています...',
+    },
+    statusImportSummary: {
+      en: 'Imported {total} requests from {format}; retained {retained}',
+      ja: '{format} からリクエストを {total} 件読み込み、{retained} 件を保持しました。',
     },
     statusImportFinished: {
       en: 'Import finished in the DevTools session; the table resyncs momentarily.',
@@ -8245,9 +8392,193 @@ const _NetworkPlus = (function () {
       en: 'A new DevTools session connected; the table now mirrors it from the start.',
       ja: '新しい DevTools セッションに接続しました。テーブルは最初からそのセッションをミラーします。',
     },
+    importReasonUnsupportedFile: {
+      en: 'Only HAR and SAZ files are supported.',
+      ja: 'HAR ファイルと SAZ ファイルのみ対応しています。',
+    },
+    importReasonUnknownSize: {
+      en: 'Import file size is unavailable.',
+      ja: 'インポートするファイルのサイズを取得できません。',
+    },
+    importReasonSazSourceLimit: {
+      en: 'SAZ file exceeds the 32 MiB source limit.',
+      ja: 'SAZ ファイルが 32 MiB のサイズ上限を超えています。',
+    },
+    importReasonHarEntriesMissing: {
+      en: 'HAR must contain a log.entries array.',
+      ja: 'HAR には log.entries 配列が必要です。',
+    },
+    importReasonHarEntryInvalid: {
+      en: 'HAR entries must contain request and response objects.',
+      ja: 'HAR の各エントリーには request オブジェクトと response オブジェクトが必要です。',
+    },
+    importReasonHarJsonInvalid: {
+      en: 'HAR is not valid JSON.',
+      ja: 'HAR の JSON 形式が正しくありません。',
+    },
+    importReasonHarEntryTooLarge: {
+      en: 'A HAR entry is too large to parse.',
+      ja: 'HAR のエントリーが大きすぎるため解析できません。',
+    },
+    importReasonHarDuplicateLog: {
+      en: 'HAR contains duplicate log properties.',
+      ja: 'HAR に重複した log プロパティがあります。',
+    },
+    importReasonHarDuplicateEntries: {
+      en: 'HAR contains duplicate log.entries properties.',
+      ja: 'HAR に重複した log.entries プロパティがあります。',
+    },
+    importReasonBusy: {
+      en: 'Another import is already in progress.',
+      ja: '別のインポートが進行中です。',
+    },
+    importReasonSelectedFileFailed: {
+      en: 'The selected file could not be imported.',
+      ja: '選択したファイルをインポートできませんでした。',
+    },
+    importReasonSazEntryCount: {
+      en: 'SAZ archive exceeds the 20,000-entry limit.',
+      ja: 'SAZ アーカイブがエントリー数の上限 20,000 件を超えています。',
+    },
+    importReasonSazEntrySizeInvalid: {
+      en: 'SAZ entry size metadata is invalid.',
+      ja: 'SAZ エントリーのサイズ情報が正しくありません。',
+    },
+    importReasonSazEntrySizeLimit: {
+      en: 'SAZ entry exceeds the 4 MiB uncompressed limit.',
+      ja: 'SAZ エントリーが展開後のサイズ上限 4 MiB を超えています。',
+    },
+    importReasonSazTotalSizeLimit: {
+      en: 'SAZ archive exceeds the 64 MiB total uncompressed limit.',
+      ja: 'SAZ アーカイブが展開後の合計サイズ上限 64 MiB を超えています。',
+    },
+    importReasonSazDecompressionUnavailable: {
+      en: 'SAZ decompression support is unavailable.',
+      ja: 'SAZ の展開機能を利用できません。',
+    },
+    importReasonSazSourceInvalid: {
+      en: 'SAZ source data is invalid.',
+      ja: 'SAZ の元データが正しくありません。',
+    },
+    importReasonSazExtractionFailed: {
+      en: 'SAZ extraction failed.',
+      ja: 'SAZ の展開に失敗しました。',
+    },
+    importReasonSazMalformed: {
+      en: 'SAZ archive is malformed.',
+      ja: 'SAZ アーカイブの形式が正しくありません。',
+    },
+    importReasonSazCompressionUnsupported: {
+      en: 'SAZ payload uses an unsupported compression method.',
+      ja: 'SAZ のデータに未対応の圧縮方式が使われています。',
+    },
+    importReasonSazHttpInvalid: {
+      en: 'SAZ HTTP payload is invalid.',
+      ja: 'SAZ の HTTP データが正しくありません。',
+    },
+    importReasonSazStartLineMissing: {
+      en: 'SAZ HTTP start line is missing.',
+      ja: 'SAZ の HTTP 開始行がありません。',
+    },
+    importReasonSazRequestLineInvalid: {
+      en: 'SAZ request start line is invalid.',
+      ja: 'SAZ のリクエスト開始行が正しくありません。',
+    },
+    importReasonSazResponseLineInvalid: {
+      en: 'SAZ response start line is invalid.',
+      ja: 'SAZ のレスポンス開始行が正しくありません。',
+    },
+    importReasonSazSessionsMissing: {
+      en: 'SAZ contains no complete HTTP sessions.',
+      ja: 'SAZ に完全な HTTP セッションがありません。',
+    },
+    importReasonTransferSuperseded: {
+      en: 'The import transfer was superseded by a newer one.',
+      ja: '新しいインポート転送が始まったため、前の転送を終了しました。',
+    },
+    importReasonReloadViews: {
+      en: 'Reload both Network+ views to stream this HAR.',
+      ja: 'この HAR をストリーム転送するには、両方の Network+ 画面を再読み込みしてください。',
+    },
+    importReasonTransferCancelled: {
+      en: 'The import transfer was cancelled.',
+      ja: 'インポート転送をキャンセルしました。',
+    },
+    importReasonChunkOutOfOrder: {
+      en: 'The import transfer sent a chunk out of order.',
+      ja: 'インポート転送のデータが順序どおりに届きませんでした。',
+    },
+    importReasonTransferDecodeFailed: {
+      en: 'The transferred file could not be decoded.',
+      ja: '転送されたファイルをデコードできませんでした。',
+    },
+    importReasonTransferSizeExceeded: {
+      en: 'The transfer exceeded its declared size and was refused.',
+      ja: '転送量が申告されたサイズを超えたため、転送を拒否しました。',
+    },
+    importReasonTransferInterrupted: {
+      en: 'The import transfer was interrupted.',
+      ja: 'インポート転送が中断されました。',
+    },
+    importReasonTransferIncomplete: {
+      en: 'The transfer ended before its declared size was received.',
+      ja: '申告されたサイズのデータを受信する前に転送が終了しました。',
+    },
+    importReasonTransferEndOutOfOrder: {
+      en: 'The import transfer ended out of order.',
+      ja: 'インポート転送が正しい順序で終了しませんでした。',
+    },
+    importReasonTransferredFileFailed: {
+      en: 'The transferred file could not be imported.',
+      ja: '転送されたファイルをインポートできませんでした。',
+    },
+    importReasonMirrorImportDisabled: {
+      en: 'This DevTools session does not accept mirror imports.',
+      ja: 'この DevTools セッションはミラー画面からのインポートを受け付けていません。',
+    },
+    importReasonImportUnavailable: {
+      en: 'Import is not available in this DevTools session.',
+      ja: 'この DevTools セッションではインポートを利用できません。',
+    },
+    importReasonCommandRejected: {
+      en: 'The DevTools session rejected the command.',
+      ja: 'DevTools セッションが操作を拒否しました。',
+    },
+    importReasonSessionTimeout: {
+      en: 'The DevTools session did not answer in time; the command may still have applied.',
+      ja: 'DevTools セッションからの応答が時間内に届きませんでした。操作は適用済みの可能性があります。',
+    },
+    importReasonSessionDisconnectedBeforeResponse: {
+      en: 'The DevTools session disconnected before the response content arrived.',
+      ja: 'レスポンス内容が届く前に DevTools セッションの接続が切れました。',
+    },
+    importReasonSessionDisconnected: {
+      en: 'The DevTools session is disconnected, so response content cannot be retrieved.',
+      ja: 'DevTools セッションの接続が切れているため、レスポンス内容を取得できません。',
+    },
+    importRetentionBodyOmitted: {
+      en: 'Response body omitted by the 1 MiB retention limit',
+      ja: '1 MiB の保持上限によりレスポンスボディを省略しました',
+    },
+    importRetentionCacheEvicted: {
+      en: '{count} cached response bodies evicted by the 32 MiB cache limit',
+      ja: '32 MiB のキャッシュ上限によりレスポンスボディを {count} 件削除しました',
+    },
+    importRetentionRequestsSkipped: {
+      en: '{count} imported requests skipped by the retention limit',
+      ja: '保持上限によりインポートしたリクエストを {count} 件スキップしました',
+    },
+    importRetentionBodiesOmitted: {
+      en: '{omitted} response bodies omitted, {evicted} evicted during import',
+      ja: 'インポート中にレスポンスボディを {omitted} 件省略し、{evicted} 件をキャッシュから削除しました',
+    },
+    importRetentionSummary: {
+      en: '{action}. Totals: {evictedRequests} requests evicted, {omittedBodies} bodies omitted, {evictedBodies} cached bodies evicted, and {truncatedBodies} previews truncated.',
+      ja: '{action}。合計: リクエスト削除 {evictedRequests} 件、ボディ省略 {omittedBodies} 件、キャッシュ済みボディ削除 {evictedBodies} 件、プレビュー省略 {truncatedBodies} 件。',
+    },
     statusImportFailed: {
       en: 'Import failed: {reason}',
-      ja: 'インポートに失敗しました: {reason}',
+      ja: 'インポートに失敗しました：{reason}',
     },
     statusImportUnreadable: {
       en: 'Import failed: the selected file could not be read.',
@@ -8326,6 +8657,34 @@ const _NetworkPlus = (function () {
   function localizeBodyReason(reason) {
     const key = LOCALIZED_REASON_KEYS.get(reason);
     return key ? uiText(key) : reason;
+  }
+
+  // Error messages remain canonical in logs, results and mirror messages.
+  // Translate only exact, application-owned reasons at the import display boundary.
+  const LOCALIZED_IMPORT_REASON_KEYS = new Map(
+    Object.entries(UI_TEXT)
+      .filter(([key]) => key.startsWith('importReason'))
+      .map(([key, entry]) => [entry.en, key]),
+  );
+
+  function localizeImportReason(reason) {
+    const key = LOCALIZED_IMPORT_REASON_KEYS.get(reason);
+    return key ? uiText(key) : reason;
+  }
+
+  function formatImportFailure(reason) {
+    return uiTextFormat('statusImportFailed', { reason: localizeImportReason(reason) });
+  }
+
+  function localizeImportRetentionAction(action) {
+    if (action === UI_TEXT.importRetentionBodyOmitted.en) return uiText('importRetentionBodyOmitted');
+    const cached = /^(\d+) cached response bodies evicted by the 32 MiB cache limit$/.exec(action);
+    if (cached) return uiTextFormat('importRetentionCacheEvicted', { count: cached[1] });
+    const skipped = /^(\d+) imported requests skipped by the retention limit$/.exec(action);
+    if (skipped) return uiTextFormat('importRetentionRequestsSkipped', { count: skipped[1] });
+    const staged = /^(\d+) response bodies omitted, (\d+) evicted during import$/.exec(action);
+    if (staged) return uiTextFormat('importRetentionBodiesOmitted', { omitted: staged[1], evicted: staged[2] });
+    return action;
   }
 
   function localizeTimingLimitation(limitation) {
@@ -8408,15 +8767,8 @@ const _NetworkPlus = (function () {
   // the reader clicked another row. Repaint the open pane from the same
   // renderer the selection uses: the picked tab survives because the counts
   // are unchanged, and a pane search and the panes' scroll offsets restart.
-  // A comparison owns the pane instead of a single request, so renderRowDetails
-  // would paint one request over the two-request diff. It is repainted from its
-  // own renderer instead: Tier 2 left that standing because the panel's chrome
-  // (its close control, its section headings) was written in English rather
-  // than read from UI_TEXT, and re-running it would not have been a language
-  // switch. Those strings translate now, so it is. What the diff tables paint
-  // inside a section — the 'Name' column, the A/B fallback headers, the
-  // body-state notices — is still English in both languages, and repainting
-  // leaves it exactly where it was.
+  // Repaint an open comparison with its own renderer so its controls,
+  // section headings and body notices follow the selected language.
   // A pane the reader closed stays closed: closeDetailsPanel hides the
   // pane but leaves state.selectedRow standing (the row keeps its selection,
   // and a click on it reopens the pane), so gating on the selection alone
@@ -9128,8 +9480,15 @@ const _NetworkPlus = (function () {
       embeddedResponseContent !== null && embeddedContent.encoding === 'base64' ? 'base64' : '';
     const requestBodySize = req && req.request ? req.request.bodySize : undefined;
     const responseBodySize = req && req.response ? req.response.bodySize : undefined;
-    const requestPostText = req && req.request && req.request.postData && req.request.postData.text;
+    const requestPostData = req && req.request && req.request.postData;
     const contentSize = embeddedContent && embeddedContent.size;
+    // The grid's transfer-size fallback is not the decoded content size.
+    // Keep source metadata after imported request objects are released.
+    const responseContentSize = Number.isFinite(contentSize) && contentSize >= -1 ? contentSize : -1;
+    const responseCompression = embeddedContent && Number.isFinite(embeddedContent.compression)
+      ? embeddedContent.compression : null;
+    const inferredResponseBodySize = responseCompression === null || responseCompression === 0
+      ? responseContentSize : -1;
     const r = {
       _reqObj: req,
       method: (req && req.request && req.request.method) || '',
@@ -9143,15 +9502,17 @@ const _NetworkPlus = (function () {
       requestBodySize:
         Number.isFinite(requestBodySize) && requestBodySize >= 0
           ? requestBodySize
-          : requestBodySize == null && typeof requestPostText === 'string' && requestPostText.length > 0
-            ? requestPostText.length
+          : requestBodySize == null
+            ? getHarPayloadByteLength(requestPostData)
             : -1,
       responseBodySize:
         Number.isFinite(responseBodySize) && responseBodySize >= 0
           ? responseBodySize
-          : responseBodySize == null && Number.isFinite(contentSize) && contentSize > 0
-            ? contentSize
+          : responseBodySize == null && inferredResponseBodySize >= 0
+            ? inferredResponseBodySize
             : -1,
+      responseContentSize,
+      responseCompression,
       clientStart: fmtLocalTime(isoStr),
       serverDone: fmtLocalTime(serverDoneIso),
       clientStartFilter: fmtFilterTime(isoStr),
@@ -9232,6 +9593,8 @@ const _NetworkPlus = (function () {
     return {
       id: row.id,
       ...(row._pendingRequest ? { pending: true } : {}),
+      ...(isLiveStreamRow(row) ? { streamRevision: row._streamRevision || 0 } : {}),
+      ...(row.method === 'WS' || row._wsFrames?.length > 0 ? { webSocket: true } : {}),
       startedDateTime: row.startedDateTime,
       time: row.duration,
       initiator: row.initiator || null,
@@ -9248,7 +9611,11 @@ const _NetworkPlus = (function () {
         httpVersion: row.protocol,
         headers: Array.isArray(row.responseHeaders) ? row.responseHeaders : [],
         bodySize: Number.isFinite(row.responseBodySize) ? row.responseBodySize : row.size,
-        content: { mimeType: row.type, size: row.size },
+        content: {
+          mimeType: row.type,
+          size: Number.isFinite(row.responseContentSize) ? row.responseContentSize : row.size,
+          ...(Number.isFinite(row.responseCompression) ? { compression: row.responseCompression } : {}),
+        },
       },
       timings: row.timings || {},
     };
@@ -9285,6 +9652,50 @@ const _NetworkPlus = (function () {
   const WS_FRAME_PREVIEW_CHARS = 2048;
   const WS_DIRECTION_TEXT_LIMIT_CHARS = 262144;
   const WS_POLL_INTERVAL_MS = 1000;
+  // Even with JSON escaping, a chunk of previews stays below the snapshot
+  // message budget. The host's existing per-conversation frame cap still applies.
+  const MIRROR_WS_EXPORT_CHUNK_SIZE = 64;
+  // Escaping a 256 KiB slice again for Runtime.Port stays below the 2 MiB
+  // snapshot message budget. The aggregate covers the existing transcript and
+  // frame caps even when their previews require six-character JSON escapes.
+  const MIRROR_STREAM_HAR_CHUNK_CHARS = 256 * 1024;
+  const MIRROR_STREAM_HAR_TOTAL_CHARS = 16 * 1024 * 1024;
+  const STREAM_HAR_UNAVAILABLE_REASON = 'A consistent stream snapshot is unavailable from the DevTools session.';
+
+  function isWebSocketRequest(method, url, status, responseHeaders) {
+    return method === 'WS' || /^wss?:/i.test(url) ||
+      (status === 101 && Array.isArray(responseHeaders) && responseHeaders.some((header) =>
+        header && /^upgrade$/i.test(header.name) && /^websocket$/i.test(String(header.value).trim()),
+      ));
+  }
+
+  function describeWebSocketExport(row) {
+    const frames = row._wsFrames || [];
+    return {
+      count: frames.length,
+      droppedFrames: row._wsFramesDropped || 0,
+      binaryFramesWithoutPayload: frames.filter((frame) => frame.binary).length,
+    };
+  }
+
+  function toHarWebSocketMessage(frame) {
+    // Chrome's HAR extension uses epoch seconds. Binary capture stores only
+    // placeholders, so preserve the opcode and omit its uncaptured payload.
+    const message = {
+      type: frame.type,
+      time: Number.isFinite(frame.time) ? frame.time / 1000 : 0,
+      opcode: frame.binary ? 2 : 1,
+    };
+    if (!frame.binary) message.data = String(frame.data ?? '').slice(0, WS_FRAME_PREVIEW_CHARS);
+    return message;
+  }
+
+  function isBoundedHarWebSocketMessage(message) {
+    return message && (message.type === 'send' || message.type === 'receive') &&
+      Number.isFinite(message.time) &&
+      (message.opcode === 2 && message.data === undefined ||
+        message.opcode === 1 && typeof message.data === 'string' && message.data.length <= WS_FRAME_PREVIEW_CHARS);
+  }
 
   function pageWebSocketWrapper(queueCap, previewChars) {
     if (window.__networkPlusWS__) {
@@ -9339,8 +9750,9 @@ const _NetworkPlus = (function () {
       });
       const nativeSend = socket.send.bind(socket);
       socket.send = function (data) {
+        const result = nativeSend(data);
         record({ kind: 'ws-sent', socketId, preview: preview(data) });
-        return nativeSend(data);
+        return result;
       };
       socket.addEventListener('open', function () {
         record({ kind: 'ws-open', socketId });
@@ -9586,7 +9998,10 @@ const _NetworkPlus = (function () {
         if (event.kind === 'ws-received') {
           row._wsReceivedCount = (row._wsReceivedCount || 0) + 1;
           row.size = (row.size || 0) + (event.preview ? event.preview.length : 0);
-          if (isLiveStreamRow(row)) row.responseBodySize = row.size;
+          if (isLiveStreamRow(row)) {
+            row.responseBodySize = row.size;
+            row.responseContentSize = row.size;
+          }
           if (row.method !== 'SSE') {
             const preview = event.preview || '';
             const binary = WS_BINARY_PREVIEW_PATTERN.test(preview);
@@ -9636,6 +10051,14 @@ const _NetworkPlus = (function () {
     let chars = 256 + (wireRow.request.url ? wireRow.request.url.length : 0);
     const postData = wireRow.request.postData;
     if (postData && typeof postData.text === 'string') chars += postData.text.length;
+    if (postData && Array.isArray(postData.params)) {
+      for (const param of postData.params) {
+        chars += 64;
+        for (const key of ['name', 'value', 'fileName', 'contentType', 'comment']) {
+          if (param && typeof param[key] === 'string') chars += param[key].length;
+        }
+      }
+    }
     for (const header of wireRow.request.headers) {
       chars += (header.name ? header.name.length : 0) + (header.value ? header.value.length : 0) + 8;
     }
@@ -9682,6 +10105,8 @@ const _NetworkPlus = (function () {
         session: sessionToken,
         total: rows.length,
         protocolVersion: MIRROR_PROTOCOL_VERSION,
+        webSocketExport: true,
+        streamHarExport: true,
       });
       let chunk = [];
       let chunkChars = 0;
@@ -9719,6 +10144,61 @@ const _NetworkPlus = (function () {
     const sendCommandResult = (commandId, error, viewer) => {
       postMessage({ type: 'command-result', commandId, viewer, ok: !error, error: error || '' });
     };
+    const sendWebSocketExport = ({ requestId, viewer, rowId, session, includeFrames }) => {
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer ||
+          !Number.isSafeInteger(requestId) || !Number.isSafeInteger(rowId) ||
+          typeof includeFrames !== 'boolean') return;
+      const result = { type: 'ws-export-result', requestId, viewer, rowId, session };
+      const row = getRows().find((candidate) => candidate.id === rowId && (pendingRowsEnabled || !candidate._pendingRequest));
+      if (!row) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      Object.assign(result, { ok: true }, describeWebSocketExport(row));
+      if (!includeFrames) {
+        postMessage({ ...result, offset: 0, complete: true });
+        return;
+      }
+      const frames = row._wsFrames || [];
+      for (let offset = 0; offset === 0 || offset < frames.length; offset += MIRROR_WS_EXPORT_CHUNK_SIZE) {
+        const chunk = frames.slice(offset, offset + MIRROR_WS_EXPORT_CHUNK_SIZE).map(toHarWebSocketMessage);
+        postMessage({ ...result, offset, frames: chunk, complete: offset + chunk.length === frames.length });
+      }
+    };
+    const sendStreamHar = ({ requestId, viewer, rowId, session, minimumRevision, includeBodies }) => {
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer ||
+          !Number.isSafeInteger(requestId) || !Number.isSafeInteger(rowId) ||
+          !Number.isSafeInteger(minimumRevision) || minimumRevision < 0 || typeof includeBodies !== 'boolean') return;
+      const result = { type: 'stream-har-result', requestId, viewer, rowId, session };
+      const row = getRows().find((candidate) => candidate.id === rowId && isLiveStreamRow(candidate));
+      const revision = row?._streamRevision || 0;
+      if (!row || revision < minimumRevision) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      // Serialize on the same turn as the row lookup. Later drains can
+      // update the row while the viewer receives this immutable entry.
+      const entry = buildStreamHarEntry(row, includeBodies);
+      if (!includeBodies) {
+        // The viewer applies the usual HAR sanitizer at download time.
+        // Exclude secrets from the snapshot transport itself as well.
+        entry.request.url = sanitizeUrl(entry.request.url).value;
+        entry.request.headers = sanitizeHeaders(entry.request.headers).value;
+        entry.request.queryString = sanitizeNamedValues(entry.request.queryString).value;
+        entry.response.headers = sanitizeHeaders(entry.response.headers).value;
+      }
+      const snapshot = JSON.stringify(entry);
+      if (snapshot.length > MIRROR_STREAM_HAR_TOTAL_CHARS) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      for (let offset = 0; offset < snapshot.length; offset += MIRROR_STREAM_HAR_CHUNK_CHARS) {
+        postMessage({
+          ...result, ok: true, revision, offset, total: snapshot.length,
+          data: snapshot.slice(offset, offset + MIRROR_STREAM_HAR_CHUNK_CHARS),
+        });
+      }
+    };
     const handleMessage = (message) => {
       if (!message || typeof message !== 'object') return;
       if (message.type === 'hello' || message.type === 'snapshot-request') {
@@ -9751,6 +10231,14 @@ const _NetworkPlus = (function () {
                 error: error && error.message ? error.message : 'Response content is unavailable.',
               }),
           );
+        return;
+      }
+      if (message.type === 'ws-export-request') {
+        sendWebSocketExport(message);
+        return;
+      }
+      if (message.type === 'stream-har-request') {
+        sendStreamHar(message);
         return;
       }
       if (message.type === 'command') {
@@ -9919,9 +10407,9 @@ const _NetworkPlus = (function () {
     onHostSync,
   }) {
     let pendingSnapshot = null;
-    let nextBodyRequestId = 1;
+    let nextExportRequestId = 1;
     let nextCommandId = 1;
-    const pendingBodyCallbacks = new Map();
+    const pendingExportCallbacks = new Map();
     const pendingCommandCallbacks = new Map();
     // chrome.runtime.connect fires onConnect in every extension context, so a
     // duplicated mirror tab shares the host's port. Every request carries this
@@ -9935,25 +10423,119 @@ const _NetworkPlus = (function () {
     // id within one session; a new token means the table must be rebuilt, not
     // reconciled.
     let hostSessionToken = null;
-    const requestBody = (rowId, callback) => {
-      const requestId = nextBodyRequestId;
-      nextBodyRequestId += 1;
+    let webSocketExportSupported = false;
+    let streamHarExportSupported = false;
+    const settleExport = (requestId, error, payload = null) => {
+      const pending = pendingExportCallbacks.get(requestId);
+      if (!pending) return;
+      pendingExportCallbacks.delete(requestId);
+      clearTimeout(pending.timer);
+      pending.callback(error, payload);
+    };
+    const requestExport = (type, rowId, callback, options) => {
+      const requestId = nextExportRequestId++;
       // Same discipline commands got: a host that drops the result must not
       // park this entry (and its closure) in the map until disconnect.
-      const pending = { callback, timer: null };
-      pendingBodyCallbacks.set(requestId, pending);
-      pending.timer = setTimeout(() => {
-        if (pendingBodyCallbacks.get(requestId) !== pending) return;
-        pendingBodyCallbacks.delete(requestId);
-        pending.callback(new Error('The DevTools session did not answer the body request in time.'), null);
-      }, RESPONSE_CONTENT_TIMEOUT_MS);
+      const pending = { type, rowId, callback, ...options };
+      const timeoutReason = {
+        'body-request': 'The DevTools session did not answer the body request in time.',
+        'ws-export-request': 'The DevTools session did not answer the WebSocket export request in time.',
+        'stream-har-request': STREAM_HAR_UNAVAILABLE_REASON,
+      }[type];
+      pending.timer = setTimeout(() => settleExport(
+        requestId, new Error(timeoutReason),
+      ), RESPONSE_CONTENT_TIMEOUT_MS);
+      pendingExportCallbacks.set(requestId, pending);
       if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
       try {
-        postMessage({ type: 'body-request', requestId, rowId, viewer: viewerNonce });
+        postMessage({ type, requestId, rowId, viewer: viewerNonce, ...options });
       } catch (error) {
         clearTimeout(pending.timer);
-        pendingBodyCallbacks.delete(requestId);
+        pendingExportCallbacks.delete(requestId);
         throw error;
+      }
+    };
+    const requestBody = (rowId, callback) => requestExport('body-request', rowId, callback);
+    const requestWebSocketExport = (rowId, session, includeFrames, callback) => {
+      if (!webSocketExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
+        callback(new Error('WebSocket frames are unavailable from this DevTools session.'), null);
+        return;
+      }
+      requestExport('ws-export-request', rowId, callback, { session, includeFrames });
+    };
+    const requestStreamHar = (rowId, session, minimumRevision, includeBodies, callback) => {
+      if (!streamHarExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
+        callback(new Error(STREAM_HAR_UNAVAILABLE_REASON), null);
+        return;
+      }
+      requestExport('stream-har-request', rowId, callback, { session, minimumRevision, includeBodies });
+    };
+    const receiveStreamHar = (message) => {
+      const { requestId, rowId, session, revision, offset, total, data } = message;
+      const pending = pendingExportCallbacks.get(requestId);
+      if (pending?.type !== 'stream-har-request' || rowId !== pending.rowId ||
+          session !== pending.session || message.viewer !== viewerNonce) return;
+      const fail = () => settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
+      if (message.ok !== true || !Number.isSafeInteger(revision) || revision < pending.minimumRevision ||
+          !Number.isSafeInteger(total) || total <= 0 || total > MIRROR_STREAM_HAR_TOTAL_CHARS ||
+          offset !== (pending.received || 0) || offset >= total ||
+          typeof data !== 'string' || data.length !== Math.min(MIRROR_STREAM_HAR_CHUNK_CHARS, total - offset)) {
+        fail();
+        return;
+      }
+      if (!pending.chunks) Object.assign(pending, { revision, total, chunks: [] });
+      if (pending.revision !== revision || pending.total !== total) {
+        fail();
+        return;
+      }
+      pending.chunks.push(data);
+      pending.received = offset + data.length;
+      if (pending.received < total) return;
+      let entry;
+      try {
+        entry = JSON.parse(pending.chunks.join(''));
+      } catch (_error) {
+        fail();
+        return;
+      }
+      if (!isStreamHarEntry(entry, pending.includeBodies)) fail();
+      else settleExport(requestId, null, entry);
+    };
+    const receiveWebSocketExport = (message) => {
+      const { requestId, rowId, session, count, droppedFrames, binaryFramesWithoutPayload, offset, frames, complete } = message;
+      const pending = pendingExportCallbacks.get(requestId);
+      if (pending?.type !== 'ws-export-request' || rowId !== pending.rowId ||
+          session !== pending.session || message.viewer !== viewerNonce) return;
+      const fail = () => settleExport(requestId, new Error('WebSocket frames are unavailable from this DevTools session.'));
+      if (message.ok !== true ||
+          !Number.isSafeInteger(count) || count < 0 || count > HAR_WS_MESSAGE_IMPORT_LIMIT ||
+          !Number.isSafeInteger(droppedFrames) || droppedFrames < 0 ||
+          !Number.isSafeInteger(binaryFramesWithoutPayload) ||
+          binaryFramesWithoutPayload < 0 || binaryFramesWithoutPayload > count) {
+        fail();
+        return;
+      }
+      if (!pending.includeFrames) {
+        if (offset !== 0 || complete !== true || frames !== undefined) fail();
+        else settleExport(requestId, null, { count, droppedFrames, binaryFramesWithoutPayload });
+        return;
+      }
+      if (!pending.payload) pending.payload = { count, droppedFrames, binaryFramesWithoutPayload, frames: [] };
+      const payload = pending.payload;
+      if (count !== payload.count || droppedFrames !== payload.droppedFrames ||
+          binaryFramesWithoutPayload !== payload.binaryFramesWithoutPayload || offset !== payload.frames.length ||
+          !Array.isArray(frames) || frames.length > MIRROR_WS_EXPORT_CHUNK_SIZE || offset + frames.length > count ||
+          complete !== (offset + frames.length === count) || (!complete && frames.length === 0) ||
+          !frames.every(isBoundedHarWebSocketMessage)) {
+        fail();
+        return;
+      }
+      for (const { type, time, opcode, data } of frames) {
+        payload.frames.push(opcode === 2 ? { type, time, opcode } : { type, time, opcode, data });
+      }
+      if (complete) {
+        if (payload.frames.filter((frame) => frame.opcode === 2).length !== binaryFramesWithoutPayload) fail();
+        else settleExport(requestId, null, payload);
       }
     };
     const settleCommand = (commandId, error) => {
@@ -10059,14 +10641,27 @@ const _NetworkPlus = (function () {
     const handleMessage = (message) => {
       if (!message || typeof message !== 'object') return;
       switch (message.type) {
-        case 'snapshot-start':
+        case 'snapshot-start': {
+          const session = typeof message.session === 'string' && message.session ? message.session : null;
+          const sessionChanged = session !== hostSessionToken && (hostSessionToken !== null || getLocalCount() > 0);
           pendingSnapshot = {
             generation: message.generation,
             rows: [],
-            sessionChanged: message.session != null && hostSessionToken != null && message.session !== hostSessionToken,
-            session: message.session,
+            sessionChanged,
+            session,
+            webSocketExport: message.webSocketExport === true,
+            streamHarExport: message.streamHarExport === true,
           };
+          for (const [requestId, pending] of pendingExportCallbacks) {
+            if (pending.type === 'ws-export-request' && (sessionChanged || !pendingSnapshot.webSocketExport)) {
+              settleExport(requestId, new Error('The DevTools session changed during the WebSocket export.'));
+            }
+            if (pending.type === 'stream-har-request' && (sessionChanged || !pendingSnapshot.streamHarExport)) {
+              settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
+            }
+          }
           break;
+        }
         case 'snapshot-rows':
           if (
             pendingSnapshot &&
@@ -10082,8 +10677,10 @@ const _NetworkPlus = (function () {
           if (pendingSnapshot && pendingSnapshot.generation === message.generation) {
             const snapshot = pendingSnapshot;
             pendingSnapshot = null;
-            if (snapshot.session != null) hostSessionToken = snapshot.session;
-            applyWireSnapshot(snapshot.rows, { sessionChanged: snapshot.sessionChanged });
+            hostSessionToken = snapshot.session;
+            webSocketExportSupported = snapshot.webSocketExport && Boolean(snapshot.session);
+            streamHarExportSupported = snapshot.streamHarExport && Boolean(snapshot.session);
+            applyWireSnapshot(snapshot.rows, { sessionChanged: snapshot.sessionChanged, session: snapshot.session });
           }
           break;
         case 'row':
@@ -10091,7 +10688,7 @@ const _NetworkPlus = (function () {
           // matched by id; the sync heartbeat's mismatch triggers the rebuild.
           if (message.session != null && hostSessionToken != null && message.session !== hostSessionToken) break;
           if (message.session != null && hostSessionToken == null) hostSessionToken = message.session;
-          if (message.row && typeof message.row === 'object') appendWireRow(message.row);
+          if (message.row && typeof message.row === 'object') appendWireRow(message.row, message.session);
           break;
         case 'sync': {
           if (typeof onHostSync === 'function') onHostSync(message);
@@ -10111,12 +10708,18 @@ const _NetworkPlus = (function () {
         }
         case 'body-result': {
           if (resultIsForAnotherViewer(message)) return;
-          const pending = pendingBodyCallbacks.get(message.requestId);
-          if (!pending) return;
-          pendingBodyCallbacks.delete(message.requestId);
-          if (pending.timer) clearTimeout(pending.timer);
-          if (message.ok) pending.callback(null, { content: message.content, encoding: message.encoding });
-          else pending.callback(new Error(message.error || 'Response content is unavailable.'), null);
+          const pending = pendingExportCallbacks.get(message.requestId);
+          if (pending?.type !== 'body-request') return;
+          if (message.ok) settleExport(message.requestId, null, { content: message.content, encoding: message.encoding });
+          else settleExport(message.requestId, new Error(message.error || 'Response content is unavailable.'));
+          break;
+        }
+        case 'ws-export-result': {
+          receiveWebSocketExport(message);
+          break;
+        }
+        case 'stream-har-result': {
+          receiveStreamHar(message);
           break;
         }
         case 'import-ack': {
@@ -10136,8 +10739,11 @@ const _NetworkPlus = (function () {
       }
     };
     const failPendingBodyRequests = (reason) => {
-      const failures = Array.from(pendingBodyCallbacks.values());
-      pendingBodyCallbacks.clear();
+      pendingSnapshot = null;
+      webSocketExportSupported = false;
+      streamHarExportSupported = false;
+      const failures = Array.from(pendingExportCallbacks.values());
+      pendingExportCallbacks.clear();
       for (const pending of failures) {
         if (pending.timer) clearTimeout(pending.timer);
         pending.callback(new Error(reason), null);
@@ -10149,7 +10755,10 @@ const _NetworkPlus = (function () {
         pending.callback(new Error(reason));
       }
     };
-    return { handleMessage, requestBody, sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests };
+    return {
+      handleMessage, requestBody, requestWebSocketExport, requestStreamHar,
+      sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests,
+    };
   }
 
   function fetchResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
@@ -10288,8 +10897,10 @@ const _NetworkPlus = (function () {
     }
 
     row.responseContentState = 'loading';
+    const streamRevision = row._mirrorStreamRevision;
     const pending = fetchResponsePayload(row, timeoutMs)
       .then((payload) => {
+        if (streamRevision !== row._mirrorStreamRevision) return row;
         if (row._managedRetention) {
           if (!isRetainedRow(row, state.retainedRows)) throw new Error('Response content arrived after its request was evicted');
           return admitResponsePayload(row, payload);
@@ -10307,6 +10918,7 @@ const _NetworkPlus = (function () {
         return row;
       })
       .catch((error) => {
+        if (streamRevision !== row._mirrorStreamRevision) return row;
         row.responseContentError = error;
         if (
           row.responseContentState !== 'omitted' &&
@@ -12143,6 +12755,8 @@ const _NetworkPlus = (function () {
       } else if (c.id === 'status' && row._pendingRequest) {
         td.setAttribute('data-i18n', 'statusPendingRequest');
         td.textContent = uiText('statusPendingRequest');
+      } else if (c.id === 'status' && (isLiveStreamRow(row) || row._mirrorStreamRevision != null)) {
+        td.textContent = row.statusText;
       } else if (c.id === 'waterfall') {
         td.classList.add('waterfall-cell');
         // Use the range cached once per render by renderBody() — O(1) per row.
@@ -14630,6 +15244,8 @@ const _NetworkPlus = (function () {
     };
     if (row._pendingRequest) {
       addItem(uiText('statusPendingRequest'), 'details-summary-status details-summary-status--other');
+    } else if (isLiveStreamRow(row) || row._mirrorStreamRevision != null) {
+      addItem(row.statusText, 'details-summary-status details-summary-status--other');
     } else if (plan.status) {
       addItem(plan.status.text, 'details-summary-status details-summary-status--' + plan.status.statusClass);
     }
@@ -14943,14 +15559,13 @@ const _NetworkPlus = (function () {
 
     const marks = [];
     let truncated = false;
-    const keywords = [{ query, colorIdx: 0 }];
     for (const textNode of textNodes) {
+      const ranges = planPaneSearchRanges(textNode.nodeValue, query, options, PANE_SEARCH_MAX_HITS - marks.length);
+      if (ranges.length === 0) continue;
       if (marks.length >= PANE_SEARCH_MAX_HITS) {
         truncated = true;
         break;
       }
-      const ranges = planKeywordHighlights(textNode.nodeValue, keywords, options);
-      if (ranges.length === 0) continue;
       const source = textNode.nodeValue;
       const fragment = document.createDocumentFragment();
       let cursor = 0;
@@ -14973,6 +15588,7 @@ const _NetworkPlus = (function () {
         fragment.appendChild(document.createTextNode(source.slice(cursor)));
       }
       textNode.parentNode.replaceChild(fragment, textNode);
+      if (truncated) break;
     }
     return { marks, truncated };
   }
@@ -15334,7 +15950,7 @@ const _NetworkPlus = (function () {
           !truncated &&
           (hiddenSource || hasCollapsedPaneContent(pane, bar))
         ) {
-          const totalHits = planKeywordHighlights(fullText, [{ query, colorIdx: 0 }], searchOptions).length;
+          const totalHits = countPaneSearchHits(fullText, query, searchOptions);
           collapsedHits = Math.max(0, totalHits - marks.length);
         }
       }
@@ -16417,6 +17033,25 @@ const _NetworkPlus = (function () {
     renderRowDetails(row);
   }
 
+  function refreshSelectedStreamDetails() {
+    const row = state.selectedRow;
+    if (!row || state.comparedRows || $('#details').hidden ||
+        (!isLiveStreamRow(row) && row._mirrorStreamRevision == null)) return;
+    const focused = document.activeElement;
+    if (focused?.closest('#details .pane-search-bar')) {
+      // Keep the toolbar interactive while the transcript is being searched.
+      // Paint the latest contents once focus leaves the toolbar.
+      renderDetailsSummary(row);
+      focused.addEventListener('blur', refreshStreamDetailsAfterSearch, { once: true });
+      return;
+    }
+    renderRowDetails(row);
+  }
+
+  function refreshStreamDetailsAfterSearch() {
+    setTimeout(refreshSelectedStreamDetails, 0);
+  }
+
   // Paints the details pane for one row. Split out of selectRow so a language
   // change can repaint the open pane in place (see applyLanguage) without
   // going back through selection, which would clear a multi-row selection and
@@ -16643,13 +17278,14 @@ const _NetworkPlus = (function () {
     }
     // Response > Body and Raw — populated from the shared response cache
     setResponsePaneMessage(uiText('bodyPaneLoading'));
+    const streamRevision = row._mirrorStreamRevision;
     cacheResponseContent(row)
       .then((cachedRow) => {
-        if (!shouldRenderSelectedRow(state.selectedRow, cachedRow)) return;
+        if (!shouldRenderSelectedRow(state.selectedRow, cachedRow) || streamRevision !== row._mirrorStreamRevision) return;
         renderCachedResponseContent(cachedRow);
       })
       .catch((error) => {
-        if (!shouldRenderSelectedRow(state.selectedRow, row)) return;
+        if (!shouldRenderSelectedRow(state.selectedRow, row) || streamRevision !== row._mirrorStreamRevision) return;
         const display = describeResponseContentState(row, error);
         setResponsePaneMessage(formatBodyPaneMessage(display));
         applyResponseTabSignals({ 'res-body': 0, 'res-raw': 0 });
@@ -16794,20 +17430,17 @@ const _NetworkPlus = (function () {
       if (bodyDesc.stateLabel === 'truncated') {
         const truncNotice = document.createElement('p');
         truncNotice.className = 'diff-body-notice diff-body-notice--truncated';
-        truncNotice.textContent = '(showing ' + bodyDesc.text.length.toLocaleString() + ' of ' + bodyDesc.totalLength.toLocaleString() + ' chars — view full body in the detail panel)';
+        truncNotice.textContent = uiTextFormat('compareBodyTruncated', {
+          shown: bodyDesc.text.length.toLocaleString(activeLanguage),
+          total: bodyDesc.totalLength.toLocaleString(activeLanguage),
+        });
         content.appendChild(truncNotice);
       }
     } else {
       const notice = document.createElement('p');
       notice.className = 'diff-body-notice diff-body-notice--' + bodyDesc.stateLabel;
-      const labels = {
-        empty: '(empty body)',
-        missing: '(no body)',
-        omitted: '(body omitted — exceeded the 1 MiB per-body retention limit)',
-        evicted: '(body evicted from the 32 MiB cache — re-select the request to retry)',
-        unavailable: '(body not available)',
-      };
-      notice.textContent = labels[bodyDesc.stateLabel] || '(body not available)';
+      const labelKey = 'compareBody' + bodyDesc.stateLabel[0].toUpperCase() + bodyDesc.stateLabel.slice(1);
+      notice.textContent = uiText(labelKey) || uiText('compareBodyUnavailable');
       content.appendChild(notice);
     }
 
@@ -17050,18 +17683,21 @@ const _NetworkPlus = (function () {
     return planSelectedExportRows(state.rows, state.selectedRows, state.selectedRow);
   }
 
-  function buildHarLogFromRows(rows, responseContents) {
+  function buildHarLogFromRows(rows, responseContents, webSocketExports, streamEntries) {
     const pageref = 'page_1';
     const entries = [];
     for (const r of rows) {
+      if (streamEntries?.has(r)) {
+        entries.push(streamEntries.get(r));
+        continue;
+      }
       const started = r.startedDateTime || new Date().toISOString();
       const url = r.url || '';
       const httpVersion = r.protocol || 'HTTP/2';
       const reqHeaders = toHarHeaders(r.requestHeaders);
       const resHeaders = toHarHeaders(r.responseHeaders);
-      const postData = r.requestPostData
-        ? { mimeType: r.requestPostData.mimeType || '', text: r.requestPostData.text || '' }
-        : null;
+      const postData = normalizeHarPostData(r.requestPostData);
+      if (postData && !postData.encoding) delete postData.encoding;
       // [U1] Preserve response body text and its transfer encoding in HAR.
       const content = responseContents && responseContents.has(r)
         ? responseContents.get(r)
@@ -17085,7 +17721,7 @@ const _NetworkPlus = (function () {
           headersSize: -1,
           bodySize: Number.isFinite(r.requestBodySize)
             ? r.requestBodySize
-            : r.requestPostData && r.requestPostData.text ? r.requestPostData.text.length : -1,
+            : getHarPayloadByteLength(r.requestPostData),
         },
         response: {
           status: r.status || 0,
@@ -17096,38 +17732,29 @@ const _NetworkPlus = (function () {
           content,
           redirectURL: '',
           headersSize: -1,
-          bodySize: Number.isFinite(r.responseBodySize) ? r.responseBodySize : r.size || -1,
+          bodySize: Number.isFinite(r.responseBodySize) ? r.responseBodySize : Number.isFinite(r.size) ? r.size : -1,
         },
         cache: {},
         timings,
       };
       if (postData) entry.request.postData = postData;
-      if (Array.isArray(r._wsFrames) && r._wsFrames.length > 0) {
-        // Chrome's WebSocket-entry extension key, written the way Chrome
-        // writes it (epoch seconds, opcode 1 text) so DevTools and other
-        // HAR tools read the conversation back. Binary frames were only
-        // captured as size placeholders, so they export as opcode 2
-        // without data, and every fidelity loss is declared on the entry.
-        entry._webSocketMessages = r._wsFrames.map((frame) => {
-          const message = {
-            type: frame.type,
-            time: Number.isFinite(frame.time) ? frame.time / 1000 : 0,
-            opcode: frame.binary ? 2 : 1,
-          };
-          if (!frame.binary) message.data = frame.data;
-          return message;
-        });
-        const droppedFrames = r._wsFramesDropped || 0;
-        const binaryFrames = r._wsFrames.filter((frame) => frame.binary).length;
-        if (droppedFrames > 0 || binaryFrames > 0) {
-          entry._networkPlus = {
-            webSocketExport: {
-              droppedFrames,
-              binaryFramesWithoutPayload: binaryFrames,
-              textPreviewLimit: WS_FRAME_PREVIEW_CHARS,
-            },
-          };
-        }
+      const webSocket = webSocketExports?.get(r) || (r._wsFrames?.length > 0 && {
+        ...describeWebSocketExport(r),
+        frames: r._wsFrames.map(toHarWebSocketMessage),
+      });
+      if (webSocket?.count > 0) {
+        if (webSocket.frames) entry._webSocketMessages = webSocket.frames;
+        else entry._networkPlus = { webSocketFramesOmitted: webSocket.count };
+      }
+      if (webSocket?.droppedFrames > 0 || webSocket?.binaryFramesWithoutPayload > 0 || webSocket?.unavailable) {
+        entry._networkPlus = {
+          ...entry._networkPlus,
+          webSocketExport: webSocket.unavailable ? { mirrorFramesUnavailable: true } : {
+            droppedFrames: webSocket.droppedFrames,
+            binaryFramesWithoutPayload: webSocket.binaryFramesWithoutPayload,
+            textPreviewLimit: WS_FRAME_PREVIEW_CHARS,
+          },
+        };
       }
       entries.push(entry);
     }
@@ -17140,6 +17767,71 @@ const _NetworkPlus = (function () {
         entries,
       },
     };
+  }
+
+  function buildStreamHarEntry(row, includeBodies) {
+    if (includeBodies) return buildHarLogFromRows([row]).log.entries[0];
+    // Only placeholders and counts enter a sanitized snapshot. Keep the
+    // recorded sizes, even though the transcripts themselves are omitted.
+    const postData = row.requestPostData;
+    const snapshot = {
+      ...row,
+      requestPostData: postData ? {
+        mimeType: postData.mimeType,
+        text: postData.text || Array.isArray(postData.params) ? OMISSION_MARKER : '',
+      } : null,
+      responseContent: row.responseContent === '' ? '' : null,
+      responseContentEncoding: '',
+      _wsFrames: null,
+    };
+    const counts = describeWebSocketExport(row);
+    return buildHarLogFromRows([snapshot], null, new Map([[snapshot, counts]])).log.entries[0];
+  }
+
+  function isStreamHarEntry(entry, includeBodies) {
+    if (!isRecord(entry) || !isRecord(entry.request) || !isRecord(entry.response?.content) ||
+        !['WS', 'SSE'].includes(entry.request.method) || typeof entry.request.url !== 'string' ||
+        !Number.isFinite(entry.request.bodySize) || !Number.isFinite(entry.response.bodySize) ||
+        !Number.isFinite(entry.response.content.size)) return false;
+    const { request, response } = entry;
+    const { content } = response;
+    const postData = request.postData;
+    const isNamedValues = (values) => values === undefined || (Array.isArray(values) &&
+      values.every((item) => isRecord(item) && typeof item.name === 'string' && typeof item.value === 'string'));
+    const isBody = (body) => (body.text === undefined || typeof body.text === 'string') &&
+      (body.encoding === undefined || (body.encoding === 'base64' && typeof body.text === 'string')) &&
+      (body.mimeType === undefined || typeof body.mimeType === 'string');
+    const isPostData = (body) => isRecord(body) && isBody(body) && (body.params === undefined ||
+      (Array.isArray(body.params) && body.params.every((param) =>
+        isRecord(param) && typeof param.name === 'string' && Object.values(param).every((value) => typeof value === 'string'),
+      )));
+    if (!isNamedValues(request.headers) || !isNamedValues(response.headers) || !isNamedValues(request.queryString) ||
+        !isBody(content) ||
+        (entry.timings !== undefined && (!isRecord(entry.timings) ||
+          !Object.values(entry.timings).every(Number.isFinite))) ||
+        (postData !== undefined && !isPostData(postData))) return false;
+    const frames = entry._webSocketMessages;
+    if (frames !== undefined &&
+        (!includeBodies || entry.request.method !== 'WS' || !Array.isArray(frames) ||
+          frames.length > HAR_WS_MESSAGE_IMPORT_LIMIT || !frames.every(isBoundedHarWebSocketMessage))) return false;
+    if (includeBodies) return true;
+    return content.encoding === undefined && (content.text === undefined || content.text === '') &&
+      (postData === undefined || (postData.params === undefined && postData.encoding === undefined &&
+        (postData.text === OMISSION_MARKER || postData.text === '')));
+  }
+
+  function buildUnavailableStreamHarEntry(row) {
+    const snapshot = {
+      ...row,
+      requestPostData: null,
+      responseContent: null,
+      responseContentState: 'unavailable',
+      responseContentReason: STREAM_HAR_UNAVAILABLE_REASON,
+    };
+    const entry = buildHarLogFromRows([snapshot]).log.entries[0];
+    entry._networkPlus = { streamHarExport: { snapshotUnavailable: true } };
+    if (row.method === 'WS') entry._networkPlus.webSocketExport = { mirrorFramesUnavailable: true };
+    return entry;
   }
 
   // CSV is a sanitized-only, metadata-only view for spreadsheet triage
@@ -17189,6 +17881,15 @@ const _NetworkPlus = (function () {
     );
     try {
       const responseContents = new Map();
+      const webSocketExports = new Map();
+      const includeWebSocketFrames = outboundPolicy.mode === 'full';
+      const streamEntries = new Map();
+      let unavailableStreamCount = 0;
+      // Local streams need no I/O. Take their snapshots before waiting for
+      // other entries so later drains cannot change their export data.
+      for (const row of rows) {
+        if (isLiveStreamRow(row)) streamEntries.set(row, buildStreamHarEntry(row, includeWebSocketFrames));
+      }
       let unavailableCount = 0;
       // Bodies resolve with small bounded concurrency: a serial walk turns
       // thousands of uncached DevTools round-trips (10 s timeout each)
@@ -17199,13 +17900,32 @@ const _NetworkPlus = (function () {
         Array.from({ length: Math.min(HAR_EXPORT_BODY_CONCURRENCY, pendingRows.length) }, async () => {
           while (pendingRows.length > 0) {
             const row = pendingRows.shift();
-            const content = await resolveHarResponseContent(row);
+            if (streamEntries.has(row)) continue;
+            if (row._mirrorFetchStreamHar) {
+              const fallback = buildUnavailableStreamHarEntry(row);
+              try {
+                const entry = await row._mirrorFetchStreamHar(row._mirrorStreamRevision || 0, includeWebSocketFrames);
+                streamEntries.set(row, entry);
+              } catch (_error) {
+                streamEntries.set(row, fallback);
+                unavailableStreamCount += 1;
+              }
+              continue;
+            }
+            // A sanitized mirror export needs only the count. Fetching the
+            // response as usual would also pull the raw transcript over the port.
+            const omitMirrorTranscript = !includeWebSocketFrames && Boolean(row._mirrorFetchWebSocketExport);
+            const [content, webSocket] = await Promise.all([
+              omitMirrorTranscript ? buildHarResponseContent(row) : resolveHarResponseContent(row),
+              row._mirrorFetchWebSocketExport?.(includeWebSocketFrames).catch(() => ({ unavailable: true })),
+            ]);
             responseContents.set(row, content);
-            if (content._networkPlus) unavailableCount += 1;
+            if (webSocket) webSocketExports.set(row, webSocket);
+            if (!omitMirrorTranscript && content._networkPlus) unavailableCount += 1;
           }
         }),
       );
-      const fullHar = buildHarLogFromRows(rows, responseContents);
+      const fullHar = buildHarLogFromRows(rows, responseContents, webSocketExports, streamEntries);
       const har = createOutboundPayload(
         outboundPolicy,
         () => sanitizeHar(fullHar),
@@ -17226,11 +17946,14 @@ const _NetworkPlus = (function () {
           ? 'network-plus-full' + scopeSuffix + '.har'
           : 'network-plus-sanitized' + scopeSuffix + '.har',
       );
+      const streamStatus = unavailableStreamCount > 0
+        ? ' ' + uiTextFormat('statusHarStreamSnapshotsOmitted', { count: unavailableStreamCount })
+        : '';
       if (outboundPolicy.mode === 'full') {
         setStatus(
           uiTextFormat(exportScope === 'selected' ? 'statusExportedFullHarSelected' : 'statusExportedFullHar', {
             count: rows.length,
-          }),
+          }) + streamStatus,
         );
       } else {
         const counts = har.log._networkPlus.counts;
@@ -17244,7 +17967,7 @@ const _NetworkPlus = (function () {
             counts.omittedBodies +
             ' bodies omitted' +
             (unavailableCount > 0 ? ', ' + unavailableCount + ' source bodies unavailable' : '') +
-            '.',
+            '.' + streamStatus,
         );
       }
     } catch (error) {
@@ -19970,7 +20693,7 @@ const _NetworkPlus = (function () {
           state.retention.omittedBodies += stagedOmissions;
           state.retention.evictedBodies += stagedEvictions;
           updateRetentionStatus();
-          queueRetentionSummary(stagedOmissions + ' response bodies omitted, ' + stagedEvictions + ' evicted during import');
+          queueRetentionSummary(stagedOmissions + ' response bodies omitted, ' + stagedEvictions + ' evicted during import', 'import');
         }
         renderBody();
         return retainedRows.length;
@@ -19989,20 +20712,22 @@ const _NetworkPlus = (function () {
         setImportBusy(true);
         try {
           if (sourceValidation.error) throw createImportError(sourceValidation.error);
-          setStatus(`Importing ${sourceValidation.format.toUpperCase()}...`);
+          setStatus(uiTextFormat('statusImportInProgress', { format: sourceValidation.format.toUpperCase() }));
           const stagedImport =
             sourceValidation.format === 'har'
               ? await stageHarImport(file)
               : await stageSazImport(file);
           const retainedCount = commitStagedImport(stagedImport);
-          setStatus(
-            `Imported ${stagedImport.totalCount} requests from ${stagedImport.format}; retained ${retainedCount}`,
-          );
+          setStatus(uiTextFormat('statusImportSummary', {
+            format: stagedImport.format,
+            total: stagedImport.totalCount,
+            retained: retainedCount,
+          }));
           return '';
         } catch (error) {
           const message =
             error && error.name === 'ImportError' ? error.message : 'The selected file could not be imported.';
-          setStatus(uiTextFormat('statusImportFailed', { reason: message }));
+          setStatus(formatImportFailure(message));
           console.error('Network+ import failed: ' + message);
           return message;
         } finally {
@@ -20032,7 +20757,7 @@ const _NetworkPlus = (function () {
       }
       if (pendingResponseSearchFrame) return;
       pendingResponseSearchFrame = true;
-      window.requestAnimationFrame(() => {
+      scheduleCaptureRender(() => {
         pendingResponseSearchFrame = false;
         if (!hasActiveSearchKeywords(state.search.keywords, state.search.options)) return;
         renderGridAfterSearchChange();
@@ -20123,7 +20848,7 @@ const _NetworkPlus = (function () {
       }
       if (pendingLiveFrame) return;
       pendingLiveFrame = true;
-      window.requestAnimationFrame(() => {
+      scheduleCaptureRender(() => {
         pendingLiveFrame = false;
         const shouldScrollToBottom = pendingScrollToBottom && state.autoScroll;
         pendingScrollToBottom = false;
@@ -20164,7 +20889,7 @@ const _NetworkPlus = (function () {
       const repaintCompletedRows = () => {
         if (completionFrame) return;
         completionFrame = true;
-        window.requestAnimationFrame(() => {
+        scheduleCaptureRender(() => {
           completionFrame = false;
           commitPendingLiveRows();
           const changed = new Set(completedRows);
@@ -20397,13 +21122,14 @@ const _NetworkPlus = (function () {
       const bumpNextId = (rowId) => {
         if (Number.isInteger(rowId) && rowId >= state.nextId) state.nextId = rowId + 1;
       };
-      const buildViewerRowFromWire = (wireRow) => {
+      const buildViewerRowFromWire = (wireRow, session) => {
         const row = buildRowFromRequest(buildMirrorEntryFromWire(wireRow), wireRow.id);
         if (wireRow.initiator && typeof wireRow.initiator === 'object') row.initiator = wireRow.initiator;
         // WebSocket rows claim no HTTP status; keep the blank instead of a 0.
         if (wireRow.response && wireRow.response.status === '') row.status = '';
         row._reqObj = null;
         row._pendingRequest = wireRow.pending === true;
+        if (Number.isSafeInteger(wireRow.streamRevision)) row._mirrorStreamRevision = wireRow.streamRevision;
         if (row._pendingRequest) {
           row.responseContentState = 'unavailable';
           row.responseContentReason = UI_TEXT.statusPendingResponse.en;
@@ -20412,13 +21138,37 @@ const _NetworkPlus = (function () {
           new Promise((resolve, reject) => {
             viewerSession.requestBody(row.id, (error, payload) => (error ? reject(error) : resolve(payload)));
           });
+        // Older hosts had no revision on live rows. They still distinguished
+        // a capture with no observed HTTP status from a normalized HAR import.
+        if (row._mirrorStreamRevision != null ||
+            (wireRow.response?.status === '' && (row.method === 'WS' || row.method === 'SSE'))) {
+          row._mirrorFetchStreamHar = (minimumRevision, includeBodies) => new Promise((resolve, reject) => {
+            viewerSession.requestStreamHar(
+              row.id, session, minimumRevision, includeBodies,
+              (error, entry) => (error ? reject(error) : resolve(entry)),
+            );
+          });
+        }
+        if (wireRow.webSocket === true || isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders)) {
+          row._mirrorFetchWebSocketExport = (includeFrames) => new Promise((resolve, reject) => {
+            viewerSession.requestWebSocketExport(
+              row.id,
+              session,
+              includeFrames,
+              (error, payload) => (error ? reject(error) : resolve(payload)),
+            );
+          });
+        }
         return row;
       };
       // Dedupe by id in O(1): every id ever admitted this session. Stale
       // entries after eviction are harmless — the host never reuses an id
       // within a session, and a session change rebuilds the set below.
       const knownRowIds = new Set();
-      const pendingMirrorRows = new Map();
+      const mutableMirrorRows = new Map();
+      state.streamRowEvictionSweep = (evicted) => {
+        for (const row of evicted) mutableMirrorRows.delete(row.id);
+      };
       const refreshMirrorDetails = (changed) => {
         if (state.comparedRows && state.comparedRows.some((row) => changed.has(row))) {
           const comparison = $('#comparePanel');
@@ -20426,22 +21176,38 @@ const _NetworkPlus = (function () {
           renderComparisonPanel(...state.comparedRows);
           if (restoreFocus) comparison.querySelector('.compare-close-btn')?.focus({ preventScroll: true });
         } else if (changed.has(state.selectedRow) && !state.comparedRows && !$('#details').hidden) {
-          renderRowDetails(state.selectedRow);
+          if (state.selectedRow._mirrorStreamRevision != null) refreshSelectedStreamDetails();
+          else renderRowDetails(state.selectedRow);
         }
       };
       const mirrorChangedRows = new Set();
       let mirrorUpdateFrame = false;
-      const updatePendingMirrorRow = (row, wireRow) => {
-        if (!row._pendingRequest || wireRow.pending === true) return false;
-        Object.assign(row, buildViewerRowFromWire(wireRow));
-        pendingMirrorRows.delete(row.id);
+      const updateExistingMirrorRow = (row, wireRow, session) => {
+        if (row._pendingRequest && wireRow.pending !== true) {
+          Object.assign(row, buildViewerRowFromWire(wireRow, session));
+          mutableMirrorRows.delete(row.id);
+          return true;
+        }
+        if (row._mirrorStreamRevision == null || !Number.isSafeInteger(wireRow.streamRevision) ||
+            wireRow.streamRevision <= row._mirrorStreamRevision) return false;
+        const next = buildViewerRowFromWire(wireRow, session);
+        // Response transcripts still travel on demand. A fetch started before
+        // this revision cannot fill the cache with an earlier transcript.
+        row._mirrorStreamRevision = next._mirrorStreamRevision;
+        releaseResponseContent(row, 'not-loaded', false);
+        row._responseContentPromise = null;
+        row._responsePayloadPromise = null;
+        row.responseContentReason = '';
+        row.responseContentError = null;
+        for (const key of ['statusText', 'duration', 'size', 'requestPostData', 'requestBodySize', 'responseBodySize',
+          'responseContentSize', 'responseCompression', 'serverDone', 'serverDoneEpoch', 'serverDoneFilter']) row[key] = next[key];
         return true;
       };
       const scheduleMirrorRowUpdate = (row) => {
         mirrorChangedRows.add(row);
         if (mirrorUpdateFrame) return;
         mirrorUpdateFrame = true;
-        window.requestAnimationFrame(() => {
+        scheduleCaptureRender(() => {
           mirrorUpdateFrame = false;
           commitPendingLiveRows();
           const changed = new Set(mirrorChangedRows);
@@ -20450,18 +21216,18 @@ const _NetworkPlus = (function () {
           refreshMirrorDetails(changed);
         });
       };
-      const appendWireRow = (wireRow) => {
+      const appendWireRow = (wireRow, session) => {
         if (!Number.isInteger(wireRow.id)) return;
         if (knownRowIds.has(wireRow.id)) {
-          const existing = pendingMirrorRows.get(wireRow.id);
+          const existing = mutableMirrorRows.get(wireRow.id);
           if (existing && (state.activeRows.has(existing) || pendingLiveRows.includes(existing))) {
-            if (updatePendingMirrorRow(existing, wireRow)) scheduleMirrorRowUpdate(existing);
-          } else pendingMirrorRows.delete(wireRow.id);
+            if (updateExistingMirrorRow(existing, wireRow, session)) scheduleMirrorRowUpdate(existing);
+          } else mutableMirrorRows.delete(wireRow.id);
           return;
         }
-        const row = buildViewerRowFromWire(wireRow);
+        const row = buildViewerRowFromWire(wireRow, session);
         knownRowIds.add(row.id);
-        if (row._pendingRequest) pendingMirrorRows.set(row.id, row);
+        if (row._pendingRequest || row._mirrorStreamRevision != null) mutableMirrorRows.set(row.id, row);
         bumpNextId(row.id);
         const wasAtBottom =
           state.autoScroll &&
@@ -20489,11 +21255,11 @@ const _NetworkPlus = (function () {
           seenIds.add(wireRow.id);
           const existing = existingById.get(wireRow.id);
           if (existing) {
-            if (updatePendingMirrorRow(existing, wireRow)) changedRows.add(existing);
+            if (updateExistingMirrorRow(existing, wireRow, options?.session)) changedRows.add(existing);
             orderedRows.push(existing);
             continue;
           }
-          const row = buildViewerRowFromWire(wireRow);
+          const row = buildViewerRowFromWire(wireRow, options?.session);
           freshRows.push(row);
           orderedRows.push(row);
         }
@@ -20508,10 +21274,10 @@ const _NetworkPlus = (function () {
         );
         for (const row of state.rows) bumpNextId(row.id);
         knownRowIds.clear();
-        pendingMirrorRows.clear();
+        mutableMirrorRows.clear();
         for (const row of state.rows) {
           knownRowIds.add(row.id);
-          if (row._pendingRequest) pendingMirrorRows.set(row.id, row);
+          if (row._pendingRequest || row._mirrorStreamRevision != null) mutableMirrorRows.set(row.id, row);
         }
         for (const row of pendingLiveRows) knownRowIds.add(row.id);
         render();
@@ -20677,14 +21443,14 @@ const _NetworkPlus = (function () {
         if (!file || viewerImportInProgress) return;
         const { error } = validateImportSource(file.name, file.size);
         if (error) {
-          setStatus(uiTextFormat('statusImportFailed', { reason: error }));
+          setStatus(formatImportFailure(error));
           return;
         }
         setViewerImportBusy(true);
         setStatus(uiTextFormat('statusSendingImportToDevtools', { file: file.name }));
         const reportImportResult = (error) => {
           setViewerImportBusy(false);
-          setStatus(error ? uiTextFormat('statusImportFailed', { reason: error.message }) : uiText('statusImportFinished'));
+          setStatus(error ? formatImportFailure(error.message) : uiText('statusImportFinished'));
         };
         if (getImportFormat(file.name) === 'har' && file.size > MAX_SAZ_SOURCE_BYTES) {
           await viewerSession.sendHarStream(file, reportImportResult);
@@ -20704,7 +21470,7 @@ const _NetworkPlus = (function () {
           setViewerImportBusy(false);
           setStatus(
             error && error.message
-              ? uiTextFormat('statusImportFailed', { reason: error.message })
+              ? formatImportFailure(error.message)
               : uiText('statusImportNotConnectedFailure'),
           );
         }
@@ -20725,7 +21491,9 @@ const _NetworkPlus = (function () {
         activeMirrorPort = port;
         mirrorEverConnected = true;
         updateMirrorStatus();
-        port.onMessage.addListener((message) => viewerSession.handleMessage(message));
+        port.onMessage.addListener((message) => {
+          if (activeMirrorPort === port) viewerSession.handleMessage(message);
+        });
         port.onDisconnect.addListener(() => {
           if (activeMirrorPort !== port) return;
           activeMirrorPort = null;
@@ -20953,7 +21721,8 @@ const _NetworkPlus = (function () {
         mirroredPendingCaptureActive = false;
         hostSession.resetPeer();
         port.onMessage.addListener((message) => {
-          if (mirrorPort === port && !mirrorPortConfirmed) {
+          if (mirrorPort !== port) return;
+          if (!mirrorPortConfirmed) {
             mirrorPortConfirmed = true;
             if (!popoutWindow || popoutWindow.closed) {
               setStatus(uiText('statusMirrorTabReattached'));
@@ -21117,6 +21886,23 @@ const _NetworkPlus = (function () {
         pendingLiveRows.push(row);
         return row;
       };
+      const publishStreamRows = (rows) => {
+        let hasActiveRows = false;
+        let selectedChanged = false;
+        const queuedRows = new Set(pendingLiveRows);
+        for (const row of rows) {
+          row._streamRevision = (row._streamRevision || 0) + 1;
+          const active = state.activeRows.has(row);
+          if (active) {
+            hasActiveRows = true;
+            if (row === state.selectedRow) selectedChanged = true;
+          }
+          if (active || queuedRows.has(row)) notifyMirrorRowCaptured(row);
+        }
+        if (!hasActiveRows) return;
+        renderBody();
+        if (selectedChanged) refreshSelectedStreamDetails();
+      };
       const ingestDrainedStream = (result, variant) => {
         if (!Array.isArray(result) || result.length === 0) return;
         const rowsByVariant = variant === 'sse' ? streamCapture.sseRows : streamCapture.socketRows;
@@ -21161,21 +21947,20 @@ const _NetworkPlus = (function () {
             }
             closedRows.push(row);
           }
-          const renderedClosed = closedRows.filter((row) => state.activeRows.has(row));
-          if (renderedClosed.length > 0 && !replaceRenderedRowStates(renderedClosed)) renderBody();
+          publishStreamRows(closedRows);
           return;
         }
-        let createdCount = 0;
+        const createdRows = new Set();
         const changedRows = ingestWsEvents(result, {
           createRow: (event) => {
-            if (createdCount === 0) {
+            if (createdRows.size === 0) {
               disposeClearUndoSnapshot(
                 'live',
                 'Undo for the cleared local sample was closed before live capture to keep sample and live traffic separate.',
               );
             }
-            createdCount += 1;
             const created = createStreamRow(event, variant);
+            createdRows.add(created);
             pendingSet.add(created);
             return created;
           },
@@ -21194,9 +21979,8 @@ const _NetworkPlus = (function () {
             return row;
           },
         });
-        if (createdCount > 0) scheduleLiveRows(false);
-        const renderedRows = changedRows.filter((row) => state.activeRows.has(row));
-        if (renderedRows.length > 0 && !replaceRenderedRowStates(renderedRows)) renderBody();
+        publishStreamRows(new Set([...createdRows, ...changedRows]));
+        if (createdRows.size > 0) scheduleLiveRows(false);
       };
       // Swallowing every eval failure left the toggle claiming capture was on
       // while nothing could reach the page; a short streak surfaces it once.
@@ -21245,12 +22029,16 @@ const _NetworkPlus = (function () {
       ) {
         chrome.devtools.network.onNavigated.addListener(() => {
           // The old document took the wrappers and their connections with it.
+          const navigatedRows = [];
           for (const rowsByVariant of [streamCapture.socketRows, streamCapture.sseRows]) {
             for (const row of rowsByVariant.values()) {
-              if (row.statusText !== 'Closed') row.statusText = 'Navigated';
+              if (row.statusText === 'Closed') continue;
+              row.statusText = 'Navigated';
+              navigatedRows.push(row);
             }
             rowsByVariant.clear();
           }
+          publishStreamRows(navigatedRows);
           if (streamCapture.enabled) injectStreamWrappers();
         });
       }
@@ -21515,6 +22303,8 @@ const _NetworkPlus = (function () {
     preserveMatchingRowIndex,
     planKeywordSearchNavigation,
     planKeywordHighlights,
+    planPaneSearchRanges,
+    countPaneSearchHits,
     shouldRenderSelectedRow,
     isIncrementalAppendEligible,
     getIncrementalAppendBatch,
@@ -21683,6 +22473,10 @@ const _NetworkPlus = (function () {
     buildRawResponseText,
     planInspectorTabActivation,
     localizeBodyReason,
+    localizeImportReason,
+    localizeImportRetentionAction,
+    formatImportFailure,
+    formatRetentionSummary,
     localizeTimingLimitation,
     markUnfetchedRowsForNavigation,
     planSelectedExportRows,

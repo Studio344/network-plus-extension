@@ -100,7 +100,7 @@ async function startPanelBrowser(profilePrefix) {
         '--disable-extensions',
         '--no-default-browser-check',
         '--no-first-run',
-        '--no-sandbox',
+        ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
         panelUrl,
       ],
       { stdio: 'ignore' },
@@ -1704,17 +1704,14 @@ browserTest(
             if (records.some((record) => record.type === 'childList')) mutationBatches += 1;
           });
           observer.observe(tbody, { childList: true });
-          // The burst arms two commit paths: the next frame and the 250ms
-          // max-wait timer. A starved runner can start that frame later than
-          // 250ms while the main thread idles, so the timer evicts rows 1-100
-          // in its own task and the frame appends in a second mutation batch.
-          // That path belongs to the max-wait scenario; hold the timer here so
-          // this one always measures the frame, and prove the frame cancelled it.
+          // Hold the commit and render fallback timers so this scenario
+          // always measures a single frame and can verify the frame cancelled both.
           const heldFallbacks = new Map();
           const originalSetTimeout = window.setTimeout;
           const originalClearTimeout = window.clearTimeout;
           window.setTimeout = function (callback, delay, ...args) {
-            if (!new Error().stack.includes('armPendingLiveCommitTimer')) {
+            const stack = new Error().stack;
+            if (!stack.includes('armPendingLiveCommitTimer') && !stack.includes('scheduleCaptureRender')) {
               return originalSetTimeout.call(window, callback, delay, ...args);
             }
             const id = -(heldFallbacks.size + 1);
@@ -1925,6 +1922,7 @@ browserTest(
       await cdp.send('Page.navigate', { url: maxWaitPanelUrl });
       await waitForLiveNetworkListener(cdp, maxWaitPanelUrl);
       await installControllableLiveScheduler(cdp);
+      await evaluate(cdp, "Object.defineProperty(document, 'hidden', { configurable: true, value: true }); true");
 
       const suspendedFrameResult = await evaluate(
         cdp,
@@ -2068,6 +2066,7 @@ browserTest(
             frameCount: window.__networkPlusSchedulerSnapshot().frameCount,
             pendingCount: state.pendingLiveRows.length,
           };
+          delete document.hidden;
           const frameRan = await window.__networkPlusRunNextFrame();
           await waitForPrefetch();
           await Promise.resolve();
@@ -2160,7 +2159,10 @@ browserTest(
         expect.objectContaining({
           cleanupQueries: 1,
           mutationBatches: 1,
-          maxWaitFallbacks: [{ delay: 250, cancelled: true }],
+          maxWaitFallbacks: [
+            { delay: 250, cancelled: true },
+            { delay: 300, cancelled: true },
+          ],
           rowCount: 5000,
           uniqueRowCount: 5000,
           firstRowId: 101,
@@ -7170,13 +7172,20 @@ browserTest(
     try {
       await waitForLiveNetworkListener(page.cdp);
       const observed = await evaluate(page.cdp, `(async () => {${WAIT_FOR_IN_PAGE}
-        for (const path of ['/hidden-first', '/match-a', '/hidden-middle', '/match-b', '/hidden-last']) {
-          globalThis.__networkPlusLiveListener({
-            startedDateTime: '2026-01-15T12:00:00.000Z', time: 20,
-            request: { method: 'GET', url: 'https://example.test' + path, headers: [] },
-            response: { status: 200, headers: [], content: { size: 0, mimeType: 'text/plain' } },
-            getContent(callback) { callback('', ''); },
-          });
+        // Withhold the native frame for this burst to exercise the visible-view fallback.
+        const requestAnimationFrame = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+        try {
+          for (const path of ['/hidden-first', '/match-a', '/hidden-middle', '/match-b', '/hidden-last']) {
+            globalThis.__networkPlusLiveListener({
+              startedDateTime: '2026-01-15T12:00:00.000Z', time: 20,
+              request: { method: 'GET', url: 'https://example.test' + path, headers: [] },
+              response: { status: 200, headers: [], content: { size: 0, mimeType: 'text/plain' } },
+              getContent(callback) { callback('', ''); },
+            });
+          }
+        } finally {
+          window.requestAnimationFrame = requestAnimationFrame;
         }
         if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 5, 1200)) {
           throw new Error('The five-row navigation fixture did not render.');
@@ -7229,7 +7238,7 @@ browserTest(
         document.querySelector('#exportHarBtn').click();
         const selectedExportCount = document.querySelector('#dataSafetyScopeSelectedCount').textContent;
         document.querySelector('#dataSafetyCancelBtn').click();
-        if (!await waitFor(() => document.activeElement?.id === 'exportHarBtn', 1000)) {
+        if (document.activeElement?.id !== 'exportHarBtn') {
           throw new Error('The export dialog did not restore focus.');
         }
 
@@ -16354,6 +16363,122 @@ const followupComparisonSwitchBuild = (toLanguage) => `(async () => {
     sectionTitles: Array.from(panel.querySelectorAll('.compare-section-title')).map((el) => el.textContent),
   };
 })()`;
+
+browserTest(
+  'comparison body notices follow language changes while captured text stays literal',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      query: '?view=offline',
+      initScript: "localStorage.setItem('networkPlus.lang', 'en');",
+    });
+    const requestText = '<img src=x onerror=window.__bodyExecuted=true> request (no body) 日本 $&';
+    const responseText = '<svg onload=window.__bodyExecuted=true>response (empty body) 日本</svg>';
+    try {
+      await evaluate(page.cdp, `(() => {
+        const postData = (text) => ({ mimeType: 'text/plain', text });
+        const content = (text) => ({ mimeType: 'text/plain', text, size: text.length });
+        const bodies = [
+          [null, { mimeType: 'text/plain' }],
+          [postData(''), content('')],
+          [postData(${JSON.stringify(requestText)}), content(${JSON.stringify(responseText)})],
+          [postData('q'.repeat(2001)), content('r'.repeat(2001))],
+          [postData('retained request'), content('x'.repeat(1100000))],
+        ];
+        const entries = bodies.map(([requestBody, responseBody], index) => ({
+          startedDateTime: new Date(1700000000000 + index).toISOString(), time: 1,
+          request: { method: 'POST', url: 'https://synthetic.invalid/comparison/' + index, headers: [], postData: requestBody },
+          response: { status: 200, headers: [], content: responseBody }, timings: {},
+        }));
+        const files = new DataTransfer();
+        files.items.add(new File([JSON.stringify({ log: { entries } })], 'comparison.har'));
+        const input = document.querySelector('#importFile');
+        input.files = files.files; input.dispatchEvent(new Event('change'));
+        return true;
+      })()`);
+      const deadline = Date.now() + 15000;
+      let imported = false;
+      while (Date.now() < deadline) {
+        imported = await evaluate(page.cdp, "document.querySelectorAll('#tbody tr[data-row-id]').length === 5 && !document.querySelector('#importBtn').disabled");
+        if (imported) break;
+        await delay(25);
+      }
+      expect(imported).toBe(true);
+      await evaluate(page.cdp, `(() => {
+        window.__comparePair = (first, second) => {
+          const row = (index) => document.querySelectorAll('#tbody tr[data-row-id]')[index];
+          row(first).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          for (const index of [first, second]) {
+            row(index).dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true, metaKey: true }));
+          }
+          row(first).querySelector('[data-col-id="path"]').dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true, clientX: 60, clientY: 100,
+          }));
+          const label = document.documentElement.lang === 'ja' ? '選択した 2 件のリクエストを比較' : 'Compare 2 selected requests';
+          const action = Array.from(document.querySelectorAll('.context-menu-item')).find((item) => item.textContent === label);
+          if (!action) throw new Error('Comparison fixture could not open the two-row comparison.');
+          action.click();
+        };
+        window.__comparisonBodies = () => {
+          const panel = document.querySelector('#comparePanel');
+          return {
+            open: !panel.hidden,
+            blocks: Array.from(panel.querySelectorAll('.diff-body-block')).map((block) => ({
+              notice: block.querySelector('.diff-body-notice')?.textContent || null,
+              text: block.querySelector('.diff-body-pre')?.textContent ?? null,
+            })),
+            injectedElements: panel.querySelectorAll('.diff-body-content img,.diff-body-content svg').length,
+            executed: window.__bodyExecuted === true,
+          };
+        };
+        return true;
+      })()`);
+      const measure = async (language, pair) => evaluate(page.cdp, `(async () => {
+        ${pair ? `window.__comparePair(${pair[0]}, ${pair[1]});` : ''}
+        const select = document.querySelector('#langSelect');
+        select.value = ${JSON.stringify(language)};
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        return window.__comparisonBodies();
+      })()`, true);
+      for (const [pair, kind] of [[[0, 1], 'absent'], [[2, 3], 'text'], [[0, 4], 'omitted']]) {
+        for (const [index, language] of ['en', 'ja', 'en'].entries()) {
+          const observed = await measure(language, index === 0 ? pair : null);
+          expect(observed.open).toBe(true);
+          expect(observed.injectedElements).toBe(0);
+          expect(observed.executed).toBe(false);
+          expect(observed.blocks).toHaveLength(4);
+          const [requestA, requestB, responseA, responseB] = observed.blocks;
+          if (kind === 'absent') {
+            expect(requestA).toEqual({ notice: language === 'ja' ? '（本文なし）' : '(no body)', text: null });
+            expect(requestB).toEqual({ notice: language === 'ja' ? '（本文は空です）' : '(empty body)', text: null });
+            expect(responseA.notice.startsWith(language === 'ja' ? '（本文を取得できません' : '(body not available')).toBe(true);
+            expect(responseA.text).toBeNull();
+            expect(responseB).toEqual(requestB);
+          } else if (kind === 'text') {
+            expect(requestA).toEqual({ notice: null, text: requestText });
+            expect(responseA).toEqual({ notice: null, text: responseText });
+            for (const [block, character] of [[requestB, 'q'], [responseB, 'r']]) {
+              expect(block.text).toBe(character.repeat(2000));
+              expect(block.notice).toBe(language === 'ja'
+                ? '（2,001 文字のうち 2,000 文字を表示。全文は詳細パネルで確認できます）'
+                : '(showing 2,000 of 2,001 chars — view full body in the detail panel)');
+            }
+          } else {
+            expect(responseB.notice).toBe(language === 'ja'
+              ? '（本文を省略しました。本文1件あたりの保持上限 1 MiB を超えています）'
+              : '(body omitted — exceeded the 1 MiB per-body retention limit)');
+            expect(responseB.text).toBeNull();
+            expect(requestB).toEqual({ notice: null, text: 'retained request' });
+          }
+        }
+      }
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
 
 browserTest(
   'the status bar, comparison pane, search colours and main divider speak one language',
