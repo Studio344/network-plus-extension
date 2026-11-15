@@ -338,9 +338,7 @@ async function waitForSampleCaptureAction(cdp) {
     try {
       const available = await evaluate(
         cdp,
-        `Array.from(document.querySelectorAll('button')).some(
-          (button) => button.textContent.trim() === 'Explore sample capture',
-        )`,
+        `Boolean(document.querySelector('[data-action="explore-sample-capture"]'))`,
       );
       if (available) return;
       lastError = null;
@@ -5634,9 +5632,7 @@ const activateSampleCapture = (cdp) =>
   evaluate(
     cdp,
     `(async () => {
-      const sampleButton = Array.from(document.querySelectorAll('button')).find(
-        (button) => button.textContent.trim() === 'Explore sample capture',
-      );
+      const sampleButton = document.querySelector('[data-action="explore-sample-capture"]');
       if (!sampleButton) throw new Error('Sample capture action was not found.');
       sampleButton.click();
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -16799,6 +16795,137 @@ browserTest(
           }
         }
       }
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+
+browserTest(
+  'popup forms allow keyboard traversal and preserve text editing keys',
+  async () => {
+    const page = await launchPanelPage({ executable: browserExecutable });
+    const cdp = page.cdp;
+    const press = async (key, code, windowsVirtualKeyCode, modifiers = 0) => {
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers });
+    };
+    try {
+      await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      await press('Tab', 'Tab', 9);
+      expect(await evaluate(cdp, `({
+        open: document.querySelector('#columnFilterPopup').classList.contains('show'),
+        operator: document.activeElement.matches('select.filter-op'),
+      })`)).toEqual({ open: true, operator: true });
+      await press('Tab', 'Tab', 9);
+      expect(await evaluate(cdp, "document.activeElement.matches('input.filter-value')")).toBe(true);
+      await cdp.send('Input.insertText', { text: '42' });
+      expect(await evaluate(cdp, "document.activeElement.value")).toBe('42');
+      await press('Tab', 'Tab', 9, 8);
+      expect(await evaluate(cdp, "document.activeElement.matches('select.filter-op')")).toBe(true);
+      await press('Escape', 'Escape', 27);
+      expect(await evaluate(cdp, "document.activeElement.id")).toBe('filterBtn');
+      await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      await press('Tab', 'Tab', 9, 8);
+      expect(await evaluate(cdp, "document.querySelector('#columnFilterPopup').classList.contains('show')")).toBe(false);
+
+      await evaluate(cdp, "document.querySelector('#columnsBtn').click()");
+      let reachedHeader = false;
+      for (let index = 0; index < 60; index += 1) {
+        if (await evaluate(cdp, "document.activeElement.id === 'customHeaderNameInput'")) {
+          reachedHeader = true;
+          break;
+        }
+        await press('Tab', 'Tab', 9);
+      }
+      expect(reachedHeader).toBe(true);
+      await cdp.send('Input.insertText', { text: 'x-request-id' });
+      await press('Home', 'Home', 36);
+      expect(await evaluate(cdp, "({ id: document.activeElement.id, start: document.activeElement.selectionStart })"))
+        .toEqual({ id: 'customHeaderNameInput', start: 0 });
+      await press('End', 'End', 35);
+      expect(await evaluate(cdp, "document.activeElement.selectionStart")).toBe(12);
+      await press('Tab', 'Tab', 9);
+      expect(await evaluate(cdp, "document.activeElement.id")).toBe('customHeaderApplyBtn');
+      await press('Tab', 'Tab', 9, 8);
+      expect(await evaluate(cdp, "document.activeElement.id")).toBe('customHeaderNameInput');
+      await press('Escape', 'Escape', 27);
+      expect(await evaluate(cdp, "document.activeElement.id")).toBe('columnsBtn');
+
+      // A simple action menu retains its familiar Tab-to-dismiss behavior.
+      await evaluate(cdp, "document.querySelector('#searchToggleBtn').click(); document.querySelector('.search-color-btn').click()");
+      await press('Tab', 'Tab', 9);
+      expect(await evaluate(cdp, "document.querySelector('#searchColorMenu').classList.contains('show')")).toBe(false);
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'request Find shortcuts respect an open modal and work after dismissal',
+  async () => {
+    const page = await launchPanelPage({ executable: browserExecutable });
+    const cdp = page.cdp;
+    try {
+      for (const modifiers of [2, 4]) {
+        await evaluate(cdp, "document.querySelector('#settingsBtn').click()");
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers });
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers });
+        expect(await evaluate(cdp, `({
+          dialog: document.querySelector('#settingsDialog').open,
+          focus: document.activeElement.id,
+          search: getComputedStyle(document.querySelector('#searchPanel')).display,
+        })`)).toEqual({ dialog: true, focus: 'langSelect', search: 'none' });
+        await evaluate(cdp, "document.querySelector('#settingsCloseBtn').click()");
+      }
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers: 4 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers: 4 });
+      expect(await evaluate(cdp, "document.activeElement.classList.contains('search-keyword-input')")).toBe(true);
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'Japanese operational messages describe sample exit Clear Undo and sanitized export',
+  async () => {
+    const page = await launchPanelPage({ executable: browserExecutable });
+    const cdp = page.cdp;
+    try {
+      await waitForSampleCaptureAction(cdp);
+      await activateSampleCapture(cdp);
+      await evaluate(cdp, `(() => {
+        const language = document.querySelector('#langSelect');
+        language.value = 'ja';
+        language.dispatchEvent(new Event('change'));
+        document.querySelector('#sampleExitBtn').click();
+      })()`);
+      expect(await evaluate(cdp, "document.querySelector('#statusText').textContent")).toBe(
+        'ローカルサンプルを終了し、元の記録状態と列フィルターを復元しました。ライブ記録中です。',
+      );
+      await evaluate(cdp, "document.querySelector('.empty-state-action').click(); document.querySelector('#clearBtn').click()");
+      expect(await evaluate(cdp, "document.querySelector('#statusText').textContent")).toBe(
+        'ローカルサンプルキャプチャを消去し、ライブキャプチャを再開しました。 10 秒間は元に戻せます。',
+      );
+      await evaluate(cdp, "document.querySelector('#undoClearBtn').click()");
+      expect(await evaluate(cdp, "document.querySelector('#statusText').textContent")).toBe(
+        '直前のクリアからリクエスト 3 件を復元しました。',
+      );
+      await evaluate(cdp, "document.querySelector('#exportHarBtn').click(); document.querySelector('#dataSafetySanitizedBtn').click()");
+      const deadline = Date.now() + 5000;
+      let status = '';
+      while (Date.now() < deadline) {
+        status = await evaluate(cdp, "document.querySelector('#statusText').textContent");
+        if (status.includes('エクスポートしました')) break;
+        await delay(50);
+      }
+      expect(status).toMatch(/^3 件のリクエストをサニタイズ済み HAR としてエクスポートしました。値を \d+ 件伏せ字化し、ボディを \d+ 件省略しました。$/);
     } finally {
       await page.close();
     }

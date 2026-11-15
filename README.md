@@ -43,7 +43,7 @@ The stock Network panel is great at showing you traffic. Network+ is built for t
 - **Bounded where it counts.** Response bodies always obey a 1 MiB per-body and 32 MiB shared-cache limit, with visible counters and predictable eviction. Request rows are kept in full by default so a long session never silently loses the request you were about to look for; the Settings dialog states the memory cost of that and caps them from 100 to 100,000 whenever you want the bound back.
 - **Work by keyboard.** Every control is reachable without a mouse, in System / Dark / Light themes that all meet WCAG 2.2 AA contrast.
 - **Settings in one place.** The 🎛️ Settings dialog gathers language, theme, and capture retention. Explanations, tooltips, empty-state text, the timing guide, and every dialog — item names included — are available in Japanese (System / English / 日本語). Toolbar buttons and column headers stay in English, so a written instruction still names what you click and an export keeps its English column names.
-- **No build, no telemetry, no network.** Plain files loaded straight into Edge or Chrome; the extension holds a single permission (`storage`) and sends nothing anywhere.
+- **No build or telemetry.** Plain files loaded straight into Edge or Chrome. At install, the only permission is `storage`. Resend asks for site access when used.
 
 <details>
 <summary><b>More screenshots</b></summary>
@@ -105,7 +105,7 @@ Then open `edge://extensions/` or `chrome://extensions/`, turn on **Developer mo
 | Google Chrome | Supported | Verified below; listed on the [Chrome Web Store](https://chromewebstore.google.com/detail/mhidipnhdnonbjkfklcohmnnmfggjlpo) |
 | Firefox / Safari | Not supported | Different DevTools extension APIs and Manifest V3 implementations |
 
-There is no browser-specific branch in the source. The only extension APIs used are `chrome.devtools.network`, `chrome.devtools.panels`, `chrome.storage.local`, and `chrome.runtime` — all Chromium standard.
+There is no browser-specific branch in the source. The recording and inspection features use `chrome.devtools.network`, `chrome.devtools.panels`, `chrome.storage.local`, and `chrome.runtime` for core features. Resend additionally uses `chrome.permissions` and `chrome.scripting`.
 
 Verified for Chrome:
 
@@ -137,7 +137,7 @@ With the panel open and no traffic captured yet, choose **Explore sample capture
 - **Compare 2 selected requests** — <kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click exactly two rows to diff URL, query parameters, method, status, protocol, headers, and body, with matching, changed, and one-sided values color-coded.
 - **Operation column for API traffic** — off by default in the Columns menu: GraphQL `operationName` (or the parsed query / mutation / subscription name, batches included) and JSON-RPC `method` are pulled from POST bodies, so "POST /graphql" rows read by what they actually do. Sortable and filterable like any column, and echoed in the request Headers pane.
 - **JWT decode, inline** — any header value shaped like a JWT (Authorization: Bearer and friends, request or response side) gains an expandable section in the Headers panes with the decoded header and claims, humanized `exp` / `nbf` / `iat` times, and an "expired N min ago" flag. Display only: signatures are not verified, and sanitized copies keep redacting the raw token.
-- **Edit and resend** — the row menu re-sends a captured request as-is, or opens a dialog to tweak method, URL, headers, and body first. The inspected page itself issues the composed request, so cookies, CORS, and the page's security policies apply as usual (browser-managed headers stay browser-managed), and the reply lands as a new captured row. Works from the pop-out mirror tab too (the DevTools session executes it). A cURL command copied from docs or a teammate can be pasted into the dialog to prefill every field — unsupported flags are refused by name instead of guessed.
+- **Edit and resend** — replay a request to the same origin as the inspected page. The browser may prompt you to grant access to that site. Network+ uses the inspected document’s browser session without sharing the request with its page scripts. Redirects are blocked. The pop-out uses its connected DevTools session. A cURL command can prefill the dialog.
 - Initiator links open the originating source file in DevTools.
 - **Pop out into a browser tab** — the 🪟 toolbar button opens this panel as a regular tab that mirrors the DevTools session live: new requests stream in, clears and imports follow within a second, and response bodies are fetched from the DevTools side on demand. The tab's own toolbar drives the session remotely: pause/resume, clear with undo, retention, HAR/SAZ import (the file travels to DevTools over the port), stream capture, and edit-and-resend all execute in the DevTools session, with the buttons reflecting its state within a second. The tab keeps its rows if DevTools closes, initiator entries render as plain text there, and only the guided local sample stays DevTools-side.
 - Waterfall column visualizes each request's start offset and timing phases inline.
@@ -251,7 +251,7 @@ Edge / Chrome DevTools
 |---|---|
 | Request rows | unlimited by default · capped 100–100,000 when Unlimited is turned off in Settings |
 | Response body | 1 MiB per body · 32 MiB across the shared cache |
-| HAR file | Streamed without a fixed file size limit · individual entries and retained data still depend on browser memory |
+| HAR file | Streamed without a fixed file size limit · oversized response bodies are omitted · safe parsing and retained metadata budgets apply |
 | SAZ archive | 32 MiB per file · 20,000 entries · 4 MiB per expanded entry · 64 MiB expanded in total |
 
 The status bar continuously shows body cache usage, with the active retention policy and the cumulative row-eviction, body-omission, body-eviction, and preview-omission counts in its tooltip; the retention limit itself is set from the 🎛️ Settings dialog. See [docs/architecture.md](docs/architecture.md) for the rendering pipeline, eviction rules, import validation, and UI stability rules.
@@ -327,8 +327,8 @@ Repository conventions, the panel's section layout, XSS rules, and the review to
 
 - The panel renders user-controlled values with `textContent` or DOM APIs. HTML response previews first parse into a detached template, then remove resource hints and nested documents before rendering in a sandbox with network access blocked.
 - The Content Security Policy is declared explicitly in [manifest.json](manifest.json): `script-src 'self'; object-src 'self'`.
-- The extension requests exactly one permission, `storage`, used to persist the theme and search preferences (scope, match options, and the Matches only state — never search keywords or captured traffic). HAR downloads use a local Blob URL and a temporary `<a download>` element, so the `downloads` permission is not needed.
-- The manifest is limited to audited top-level keys and one fixed toolbar action. Its sole permitted background worker, `background.js`, opens the local offline workspace and minimizes undocked DevTools on pop-out without extra permissions; New Tab overrides, host permissions, content scripts, and other workers are rejected by the validator.
+- The required permission is `storage`, used for UI preferences. Resend requests optional `scripting` and site access for the specific HTTP or HTTPS destination. Capture, import, and export work without that grant.
+- The manifest is limited to audited top-level keys and one fixed toolbar action. Its sole permitted background worker, `background.js`, opens the local offline workspace and minimizes undocked DevTools on pop-out without extra permissions; The validator rejects New Tab overrides, required host permissions, declared content scripts, and other workers.
 - `npm run extension:check` verifies exact permission parity and real usage, runtime path symlink and root boundaries, resource locality, the inline-script ban, the CSP, and the distribution allowlist.
 
 ## 🚧 Limitations

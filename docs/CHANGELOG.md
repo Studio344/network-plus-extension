@@ -4,6 +4,13 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🔒 **Safer sharing and replay** — fix URL and header redaction, quote PowerShell literals safely, and isolate same-origin resend from page scripts.
+- 🐛 **Pop-out pending requests** — keep response-waiting rows timely when the DevTools host is minimized.
+- 🐛 **Stream capture** — keep resolved URLs, terminal SSE states, named events, and actual WebSocket frame types.
+- 🔒 **Bounded capture processing** — limit HAR parser, stream, and JWT memory or CPU use and write HAR exports incrementally.
+- 🐛 **Keyboard and localization** — allow traversal of filter and column forms and localize capture status messages.
+- 🔒 **Chrome store setup** — prompt for OAuth secrets without echo.
+
 - 🔧 **Store submissions** — use the current Chrome Web Store API and capture separate review receipts for each store.
 
 ## v1.17.0 - 2026-11-15

@@ -50,6 +50,12 @@ const _NetworkPlus = (function () {
   // enough to stop a serial walk from multiplying getContent round-trips
   // into minutes, small enough to bound in-flight body memory.
   const HAR_EXPORT_BODY_CONCURRENCY = 4;
+  const HAR_MAX_PARSE_DEPTH = 128;
+  const HAR_MAX_ENTRY_NODES = 65536;
+  const HAR_MAX_ENTRY_CHARS = 16 * 1024 * 1024;
+  const HAR_MAX_RESPONSE_TEXT_CHARS = 8 * 1024 * 1024;
+  const HAR_MAX_RETAINED_METADATA_BYTES = 256 * 1024 * 1024;
+  const HAR_OVERSIZED_BODY_REASON = 'The imported HAR response body exceeds the parser’s per-body memory budget.';
   const AUTOMATIC_RESPONSE_PREFETCH_FAILURE_DEBOUNCE_MS = 750;
   const AUTOMATIC_RESPONSE_PREFETCH_FAILURE_MAX_WAIT_MS = 5000;
   const AUTOMATIC_RESPONSE_PREFETCH_QUEUE_COMPACT_THRESHOLD = 512;
@@ -276,23 +282,23 @@ const _NetworkPlus = (function () {
   const NON_SENSITIVE_KEY_NAMES = new Set(['operationname']);
   const SAFE_OUTBOUND_HEADER_NAMES = new Set([
     'accept',
-    'acceptencoding',
+    'accept-encoding',
     'allow',
-    'cachecontrol',
+    'cache-control',
     'connection',
-    'contentencoding',
-    'contentlength',
-    'contenttype',
+    'content-encoding',
+    'content-length',
+    'content-type',
     'date',
     'expires',
     'pragma',
-    'secfetchdest',
-    'secfetchmode',
-    'secfetchsite',
-    'secfetchuser',
+    'sec-fetch-dest',
+    'sec-fetch-mode',
+    'sec-fetch-site',
+    'sec-fetch-user',
     'te',
     'trailer',
-    'transferencoding',
+    'transfer-encoding',
     'upgrade',
     'vary',
   ]);
@@ -300,9 +306,9 @@ const _NetworkPlus = (function () {
     'referer',
     'referrer',
     'location',
-    'contentlocation',
-    'xoriginalurl',
-    'xrewriteurl',
+    'content-location',
+    'x-original-url',
+    'x-rewrite-url',
   ]);
   const COMPLEX_URL_HEADER_NAMES = new Set(['link', 'refresh']);
   const REQUEST_CLIPBOARD_ACTIONS = new Set(['requestBody', 'rawRequest', 'curl', 'fetch', 'powershell']);
@@ -772,12 +778,21 @@ const _NetworkPlus = (function () {
         return;
       }
       if (event.key === 'Tab') {
-        // Close like Escape (focus returns to the trigger) and let the Tab
-        // then advance naturally from there. Leaving the popup open over the
-        // grid with the trigger stuck at aria-expanded="true" was worse.
+        // Filters/Scope are forms; Columns also contains a header-name field.
+        // Traverse their controls normally and dismiss only at the boundary.
+        // Simple action menus still dismiss on Tab, as on Escape.
+        const containsForm = popup.getAttribute('role') !== 'menu' ||
+          popup.querySelector('input:not([type="checkbox"]):not([type="radio"]),textarea,select');
+        if (containsForm) {
+          const items = getPopupFocusableItems(popup, false);
+          const index = items.indexOf(document.activeElement);
+          if (index >= 0 && (event.shiftKey ? index > 0 : index < items.length - 1)) return;
+        }
         closeAccessiblePopup(popup, true);
         return;
       }
+      // Home/End and arrows belong to a text field or select while editing.
+      if (isEditableShortcutTarget(event.target)) return;
       if (popup.getAttribute('role') !== 'menu') return;
       if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
       const items = getPopupFocusableItems(popup, true);
@@ -2236,7 +2251,7 @@ const _NetworkPlus = (function () {
       ? headers.map((header) => {
         const source = header && typeof header === 'object' ? header : {};
         const name = String(source.name || '');
-        const normalizedName = normalizeSensitiveKey(name);
+        const normalizedName = name.toLowerCase();
         if (URL_VALUE_HEADER_NAMES.has(normalizedName)) {
           const sanitizedUrl = sanitizeUrlHeaderValue(String(source.value == null ? '' : source.value));
           summary = mergeSanitizationSummaries(summary, sanitizedUrl.summary);
@@ -2306,24 +2321,27 @@ const _NetworkPlus = (function () {
       };
     }
     const queryIndex = fragment.indexOf('?');
-    if (queryIndex >= 0) {
-      const route = fragment.slice(0, queryIndex);
-      const querySource = fragment.slice(queryIndex + 1);
+    const route = queryIndex >= 0 ? fragment.slice(0, queryIndex) : fragment;
+    const isRoute = /^\/[a-z0-9._~!$'()*+,;:@%/-]*$/i.test(route) &&
+      !/[=&?#%]/.test(decodeURIComponent(route));
+    if (queryIndex < 0 && isRoute) {
+      return { value: fragment, summary: createSanitizationSummary() };
+    }
+    const querySource = queryIndex >= 0 && isRoute ? fragment.slice(queryIndex + 1) : fragment;
+    // URLSearchParams also accepts bare tokens as names. Preserve only actual
+    // named fields, so opaque values cannot be copied back out as keys.
+    const fields = querySource.split('&').filter(Boolean);
+    if (fields.length && fields.every((field) => {
+      const separator = field.indexOf('=');
+      const key = separator > 0 && decodeURIComponent(field.slice(0, separator));
+      return key && /^[\p{L}\p{N}_.~:[\]-]+$/u.test(key);
+    })) {
       const params = createUrlSearchParams(querySource);
       const sanitized = sanitizeNamedValues(Array.from(params.entries(), ([name, value]) => ({ name, value })));
       const next = createUrlSearchParams('');
       for (const item of sanitized.value) next.append(item.name, item.value);
-      return { value: route + '?' + next.toString(), summary: sanitized.summary };
-    }
-    if (fragment.includes('=')) {
-      const params = createUrlSearchParams(fragment);
-      const sanitized = sanitizeNamedValues(Array.from(params.entries(), ([name, value]) => ({ name, value })));
-      const next = createUrlSearchParams('');
-      for (const item of sanitized.value) next.append(item.name, item.value);
-      return { value: next.toString(), summary: sanitized.summary };
-    }
-    if (/^\/[a-z0-9._~!$&'()*+,;:@%/-]*$/i.test(fragment)) {
-      return { value: fragment, summary: createSanitizationSummary() };
+      const prefix = queryIndex >= 0 && isRoute ? route + '?' : '';
+      return { value: prefix + next.toString(), summary: sanitized.summary };
     }
     return {
       value: REDACTION_MARKER,
@@ -2338,6 +2356,7 @@ const _NetworkPlus = (function () {
     const source = typeof rawUrl === 'string' ? rawUrl : '';
     try {
       const parsed = new URL(source);
+      if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) throw new Error('unsupported-sharing-url');
       let summary = createSanitizationSummary();
       let changed = false;
       if (parsed.username) {
@@ -2483,7 +2502,7 @@ const _NetworkPlus = (function () {
 
   function getHeaderContentType(headers) {
     const match = (Array.isArray(headers) ? headers : []).find(
-      (header) => normalizeSensitiveKey(header && header.name) === 'contenttype',
+      (header) => String(header?.name || '').toLowerCase() === 'content-type',
     );
     return match ? String(match.value || '') : '';
   }
@@ -2671,7 +2690,7 @@ const _NetworkPlus = (function () {
   }
 
   function quotePowerShell(value) {
-    return "'" + String(value == null ? '' : value).replace(/'/g, "''") + "'";
+    return "'" + String(value == null ? '' : value).replace(/['\u2018-\u201b]/g, (quote) => quote + quote) + "'";
   }
 
   function generateCurl(row) {
@@ -3853,6 +3872,11 @@ const _NetworkPlus = (function () {
     let sawEntries = false;
     let entryParts = null;
     let entryStart = -1;
+    let entryChars = 0;
+    let entryNodes = 0;
+    let body = null;
+    let responseTextChars = 0;
+    let responseTextOmitted = false;
     let count = 0;
     let text = '';
     let index = 0;
@@ -3869,10 +3893,34 @@ const _NetworkPlus = (function () {
       // Longer metadata keys cannot match and need not be kept in memory.
       if (keyText !== null) keyText = keyText.length + part.length <= 44 ? keyText + part : null;
     };
+    const appendEntryPart = (part) => {
+      entryChars += part.length;
+      if (entryChars > HAR_MAX_ENTRY_CHARS) {
+        throw createImportError('A HAR entry exceeds the per-entry parsing budget.');
+      }
+      if (part) entryParts.push(part);
+    };
+    const appendBodyPart = (part) => {
+      if (body.omitted) return;
+      body.chars += part.length;
+      if (body.chars > HAR_MAX_RESPONSE_TEXT_CHARS) {
+        body.omitted = true;
+        body.parts.length = 0;
+      } else if (part) body.parts.push(part);
+    };
+    const completeBody = () => {
+      appendBodyPart(text.slice(body.start, index));
+      responseTextOmitted = body.omitted;
+      responseTextChars = body.omitted ? 0 : body.chars;
+      if (body.omitted) appendEntryPart('null');
+      else for (const part of body.parts) appendEntryPart(part);
+      body = null;
+      entryStart = index;
+    };
     const completeValue = () => {
       const parent = stack[stack.length - 1];
       if (parent.role === 'entries') {
-        entryParts.push(text.slice(entryStart, index));
+        appendEntryPart(text.slice(entryStart, index));
         let entry;
         try {
           entry = JSON.parse(entryParts.join(''));
@@ -3885,7 +3933,11 @@ const _NetworkPlus = (function () {
         entryParts = null;
         entryStart = -1;
         if (!isRecord(entry) || !isRecord(entry.request) || !isRecord(entry.response)) invalidEntry();
-        onEntry(entry);
+        if (responseTextOmitted && entry.response.content?.text === null) {
+          delete entry.response.content.text;
+          entry.response.content._networkPlus = { status: 'omitted', reason: HAR_OVERSIZED_BODY_REASON };
+        }
+        onEntry(entry, entryChars - responseTextChars, entryNodes);
         count += 1;
       }
       parent.state = parent.kind === 'root' ? 'done' : 'commaOrEnd';
@@ -3908,10 +3960,25 @@ const _NetworkPlus = (function () {
         role = 'entries';
       } else if (parent.role === 'entries') {
         if (char !== '{') invalidEntry();
+        role = 'entry';
         entryParts = [];
         entryStart = index;
+        entryChars = 0;
+        entryNodes = 0;
+        responseTextChars = 0;
+        responseTextOmitted = false;
+      } else if (parent.role === 'entry' && parent.key === 'response' && char === '{') {
+        role = 'response';
+        responseTextChars = 0;
+        responseTextOmitted = false;
+      } else if (parent.role === 'response' && parent.key === 'content' && char === '{') {
+        role = 'content';
+        responseTextChars = 0;
+        responseTextOmitted = false;
       }
+      if (entryParts && ++entryNodes > HAR_MAX_ENTRY_NODES) throw createImportError('A HAR entry has too many JSON values.');
       if (char === '{' || char === '[') {
+        if (stack.length > HAR_MAX_PARSE_DEPTH) throw createImportError('HAR JSON is nested too deeply.');
         stack.push({
           kind: char === '{' ? 'object' : 'array',
           state: char === '{' ? 'keyOrEnd' : 'valueOrEnd',
@@ -3920,6 +3987,12 @@ const _NetworkPlus = (function () {
         });
         index += 1;
       } else if (char === '"') {
+        if (parent.role === 'content' && parent.key === 'text') {
+          // Keep parsing the whole string for JSON validity even when its
+          // payload cannot be retained. Preserve the other entry fields.
+          appendEntryPart(text.slice(entryStart, index));
+          body = { start: index, chars: 0, parts: [], omitted: false };
+        }
         token = 'string';
         stringIsKey = false;
         keyText = null;
@@ -3943,7 +4016,8 @@ const _NetworkPlus = (function () {
     const consume = (chunk) => {
       text = chunk;
       index = 0;
-      if (entryParts) entryStart = 0;
+      if (body) body.start = 0;
+      else if (entryParts) entryStart = 0;
       while (index < text.length) {
         const char = text[index];
         if (token === 'string') {
@@ -3962,7 +4036,10 @@ const _NetworkPlus = (function () {
               const parent = stack[stack.length - 1];
               parent.key = keyText === null ? '' : JSON.parse(keyText);
               parent.state = 'colon';
-            } else completeValue();
+            } else {
+              if (body) completeBody();
+              completeValue();
+            }
           } else invalidJson();
           continue;
         }
@@ -4023,7 +4100,7 @@ const _NetworkPlus = (function () {
           } else if (char === '"') {
             token = 'string';
             stringIsKey = true;
-            keyText = parent.role === 'root' || parent.role === 'log' ? '"' : null;
+            keyText = parent.role && parent.role !== 'entries' ? '"' : null;
             index += 1;
           } else invalidJson();
         } else if (parent.state === 'colon') {
@@ -4047,7 +4124,8 @@ const _NetworkPlus = (function () {
           } else invalidJson();
         } else invalidJson();
       }
-      if (entryParts) entryParts.push(text.slice(entryStart));
+      if (body) appendBodyPart(text.slice(body.start));
+      else if (entryParts) appendEntryPart(text.slice(entryStart));
       text = '';
     };
 
@@ -4847,8 +4925,6 @@ const _NetworkPlus = (function () {
     }
     row._wsFrames.push(frame);
   }
-
-  const WS_BINARY_PREVIEW_PATTERN = /^\[binary \d+ bytes\]$/;
 
   function applyHarWebSocketMessages(row, messages) {
     if (!row || !Array.isArray(messages) || messages.length === 0) return 0;
@@ -6660,8 +6736,8 @@ const _NetworkPlus = (function () {
       ja: 'メソッドに HTTP メソッドトークンとして使えない文字が含まれています。',
     },
     resendErrUrl: {
-      en: 'The URL must be absolute and use http or https.',
-      ja: 'URL は http または https で始まる絶対 URL である必要があります。',
+      en: 'Enter an absolute HTTP or HTTPS URL without a username or password.',
+      ja: 'ユーザー名やパスワードを含まない HTTP または HTTPS の絶対 URL を入力してください。',
     },
     resendErrHeaderShape: {
       en: 'Each header line needs a "Name: value" shape. First problem: {line}',
@@ -6678,6 +6754,34 @@ const _NetworkPlus = (function () {
     resendErrNotConnected: {
       en: 'the DevTools session is not connected; reopen DevTools and try again',
       ja: 'DevTools セッションに接続していません。DevTools を開き直して再試行してください',
+    },
+    resendErrInvalidRequest: {
+      en: 'the request fields are invalid',
+      ja: 'リクエストの入力内容を確認してください',
+    },
+    resendErrUnavailable: {
+      en: 'this browser or DevTools session does not support isolated resend',
+      ja: 'このブラウザまたは DevTools セッションは隔離された再送に対応していません',
+    },
+    resendErrPermission: {
+      en: 'site access was not granted; the request was not sent',
+      ja: 'サイトへのアクセスが許可されていないため、リクエストは送信されませんでした',
+    },
+    resendErrSiteMismatch: {
+      en: 'the inspected page must use the same scheme, hostname and port as the request URL',
+      ja: '検査対象ページとリクエスト URL のスキーム、ホスト名、ポートを一致させてください',
+    },
+    resendErrDocumentChanged: {
+      en: 'the inspected page or resend session changed; review the request and try again',
+      ja: '検査対象ページまたは再送セッションが変わりました。リクエストを確認して再試行してください',
+    },
+    resendErrNetwork: {
+      en: 'the request did not return a response; check the network, headers, or a blocked redirect',
+      ja: '応答を確認できませんでした。ネットワーク、ヘッダー、またはブロックされたリダイレクトを確認してください',
+    },
+    resendErrUnconfirmed: {
+      en: 'the browser did not confirm the result; check the destination before retrying',
+      ja: 'ブラウザから結果を確認できませんでした。再試行する前に送信先を確認してください',
     },
     dataSafetyWarnRedacts: {
       en: 'Sanitized output redacts every URL query and form-like fragment value, both URL userinfo components, Cookie values, and every header value outside a small structural allowlist.',
@@ -6708,8 +6812,8 @@ const _NetworkPlus = (function () {
       ja: 'この確認は今回の操作だけに適用されます。Network+ は完全出力の設定を保存しません。',
     },
     resendIntro: {
-      en: "Send composes a new request from these fields, and the inspected page itself issues it — so cookies, CORS, and the page's security policies apply as usual. The reply arrives as a new captured row.",
-      ja: 'Send はこれらのフィールドから新しいリクエストを組み立て、検査中のページ自身が送信します。そのため Cookie・CORS・ページのセキュリティポリシーは通常どおり適用されます。応答は新しいキャプチャ行として届きます。',
+      en: 'Send replays this request to the same origin as the inspected page. Your browser may ask to allow site access for resend. Redirects are blocked.',
+      ja: '検査対象ページと同じオリジンにリクエストを再送します。ブラウザが再送用のサイトアクセス許可を求める場合があります。リダイレクトはブロックされます。',
     },
     resendManagedHeadersHint: {
       en: 'Browser-managed headers (Host, Cookie, Content-Length, Origin, Referer, and the Sec-* and Proxy-* families) are set by the browser and cannot be overridden here.',
@@ -8179,6 +8283,98 @@ const _NetworkPlus = (function () {
       en: 'Full copy failed. No data was copied.',
       ja: '完全コピーに失敗しました。データはコピーされていません。',
     },
+    statusSampleExitUnavailable: {
+      en: 'Sample exit is unavailable because the complete local sample is no longer present. Use Clear to reset the current requests.',
+      ja: 'ローカルサンプルが一部失われているため終了できません。クリアで現在のリクエストを消去してください。',
+    },
+    statusSampleExitedActive: {
+      en: 'Local sample exited. Previous recording state and column filters restored. Live recording is active.',
+      ja: 'ローカルサンプルを終了し、元の記録状態と列フィルターを復元しました。ライブ記録中です。',
+    },
+    statusSampleExitedPaused: {
+      en: 'Local sample exited. Previous recording state and column filters restored. Recording remains paused.',
+      ja: 'ローカルサンプルを終了し、元の記録状態と列フィルターを復元しました。記録は一時停止中のままです。',
+    },
+    statusExportedSanitizedHar: {
+      en: 'Exported sanitized HAR for {count} requests; {redacted} values redacted, {omitted} bodies omitted',
+      ja: '{count} 件のリクエストをサニタイズ済み HAR としてエクスポートしました。値を {redacted} 件伏せ字化し、ボディを {omitted} 件省略しました',
+    },
+    statusExportedSanitizedHarSelected: {
+      en: 'Exported sanitized HAR for {count} selected requests; {redacted} values redacted, {omitted} bodies omitted',
+      ja: '選択した {count} 件のリクエストをサニタイズ済み HAR としてエクスポートしました。値を {redacted} 件伏せ字化し、ボディを {omitted} 件省略しました',
+    },
+    statusExportedHarUnavailableBodies: {
+      en: ', {count} source bodies unavailable',
+      ja: '。元のボディを {count} 件取得できませんでした',
+    },
+    statusSentenceEnd: {
+      en: '.',
+      ja: '。',
+    },
+    statusHarSanitizationFailed: {
+      en: 'HAR export failed: sanitization failed closed, so nothing left the sanitizer. No file was downloaded.',
+      ja: 'HAR のエクスポートに失敗しました。サニタイズが安全に完了しなかったため、ファイルはダウンロードされていません。',
+    },
+    statusHarBuildFailed: {
+      en: 'HAR export failed while building the file; retry or narrow the scope. No file was downloaded.',
+      ja: 'HAR ファイルの作成中にエクスポートが失敗しました。再試行するか対象範囲を絞ってください。ファイルはダウンロードされていません。',
+    },
+    statusRestoredRequests: {
+      en: 'Restored {requests} from the last Clear.',
+      ja: '直前のクリアからリクエスト {count} 件を復元しました。',
+    },
+    statusRestoredRequestsWithEviction: {
+      en: 'Restored {requests} from the last Clear; {missingRequests} had already been evicted by retention.',
+      ja: '直前のクリアからリクエスト {count} 件を復元しました。{missingCount} 件は保持上限により削除済みでした。',
+    },
+    statusUndoClearAvailable: {
+      en: 'Undo available for {seconds} seconds.',
+      ja: '{seconds} 秒間は元に戻せます。',
+    },
+    statusSampleClearedPaused: {
+      en: 'Local sample capture cleared. Recording remains paused.',
+      ja: 'ローカルサンプルキャプチャを消去しました。記録は一時停止中のままです。',
+    },
+    statusSampleClearedActive: {
+      en: 'Local sample capture cleared. Live capture resumed.',
+      ja: 'ローカルサンプルキャプチャを消去し、ライブキャプチャを再開しました。',
+    },
+    statusClearedRequests: {
+      en: 'Cleared {requests}.',
+      ja: 'リクエスト {count} 件を消去しました。',
+    },
+    statusClearedEmpty: {
+      en: 'Cleared',
+      ja: '消去しました',
+    },
+    statusMirroring: {
+      en: 'Mirroring the DevTools session',
+      ja: 'DevTools セッションをミラー表示中です',
+    },
+    statusMirroringPaused: {
+      en: 'Mirroring the DevTools session (recording paused)',
+      ja: 'DevTools セッションをミラー表示中です（記録は一時停止中）',
+    },
+    statusMirrorDisconnected: {
+      en: 'The DevTools session disconnected; captured requests remain available. To capture without interruption, keep DevTools open — undocked into its own window and minimized is fine.',
+      ja: 'DevTools セッションの接続が切れました。キャプチャ済みのリクエストは引き続き確認できます。記録を継続するには DevTools を開いたままにしてください。独立したウィンドウにして最小化しても構いません。',
+    },
+    statusPopoutOpenedMinimized: {
+      en: 'Network+ opened in a browser tab; the DevTools window is minimized and keeps capturing (restore it from the taskbar).',
+      ja: 'Network+ をブラウザータブで開きました。DevTools ウィンドウは最小化され、キャプチャを継続しています。必要に応じてタスクバーから戻してください。',
+    },
+    statusPopoutOpenedDocked: {
+      en: 'Network+ opened in a browser tab; DevTools stayed put — undock it into its own window to have it minimized automatically.',
+      ja: 'Network+ をブラウザータブで開きました。DevTools は元の位置にあります。独立したウィンドウにすると、自動で最小化できます。',
+    },
+    statusResponseBodyRetryFailed: {
+      en: 'Response-body retry failed for request {id}. Open Response > Body for details.',
+      ja: 'リクエスト {id} のレスポンスボディの再取得に失敗しました。詳細は Response > Body で確認してください。',
+    },
+    reasonResponseRetrievalFailed: {
+      en: 'Failed to retrieve response content for request {id}: {reason}',
+      ja: 'リクエスト {id} のレスポンス内容を取得できませんでした：{reason}',
+    },
     statusRetentionEvictedUndo: {
       en: 'Cleared requests were evicted by the retention limit; Undo is no longer available.',
       ja: '消去したリクエストは保持上限により破棄されました。元に戻すことはもうできません。',
@@ -8420,6 +8616,22 @@ const _NetworkPlus = (function () {
       en: 'A HAR entry is too large to parse.',
       ja: 'HAR のエントリーが大きすぎるため解析できません。',
     },
+    importReasonHarDeeplyNested: {
+      en: 'HAR JSON is nested too deeply.',
+      ja: 'HAR の JSON の入れ子が深すぎます。',
+    },
+    importReasonHarEntryBudget: {
+      en: 'A HAR entry exceeds the per-entry parsing budget.',
+      ja: 'HAR のエントリーが解析時のメモリ上限を超えています。',
+    },
+    importReasonHarTooManyValues: {
+      en: 'A HAR entry has too many JSON values.',
+      ja: 'HAR のエントリーに含まれる JSON の値が多すぎます。',
+    },
+    importReasonHarMetadataBudget: {
+      en: 'Retained HAR request data exceeds the import memory budget. Set a request retention limit and retry.',
+      ja: 'HAR のリクエスト情報が取り込み時のメモリ上限を超えました。保持するリクエスト数に上限を設定してから再試行してください。',
+    },
     importReasonHarDuplicateLog: {
       en: 'HAR contains duplicate log properties.',
       ja: 'HAR に重複した log プロパティがあります。',
@@ -8608,6 +8820,10 @@ const _NetworkPlus = (function () {
       en: 'Network+ opened in a browser tab; it mirrors this DevTools session.',
       ja: 'Network+ をブラウザータブで開きました。この DevTools セッションをミラーします。',
     },
+    statusStreamMemoryBudget: {
+      en: 'Stream capture reached its memory budget. Some stream rows or frames were omitted.',
+      ja: 'ストリーム記録がメモリ上限に達したため、一部のストリームやフレームを省略しました。',
+    },
     statusStreamCaptureOn: {
       en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',
       ja: 'ストリームキャプチャをオンにしました。以後に作成される WebSocket と SSE の接続を記録します。',
@@ -8652,11 +8868,20 @@ const _NetworkPlus = (function () {
     [BODY_RETRIEVAL_FAILED_REASON, 'reasonBodyRetrievalFailed'],
     [BODY_UNAVAILABLE_REASON, 'reasonBodyUnavailable'],
     [UI_TEXT.statusPendingResponse.en, 'statusPendingResponse'],
+    [UI_TEXT.importReasonSessionDisconnected.en, 'importReasonSessionDisconnected'],
+    [UI_TEXT.importReasonSessionDisconnectedBeforeResponse.en, 'importReasonSessionDisconnectedBeforeResponse'],
   ]);
 
   function localizeBodyReason(reason) {
     const key = LOCALIZED_REASON_KEYS.get(reason);
-    return key ? uiText(key) : reason;
+    if (key) return uiText(key);
+    // Translate only our request wrapper around an exact known reason. The
+    // stored error and unknown browser/server messages remain unchanged.
+    const retrieval = /^Failed to retrieve response content for request (\d+): (.+)$/.exec(reason);
+    const causeKey = retrieval && LOCALIZED_REASON_KEYS.get(retrieval[2]);
+    return causeKey
+      ? uiTextFormat('reasonResponseRetrievalFailed', { id: retrieval[1], reason: uiText(causeKey) })
+      : reason;
   }
 
   // Error messages remain canonical in logs, results and mirror messages.
@@ -9652,6 +9877,10 @@ const _NetworkPlus = (function () {
   const WS_FRAME_PREVIEW_CHARS = 2048;
   const WS_DIRECTION_TEXT_LIMIT_CHARS = 262144;
   const WS_POLL_INTERVAL_MS = 1000;
+  const STREAM_CAPTURE_MEMORY_BUDGET = 32 * 1024 * 1024;
+  const STREAM_URL_LIMIT_CHARS = 16 * 1024;
+  const STREAM_DRAIN_WIRE_CHARS = 2 * 1024 * 1024;
+  const MAX_DATE_EPOCH_MS = 8640000000000000;
   // Even with JSON escaping, a chunk of previews stays below the snapshot
   // message budget. The host's existing per-conversation frame cap still applies.
   const MIRROR_WS_EXPORT_CHUNK_SIZE = 64;
@@ -9697,7 +9926,7 @@ const _NetworkPlus = (function () {
         message.opcode === 1 && typeof message.data === 'string' && message.data.length <= WS_FRAME_PREVIEW_CHARS);
   }
 
-  function pageWebSocketWrapper(queueCap, previewChars) {
+  function pageWebSocketWrapper(queueCap, previewChars, urlLimit) {
     if (window.__networkPlusWS__) {
       window.__networkPlusWS__.setEnabled(true);
       return 'already-installed';
@@ -9742,23 +9971,24 @@ const _NetworkPlus = (function () {
       const socket = protocols === undefined ? new Native(url) : new Native(url, protocols);
       const socketId = nextSocketId;
       nextSocketId += 1;
-      record({
-        kind: 'ws-open-attempt',
-        socketId,
-        url: String(url),
-        protocols: protocols === undefined ? '' : String(protocols),
-      });
+      const urlValue = socket.url;
+      const protocolValue = protocols === undefined ? '' : String(protocols);
+      if (typeof urlValue !== 'string' || urlValue.length > urlLimit || protocolValue.length > previewChars) {
+        droppedCount += 1;
+        return socket;
+      }
+      record({ kind: 'ws-open-attempt', socketId, url: urlValue, protocols: protocolValue });
       const nativeSend = socket.send.bind(socket);
       socket.send = function (data) {
         const result = nativeSend(data);
-        record({ kind: 'ws-sent', socketId, preview: preview(data) });
+        record({ kind: 'ws-sent', socketId, preview: preview(data), binary: ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob) });
         return result;
       };
       socket.addEventListener('open', function () {
         record({ kind: 'ws-open', socketId });
       });
       socket.addEventListener('message', function (event) {
-        record({ kind: 'ws-received', socketId, preview: preview(event.data) });
+        record({ kind: 'ws-received', socketId, preview: preview(event.data), binary: typeof event.data !== 'string' });
       });
       socket.addEventListener('error', function () {
         record({ kind: 'ws-error', socketId });
@@ -9791,7 +10021,7 @@ const _NetworkPlus = (function () {
   }
 
   function buildWsWrapperSource() {
-    return '(' + String(pageWebSocketWrapper) + ')(' + WS_QUEUE_CAP + ',' + WS_FRAME_PREVIEW_CHARS + ')';
+    return '(' + String(pageWebSocketWrapper) + ')(' + WS_QUEUE_CAP + ',' + WS_FRAME_PREVIEW_CHARS + ',' + STREAM_URL_LIMIT_CHARS + ')';
   }
 
   // The SSE wrapper speaks the same ws-* event dialect as the WebSocket
@@ -9799,7 +10029,7 @@ const _NetworkPlus = (function () {
   // received frame, and open/error/close become the same lifecycle marks.
   // Named events (event: foo) are observable only once the page registers a
   // listener for them, which the wrapped addEventListener surfaces.
-  function pageEventSourceWrapper(queueCap, previewChars) {
+  function pageEventSourceWrapper(queueCap, previewChars, urlLimit) {
     if (window.__networkPlusSSE__) {
       window.__networkPlusSSE__.setEnabled(true);
       return 'already-installed';
@@ -9839,20 +10069,21 @@ const _NetworkPlus = (function () {
       const source = config === undefined ? new Native(url) : new Native(url, config);
       const socketId = nextSocketId;
       nextSocketId += 1;
-      record({ kind: 'ws-open-attempt', socketId, url: String(url), protocols: '' });
+      if (typeof source.url !== 'string' || source.url.length > urlLimit) {
+        droppedCount += 1;
+        return source;
+      }
+      record({ kind: 'ws-open-attempt', socketId, url: source.url, protocols: '' });
       const nativeAdd = source.addEventListener.bind(source);
-      const seenTypes = {};
-      let seenTypeCount = 0;
+      const seenTypes = new Set();
       const observe = function (type) {
-        if (seenTypes[type]) return;
-        if (seenTypeCount >= 64) return;
-        seenTypeCount += 1;
-        seenTypes[type] = true;
+        if (seenTypes.has(type) || seenTypes.size >= 64) return;
+        seenTypes.add(type);
         nativeAdd(type, function (event) {
           record({
             kind: 'ws-received',
             socketId,
-            preview: (type === 'message' ? '' : type + ': ') + preview(event && event.data),
+            preview: ((type === 'message' ? '' : type + ': ') + preview(event && event.data)).slice(0, previewChars),
           });
         });
       };
@@ -9861,7 +10092,8 @@ const _NetworkPlus = (function () {
         record({ kind: 'ws-open', socketId });
       });
       nativeAdd('error', function () {
-        record({ kind: 'ws-error', socketId });
+        if (source.readyState === 2) record({ kind: 'ws-closed', socketId });
+        else record({ kind: 'ws-reconnecting', socketId });
       });
       source.addEventListener = function (type, listener, options) {
         const name = String(type);
@@ -9900,15 +10132,74 @@ const _NetworkPlus = (function () {
   }
 
   function buildSseWrapperSource() {
-    return '(' + String(pageEventSourceWrapper) + ')(' + WS_QUEUE_CAP + ',' + WS_FRAME_PREVIEW_CHARS + ')';
+    return '(' + String(pageEventSourceWrapper) + ')(' + WS_QUEUE_CAP + ',' + WS_FRAME_PREVIEW_CHARS + ',' + STREAM_URL_LIMIT_CHARS + ')';
+  }
+
+  function pageDrainStream(queueKey, maxEvents, previewChars, urlLimit, wireLimit) {
+    const capture = window[queueKey];
+    if (!capture || typeof capture.drain !== 'function') return '[]';
+    const events = capture.drain();
+    if (!Array.isArray(events)) return '[]';
+    let wire = '[';
+    let dropped = events.length > maxEvents ? events.length - maxEvents : 0;
+    for (let index = 0; index < maxEvents && index < events.length; index += 1) {
+      const event = events[index];
+      if (!event || typeof event.kind !== 'string' || event.kind.length > 24) {
+        dropped += 1;
+        continue;
+      }
+      // Never return page-defined objects or arbitrary fields through DevTools.
+      const item = JSON.stringify({
+        kind: event.kind,
+        socketId: typeof event.socketId === 'number' ? event.socketId : null,
+        at: typeof event.at === 'number' ? event.at : null,
+        url: typeof event.url === 'string' && event.url.length <= urlLimit ? event.url : undefined,
+        protocols: typeof event.protocols === 'string' && event.protocols.length <= previewChars
+          ? event.protocols : undefined,
+        preview: typeof event.preview === 'string' && event.preview.length <= previewChars
+          ? event.preview : undefined,
+        binary: typeof event.binary === 'boolean' ? event.binary : undefined,
+        reason: typeof event.reason === 'string' && event.reason.length <= 256 ? event.reason : undefined,
+        code: typeof event.code === 'number' ? event.code : undefined,
+        count: typeof event.count === 'number' ? event.count : undefined,
+      });
+      if (typeof item !== 'string' || wire.length + item.length + 128 > wireLimit) {
+        dropped += 1;
+        continue;
+      }
+      if (wire.length > 1) wire += ',';
+      wire += item;
+    }
+    if (dropped > 0) {
+      if (wire.length > 1) wire += ',';
+      wire += '{"kind":"ws-overflow","count":' + dropped + '}';
+    }
+    return wire + ']';
+  }
+
+  function buildStreamDrainSource(queueKey) {
+    return '(' + String(pageDrainStream) + ')(' +
+      [JSON.stringify(queueKey), WS_QUEUE_CAP + 1, WS_FRAME_PREVIEW_CHARS, STREAM_URL_LIMIT_CHARS,
+        STREAM_DRAIN_WIRE_CHARS].join(',') + ')';
+  }
+
+  function readDrainedStream(wire) {
+    if (typeof wire !== 'string' || wire.length > STREAM_DRAIN_WIRE_CHARS) return [];
+    try {
+      const messages = JSON.parse(wire);
+      return Array.isArray(messages) ? messages : [];
+    } catch (_error) {
+      return [];
+    }
   }
 
   function formatWsFrameLine(event) {
-    const stamp = Number.isFinite(event.at) ? new Date(event.at).toISOString().slice(11, 23) : '??:??:??.???';
+    const stamp = isStreamEpoch(event.at) ? new Date(event.at).toISOString().slice(11, 23) : '??:??:??.???';
     if (event.kind === 'ws-sent') return '↑ ' + stamp + ' ' + (event.preview || '');
     if (event.kind === 'ws-received') return '↓ ' + stamp + ' ' + (event.preview || '');
     if (event.kind === 'ws-open') return '— ' + stamp + ' connection open';
     if (event.kind === 'ws-error') return '— ' + stamp + ' connection error';
+    if (event.kind === 'ws-reconnecting') return '— ' + stamp + ' reconnecting';
     if (event.kind === 'ws-closed') {
       // SSE close carries no close code; WebSocket close always does.
       if (event.code == null) return '— ' + stamp + ' closed';
@@ -9949,42 +10240,68 @@ const _NetworkPlus = (function () {
     row.responseContentError = null;
   }
 
+  function isStreamEpoch(value) {
+    return Number.isFinite(value) && Math.abs(value) <= MAX_DATE_EPOCH_MS;
+  }
+
+  function isValidStreamEvent(event, variant) {
+    if (!event || typeof event !== 'object' || !Number.isSafeInteger(event.socketId) ||
+        event.socketId <= 0 || !isStreamEpoch(event.at)) return false;
+    switch (event.kind) {
+      case 'ws-open-attempt':
+        return typeof event.url === 'string' && event.url.length <= STREAM_URL_LIMIT_CHARS &&
+          (variant === 'sse' ? /^https?:\/\//i : variant === 'ws' ? /^wss?:\/\//i : /^(?:https?|wss?):\/\//i).test(event.url) &&
+          (event.protocols === undefined ||
+            typeof event.protocols === 'string' && event.protocols.length <= WS_FRAME_PREVIEW_CHARS);
+      case 'ws-sent':
+      case 'ws-received':
+        return typeof event.preview === 'string' && event.preview.length <= WS_FRAME_PREVIEW_CHARS &&
+          (event.binary === undefined || typeof event.binary === 'boolean');
+      case 'ws-closed':
+        return (event.code === undefined || Number.isInteger(event.code) && event.code >= 0 && event.code <= 65535) &&
+          (event.reason === undefined || typeof event.reason === 'string' && event.reason.length <= 256);
+      case 'ws-open':
+      case 'ws-error':
+      case 'ws-reconnecting':
+        return true;
+      default:
+        return false;
+    }
+  }
+
   // Applies drained wrapper events to rows. The context supplies row lookup
   // and creation so the same logic is testable without a DevTools session.
   function ingestWsEvents(events, context) {
     const changedRows = new Set();
     for (const event of Array.isArray(events) ? events : []) {
-      if (!event || typeof event !== 'object' || typeof event.socketId !== 'number') continue;
+      if (!isValidStreamEvent(event, context.variant)) continue;
       if (event.kind === 'ws-open-attempt') {
         context.createRow(event);
         continue;
       }
       const row = context.getRow(event.socketId);
       if (!row) continue;
-      if (event.kind === 'ws-sent') {
-        if (!row.requestPostData || typeof row.requestPostData !== 'object') {
-          row.requestPostData = { mimeType: 'text/plain', text: '' };
+      const line = formatWsFrameLine(event);
+      const sent = event.kind === 'ws-sent';
+      const isFrame = sent || event.kind === 'ws-received';
+      const hasStructuredFrame = isFrame && row.method !== 'SSE';
+      const oldText = (sent ? row.requestPostData?.text : row.responseContent) || '';
+      const nextText = line ? appendBoundedWsText(oldText, line, WS_DIRECTION_TEXT_LIMIT_CHARS) : oldText;
+      const keepTranscript = !context.allowTranscript ||
+        context.allowTranscript(row, event, nextText.length - oldText.length, hasStructuredFrame);
+      if (!keepTranscript && hasStructuredFrame) row._wsFramesDropped = (row._wsFramesDropped || 0) + 1;
+      if (sent) {
+        if (keepTranscript) {
+          if (!row.requestPostData || typeof row.requestPostData !== 'object') {
+            row.requestPostData = { mimeType: 'text/plain', text: '' };
+          }
+          row.requestPostData.text = nextText;
+          if (isLiveStreamRow(row)) row.requestBodySize = row.requestPostData.text.length;
         }
-        row.requestPostData.text = appendBoundedWsText(
-          row.requestPostData.text || '',
-          formatWsFrameLine(event),
-          WS_DIRECTION_TEXT_LIMIT_CHARS,
-        );
-        if (isLiveStreamRow(row)) row.requestBodySize = row.requestPostData.text.length;
         row._wsSentCount = (row._wsSentCount || 0) + 1;
-        if (row.method !== 'SSE') {
-          const preview = event.preview || '';
-          const binary = WS_BINARY_PREVIEW_PATTERN.test(preview);
-          recordWsFrame(row, { type: 'send', time: event.at, binary, data: binary ? '' : preview });
-        }
       } else {
-        const line = formatWsFrameLine(event);
-        if (line) {
-          row.responseContent = appendBoundedWsText(
-            typeof row.responseContent === 'string' ? row.responseContent : '',
-            line,
-            WS_DIRECTION_TEXT_LIMIT_CHARS,
-          );
+        if (line && keepTranscript) {
+          row.responseContent = nextText;
           if (isLiveStreamRow(row)) {
             publishStreamTranscript(row);
           } else {
@@ -9995,17 +10312,13 @@ const _NetworkPlus = (function () {
           }
         }
         if (event.kind === 'ws-open') row.statusText = 'Open';
+        if (event.kind === 'ws-reconnecting') row.statusText = 'Connecting';
         if (event.kind === 'ws-received') {
           row._wsReceivedCount = (row._wsReceivedCount || 0) + 1;
           row.size = (row.size || 0) + (event.preview ? event.preview.length : 0);
           if (isLiveStreamRow(row)) {
             row.responseBodySize = row.size;
             row.responseContentSize = row.size;
-          }
-          if (row.method !== 'SSE') {
-            const preview = event.preview || '';
-            const binary = WS_BINARY_PREVIEW_PATTERN.test(preview);
-            recordWsFrame(row, { type: 'receive', time: event.at, binary, data: binary ? '' : preview });
           }
         }
         if (event.kind === 'ws-closed') {
@@ -10017,6 +10330,15 @@ const _NetworkPlus = (function () {
             }
           }
         }
+      }
+      if (hasStructuredFrame && keepTranscript) {
+        const binary = event.binary === true;
+        recordWsFrame(row, {
+          type: sent ? 'send' : 'receive',
+          time: event.at,
+          binary,
+          data: binary ? '' : event.preview,
+        });
       }
       changedRows.add(row);
     }
@@ -10957,13 +11279,8 @@ const _NetworkPlus = (function () {
   }
 
   // ---- Edit-and-resend (DevTools sessions only) ----
-  // A captured request is only a template here: Send composes a brand-new
-  // request from the dialog fields and executes it as a fetch() inside the
-  // inspected page through the DevTools eval API — the same zero-permission
-  // channel WebSocket capture uses. Cookies, CORS, and the page's security
-  // policies therefore apply exactly as if the page had issued the call,
-  // the reply arrives through normal capture as a new row, and the original
-  // traffic is never touched.
+  // Keep request values in an isolated execution world, with the inspected
+  // document's origin and cookies. The page world can replace its own fetch.
   const RESEND_BROWSER_MANAGED_HEADERS = Object.freeze([
     'accept-charset',
     'accept-encoding',
@@ -10997,8 +11314,18 @@ const _NetworkPlus = (function () {
     );
   }
 
+  function parseResendUrl(value) {
+    if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) return null;
+    try {
+      const url = new URL(value);
+      return url.username || url.password ? null : url;
+    } catch (_error) {
+      return null;
+    }
+  }
+
   function canResendRow(row) {
-    return !!(row && row.method !== 'WS' && /^https?:\/\//i.test(row.url || ''));
+    return Boolean(row && row.method !== 'WS' && parseResendUrl(row.url));
   }
 
   function buildResendSpecFromRow(row) {
@@ -11174,8 +11501,6 @@ const _NetworkPlus = (function () {
     '--insecure',
     '-v',
     '--verbose',
-    '-L',
-    '--location',
     '-g',
     '--globoff',
     '-i',
@@ -11274,6 +11599,10 @@ const _NetworkPlus = (function () {
           spec.method = 'HEAD';
           continue;
         }
+        if (token === '-L' || token === '--location') {
+          notes.push('redirect following is disabled for resend');
+          continue;
+        }
         if (CURL_IGNORED_FLAGS.has(token)) {
           ignored.push(token);
           continue;
@@ -11310,35 +11639,101 @@ const _NetworkPlus = (function () {
     return { ok: true, spec, notes };
   }
 
-  function pageResendRunner(spec) {
-    // Runs inside the inspected page; must stay self-contained.
+  function requestResendPermission(permissions, target) {
+    const port = target.port || (target.protocol === 'https:' ? '443' : '80');
+    return permissions.request({
+      permissions: ['scripting'],
+      origins: [target.protocol + '//' + target.hostname + ':' + port + '/*'],
+    });
+  }
+
+  // These functions are serialized by chrome.scripting and run in the same
+  // extension isolated world for this document. The marker is consumed before
+  // fetch so even a frame identity race or delayed injection cannot send twice.
+  function prepareIsolatedResend(origin, marker) {
+    if (window.origin !== origin || location.origin !== origin) return false;
+    const approvals = globalThis.__networkPlusResendApprovals || new Set();
+    globalThis.__networkPlusResendApprovals = approvals;
+    approvals.add(marker);
+    setTimeout(() => approvals.delete(marker), 5000);
+    return true;
+  }
+
+  async function isolatedResend(spec, origin, marker) {
+    if (window.origin !== origin || location.origin !== origin ||
+        !globalThis.__networkPlusResendApprovals?.delete(marker)) {
+      return { error: 'resendErrDocumentChanged' };
+    }
+    const url = new URL(spec.url);
+    if (url.origin !== origin || url.username || url.password) return { error: 'resendErrSiteMismatch' };
     try {
-      var headers = {};
-      for (var i = 0; i < spec.headers.length; i++) headers[spec.headers[i][0]] = spec.headers[i][1];
-      var init = {
+      const init = {
         method: spec.method,
-        headers: headers,
+        headers: spec.headers,
+        mode: 'same-origin',
+        redirect: 'error',
         credentials: spec.credentials ? 'include' : 'omit',
+        signal: AbortSignal.timeout(20000),
       };
       if (spec.body && spec.method !== 'GET' && spec.method !== 'HEAD') init.body = spec.body;
-      fetch(spec.url, init).catch(function () {});
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: String((error && error.message) || error) };
+      const response = await fetch(url.href, init);
+      return { status: response.status };
+    } catch (_error) {
+      return { error: 'resendErrNetwork' };
     }
   }
 
-  function buildResendEvalSource(spec) {
+  async function runInspectedResend(scripting, tabId, spec, isCurrent) {
+    const url = isRecord(spec) && parseResendUrl(spec.url);
+    if (!url || typeof spec.method !== 'string' || !RESEND_METHOD_PATTERN.test(spec.method) ||
+        !Array.isArray(spec.headers)) {
+      throw new Error('resendErrInvalidRequest');
+    }
+    if (!scripting || typeof scripting.executeScript !== 'function') throw new Error('resendErrUnavailable');
     const wireSpec = {
-      method: String(spec.method || 'GET'),
-      url: String(spec.url || ''),
-      headers: ((spec && spec.headers) || [])
-        .filter((header) => !isBrowserManagedHeaderName(header.name))
-        .map((header) => [String(header.name), String(header.value)]),
+      method: spec.method,
+      url: url.href,
+      headers: spec.headers
+        .filter((header) => isRecord(header) && typeof header.name === 'string' && typeof header.value === 'string' &&
+          !isBrowserManagedHeaderName(header.name))
+        .map((header) => [header.name, header.value]),
       body: typeof spec.body === 'string' ? spec.body : '',
       credentials: spec.credentials !== false,
     };
-    return '(' + pageResendRunner.toString() + ')(' + JSON.stringify(wireSpec) + ')';
+    const marker = crypto.randomUUID();
+    let probe;
+    try {
+      [probe] = await scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        world: 'ISOLATED',
+        injectImmediately: true,
+        func: prepareIsolatedResend,
+        args: [url.origin, marker],
+      });
+    } catch (error) {
+      throw new Error('resendErrSiteMismatch', { cause: error });
+    }
+    if (probe?.result !== true) throw new Error('resendErrSiteMismatch');
+    if (typeof probe.documentId !== 'string' || !probe.documentId) throw new Error('resendErrUnavailable');
+    if (!isCurrent()) throw new Error('resendErrDocumentChanged');
+    let send;
+    try {
+      [send] = await scripting.executeScript({
+        target: { tabId, documentIds: [probe.documentId] },
+        world: 'ISOLATED',
+        injectImmediately: true,
+        func: isolatedResend,
+        args: [wireSpec, url.origin, marker],
+      });
+    } catch (error) {
+      throw new Error('resendErrUnconfirmed', { cause: error });
+    }
+    if (send?.result?.error) throw new Error(send.result.error);
+    const status = send?.result?.status;
+    if (send?.documentId !== probe.documentId || !Number.isInteger(status) || status < 200 || status > 599) {
+      throw new Error('resendErrUnconfirmed');
+    }
+    return status;
   }
 
   // ---- JWT decoding (display only; no verification) ----
@@ -11347,9 +11742,44 @@ const _NetworkPlus = (function () {
   // strict local base64url + JSON parse of the first two segments — the
   // signature is never checked — and the result renders only inside the
   // header panes: decoded claims never join clipboard copies or exports.
-  const JWT_TOKEN_PATTERN = /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*/g;
   const JWT_MAX_TOKEN_CHARS = 8192;
+  const JWT_MAX_HEADER_CHARS = 64 * 1024;
   const JWT_MAX_FINDINGS = 4;
+
+  function* findJwtCandidates(value) {
+    if (value.length > JWT_MAX_HEADER_CHARS) return;
+    const starts = /\beyJ/g;
+    const segment = /[A-Za-z0-9_-]*/y;
+    let firstEnd = -1;
+    let tokenEnd = -1;
+    let match;
+    let candidateCount = 0;
+    const scanSegment = (offset) => {
+      segment.lastIndex = offset;
+      segment.exec(value);
+      return segment.lastIndex;
+    };
+    while ((match = starts.exec(value))) {
+      const at = match.index;
+      if (at >= firstEnd) {
+        firstEnd = scanSegment(at);
+        tokenEnd = -1;
+        if (value[firstEnd] === '.') {
+          const secondEnd = scanSegment(firstEnd + 1);
+          if (secondEnd - firstEnd >= 3 && value[secondEnd] === '.') {
+            tokenEnd = scanSegment(secondEnd + 1);
+          }
+        }
+      }
+      if (firstEnd - at < 9 || tokenEnd < 0 || tokenEnd - at > JWT_MAX_TOKEN_CHARS) continue;
+      yield { at, token: value.slice(at, tokenEnd) };
+      if (++candidateCount >= 32) return;
+    }
+  }
+
+  function getJwtEpochMs(seconds) {
+    return Number.isFinite(seconds) && Math.abs(seconds) <= 8.64e12 ? seconds * 1000 : null;
+  }
   function decodeBase64UrlJson(segment) {
     if (typeof segment !== 'string' || segment.length === 0) return null;
     try {
@@ -11389,8 +11819,8 @@ const _NetworkPlus = (function () {
   }
 
   function describeJwtEpochClaim(key, seconds, nowEpochMs) {
-    if (!Number.isFinite(seconds)) return null;
-    const atMs = seconds * 1000;
+    const atMs = getJwtEpochMs(seconds);
+    if (atMs === null) return null;
     const iso = new Date(atMs).toISOString();
     const delta = atMs - nowEpochMs;
     const time = humanizeJwtDelta(delta);
@@ -11401,9 +11831,9 @@ const _NetworkPlus = (function () {
   }
 
   function getJwtExpiryState(payload, nowEpochMs) {
-    const exp = payload ? payload.exp : undefined;
-    if (!Number.isFinite(exp)) return { expired: false, label: '' };
-    const delta = exp * 1000 - nowEpochMs;
+    const atMs = getJwtEpochMs(payload?.exp);
+    if (atMs === null) return { expired: false, label: '' };
+    const delta = atMs - nowEpochMs;
     const time = humanizeJwtDelta(delta);
     return {
       expired: delta < 0,
@@ -11449,12 +11879,12 @@ const _NetworkPlus = (function () {
     const value = String(headerValue == null ? '' : headerValue);
     if (value.indexOf('eyJ') === -1) return null;
     const now = Number.isFinite(nowEpochMs) ? nowEpochMs : Date.now();
-    for (const token of value.match(JWT_TOKEN_PATTERN) || []) {
+    for (const { token } of findJwtCandidates(value)) {
       const decoded = decodeJwt(token);
       if (!decoded) continue;
-      const exp = decoded.payload.exp;
-      if (!Number.isFinite(exp)) continue;
-      const delta = exp * 1000 - now;
+      const atMs = getJwtEpochMs(decoded.payload.exp);
+      if (atMs === null) continue;
+      const delta = atMs - now;
       const expired = delta < 0;
       return {
         expired,
@@ -11484,10 +11914,8 @@ const _NetworkPlus = (function () {
     if (!value || value.indexOf('eyJ') === -1) return [{ jwt: false, text: value }];
     const runs = [];
     let cursor = 0;
-    for (const token of value.match(JWT_TOKEN_PATTERN) || []) {
-      const at = value.indexOf(token, cursor);
-      if (at === -1) continue;
-      if (!decodeJwt(token)) continue;
+    for (const { token, at } of findJwtCandidates(value)) {
+      if (at < cursor || !decodeJwt(token)) continue;
       if (at > cursor) runs.push({ jwt: false, text: value.slice(cursor, at) });
       runs.push({ jwt: true, text: token, segments: token.split('.') });
       cursor = at + token.length;
@@ -11507,7 +11935,7 @@ const _NetworkPlus = (function () {
     for (const header of headers || []) {
       const value = String((header && header.value) || '');
       if (value.indexOf('eyJ') === -1) continue;
-      for (const token of value.match(JWT_TOKEN_PATTERN) || []) {
+      for (const { token } of findJwtCandidates(value)) {
         if (seenTokens.has(token)) continue;
         seenTokens.add(token);
         const decoded = decodeJwt(token);
@@ -13890,7 +14318,7 @@ const _NetworkPlus = (function () {
     const plan = getSampleCaptureExitPlan();
     if (!plan.available) {
       setStatus(
-        'Sample exit is unavailable because the complete local sample is no longer present. Use Clear to reset the current requests.',
+        uiText('statusSampleExitUnavailable'),
         true,
       );
       return false;
@@ -13903,8 +14331,7 @@ const _NetworkPlus = (function () {
     const focusTarget = document.querySelector('.empty-state-action') || $('#clearBtn');
     if (focusTarget) focusTarget.focus({ preventScroll: true });
     setStatus(
-      'Local sample exited. Previous recording state and column filters restored. ' +
-        (state.paused ? 'Recording remains paused.' : 'Live recording is active.'),
+      uiText(state.paused ? 'statusSampleExitedPaused' : 'statusSampleExitedActive'),
       true,
     );
     return true;
@@ -14565,6 +14992,7 @@ const _NetworkPlus = (function () {
           action.textContent = uiText('ariaImportBtn');
           action.addEventListener('click', () => $('#importBtn').click());
         } else {
+          action.dataset.action = 'explore-sample-capture';
           action.textContent = uiText('emptyCaptureAction');
           action.addEventListener('click', activateSampleCapture);
         }
@@ -17291,9 +17719,7 @@ const _NetworkPlus = (function () {
         applyResponseTabSignals({ 'res-body': 0, 'res-raw': 0 });
         if (display.label === 'error') {
           setStatus(
-            'Response-body retry failed for request ' +
-              row.id +
-              '. Open Response > Body for details.',
+            uiTextFormat('statusResponseBodyRetryFailed', { id: row.id }),
             true,
           );
         }
@@ -17880,66 +18306,73 @@ const _NetworkPlus = (function () {
       uiText(outboundPolicy.mode === 'full' ? 'statusPreparingFullHarExport' : 'statusPreparingSanitizedHarExport'),
     );
     try {
-      const responseContents = new Map();
-      const webSocketExports = new Map();
       const includeWebSocketFrames = outboundPolicy.mode === 'full';
       const streamEntries = new Map();
       let unavailableStreamCount = 0;
-      // Local streams need no I/O. Take their snapshots before waiting for
-      // other entries so later drains cannot change their export data.
+      let unavailableCount = 0;
+      // Local streams are mutable. Snapshot them before waiting for bodies
+      // so the transcript, frames and sizes in each entry agree.
       for (const row of rows) {
         if (isLiveStreamRow(row)) streamEntries.set(row, buildStreamHarEntry(row, includeWebSocketFrames));
       }
-      let unavailableCount = 0;
-      // Bodies resolve with small bounded concurrency: a serial walk turns
-      // thousands of uncached DevTools round-trips (10 s timeout each)
-      // into minutes, while an unbounded fan-out would spike memory with
-      // in-flight bodies. Four matches the prefetch background budget.
-      const pendingRows = rows.slice();
-      await Promise.all(
-        Array.from({ length: Math.min(HAR_EXPORT_BODY_CONCURRENCY, pendingRows.length) }, async () => {
-          while (pendingRows.length > 0) {
-            const row = pendingRows.shift();
-            if (streamEntries.has(row)) continue;
-            if (row._mirrorFetchStreamHar) {
-              const fallback = buildUnavailableStreamHarEntry(row);
-              try {
-                const entry = await row._mirrorFetchStreamHar(row._mirrorStreamRevision || 0, includeWebSocketFrames);
-                streamEntries.set(row, entry);
-              } catch (_error) {
-                streamEntries.set(row, fallback);
-                unavailableStreamCount += 1;
-              }
-              continue;
+      let counts = createSanitizationSummary();
+      const outputParts = [];
+      for (let offset = 0; offset < rows.length; offset += HAR_EXPORT_BODY_CONCURRENCY) {
+        const batch = rows.slice(offset, offset + HAR_EXPORT_BODY_CONCURRENCY);
+        const output = await Promise.all(batch.map(async (row) => {
+          let entry = streamEntries.get(row);
+          if (!entry && row._mirrorFetchStreamHar) {
+            const fallback = buildUnavailableStreamHarEntry(row);
+            try {
+              entry = await row._mirrorFetchStreamHar(row._mirrorStreamRevision || 0, includeWebSocketFrames);
+            } catch (_error) {
+              entry = fallback;
+              unavailableStreamCount += 1;
             }
-            // A sanitized mirror export needs only the count. Fetching the
-            // response as usual would also pull the raw transcript over the port.
+          }
+          if (!entry) {
+            // A sanitized mirror export needs the frame count, not the raw transcript.
             const omitMirrorTranscript = !includeWebSocketFrames && Boolean(row._mirrorFetchWebSocketExport);
+            const skipLargeBody = !includeWebSocketFrames && row.responseContentSize > MAX_SANITIZED_BODY_BYTES;
             const [content, webSocket] = await Promise.all([
-              omitMirrorTranscript ? buildHarResponseContent(row) : resolveHarResponseContent(row),
+              omitMirrorTranscript || skipLargeBody ? buildHarResponseContent(row) : resolveHarResponseContent(row),
               row._mirrorFetchWebSocketExport?.(includeWebSocketFrames).catch(() => ({ unavailable: true })),
             ]);
-            responseContents.set(row, content);
-            if (webSocket) webSocketExports.set(row, webSocket);
-            if (!omitMirrorTranscript && content._networkPlus) unavailableCount += 1;
+            if (skipLargeBody) {
+              delete content.text;
+              delete content.encoding;
+            }
+            if (!omitMirrorTranscript && !skipLargeBody && content._networkPlus) unavailableCount += 1;
+            entry = buildHarLogFromRows([row], new Map([[row, content]]), new Map([[row, webSocket]])).log.entries[0];
           }
-        }),
-      );
-      const fullHar = buildHarLogFromRows(rows, responseContents, webSocketExports, streamEntries);
+          streamEntries.delete(row);
+          if (includeWebSocketFrames) return new Blob([JSON.stringify(entry)]);
+          const sanitized = sanitizeHar({ log: { entries: [entry] } }).log;
+          if (sanitized._networkPlus.failedClosed) throw new Error('sanitization-failed-closed');
+          counts = mergeSanitizationSummaries(counts, sanitized._networkPlus.counts);
+          return new Blob([JSON.stringify(sanitized.entries[0])]);
+        }));
+        for (const part of output) {
+          if (outputParts.length) outputParts.push(',');
+          outputParts.push(part);
+        }
+      }
+      const emptyHar = buildHarLogFromRows([]);
       const har = createOutboundPayload(
         outboundPolicy,
-        () => sanitizeHar(fullHar),
-        () => fullHar,
+        () => sanitizeHar(emptyHar),
+        () => emptyHar,
       );
-      if (outboundPolicy.mode !== 'full' && har.log._networkPlus.failedClosed) {
-        throw new Error('sanitization-failed-closed');
-      }
-      const blob = new Blob([JSON.stringify(har, null, 2)], { type: 'application/json' });
+      if (!includeWebSocketFrames) har.log._networkPlus.counts = counts;
+      delete har.log.entries;
+      const logHeader = JSON.stringify(har.log).slice(0, -1);
+      const blob = new Blob(['{"log":' + logHeader + ',"entries":[', ...outputParts, ']}}'], {
+        type: 'application/json',
+      });
       objectUrl = URL.createObjectURL(blob);
       const downloadUrl = objectUrl;
       objectUrl = null;
       const scopeSuffix = exportScope === 'selected' ? '-selected' : '';
-      const scopeLabel = exportScope === 'selected' ? ' selected requests' : ' requests';
       triggerObjectUrlDownload(
         downloadUrl,
         outboundPolicy.mode === 'full'
@@ -17956,18 +18389,12 @@ const _NetworkPlus = (function () {
           }) + streamStatus,
         );
       } else {
-        const counts = har.log._networkPlus.counts;
         setStatus(
-          'Exported sanitized HAR for ' +
-            rows.length +
-            scopeLabel +
-            '; ' +
-            counts.redactedValues +
-            ' values redacted, ' +
-            counts.omittedBodies +
-            ' bodies omitted' +
-            (unavailableCount > 0 ? ', ' + unavailableCount + ' source bodies unavailable' : '') +
-            '.' + streamStatus,
+          uiTextFormat(exportScope === 'selected' ? 'statusExportedSanitizedHarSelected' : 'statusExportedSanitizedHar', {
+            count: rows.length, redacted: counts.redactedValues, omitted: counts.omittedBodies,
+          }) +
+            (unavailableCount > 0 ? uiTextFormat('statusExportedHarUnavailableBodies', { count: unavailableCount }) : '') +
+            uiText('statusSentenceEnd') + streamStatus,
         );
       }
     } catch (error) {
@@ -17976,9 +18403,8 @@ const _NetworkPlus = (function () {
       // while a build failure is worth retrying or narrowing the scope.
       // Static text only — never the raw error message.
       setStatus(
-        error && error.message === 'sanitization-failed-closed'
-          ? 'HAR export failed: sanitization failed closed, so nothing left the sanitizer. No file was downloaded.'
-          : 'HAR export failed while building the file; retry or narrow the scope. No file was downloaded.',
+        uiText(error && error.message === 'sanitization-failed-closed'
+          ? 'statusHarSanitizationFailed' : 'statusHarBuildFailed'),
       );
     } finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -18020,7 +18446,7 @@ const _NetworkPlus = (function () {
     let pendingLiveFrame = false;
     let pendingScrollToBottom = false;
     let pendingCaptureCutoff = 0;
-    let mirroredPendingCaptureActive = false;
+    let pollPendingRequests = () => {};
     let pendingResponseSearchFrame = false;
     const resetPendingLiveRows = () => {
       pendingLiveRows.length = 0;
@@ -18277,12 +18703,10 @@ const _NetworkPlus = (function () {
       updateRetentionStatus();
       const missingCount = Math.max(0, restorePlan.originalCount - restorePlan.rows.length);
       setStatus(
-        'Restored ' +
-          formatRequestCount(restorePlan.rows.length) +
-          ' from the last Clear' +
-          (missingCount > 0
-            ? '; ' + formatRequestCount(missingCount) + ' had already been evicted by retention.'
-            : '.'),
+        uiTextFormat(missingCount > 0 ? 'statusRestoredRequestsWithEviction' : 'statusRestoredRequests', {
+          count: restorePlan.rows.length, requests: formatRequestCount(restorePlan.rows.length),
+          missingCount, missingRequests: formatRequestCount(missingCount),
+        }),
       );
     };
 
@@ -18323,16 +18747,14 @@ const _NetworkPlus = (function () {
       if (state.autoScroll) scrollGridToNewest();
       clearButton.focus({ preventScroll: true });
       const undoMessage = undoAvailable
-        ? ' Undo available for ' + CLEAR_UNDO_TIMEOUT_MS / 1000 + ' seconds.'
+        ? ' ' + uiTextFormat('statusUndoClearAvailable', { seconds: CLEAR_UNDO_TIMEOUT_MS / 1000 })
         : '';
       setStatus(
-        clearedSampleCapture
-          ? state.paused
-            ? 'Local sample capture cleared. Recording remains paused.' + undoMessage
-            : 'Local sample capture cleared. Live capture resumed.' + undoMessage
+        (clearedSampleCapture
+          ? uiText(state.paused ? 'statusSampleClearedPaused' : 'statusSampleClearedActive')
           : snapshot.originalCount > 0
-            ? 'Cleared ' + formatRequestCount(snapshot.originalCount) + '.' + undoMessage
-            : 'Cleared',
+            ? uiTextFormat('statusClearedRequests', { count: snapshot.originalCount, requests: formatRequestCount(snapshot.originalCount) })
+            : uiText('statusClearedEmpty')) + undoMessage,
       );
     });
     const keyboardPlatform = getKeyboardPlatform();
@@ -20524,6 +20946,11 @@ const _NetworkPlus = (function () {
     // on its selected tab; those focus the pane's own search field.
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        if (document.querySelector('dialog[open]')) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         const focused = document.activeElement;
         const focusedPane = focused && focused.closest ? focused.closest('.tab-pane') : null;
         const selectedTab =
@@ -20563,6 +20990,8 @@ const _NetworkPlus = (function () {
         const rowLimit = state.retention.unlimited ? Infinity : state.retention.requestLimit;
         const rows = [];
         const bodies = new Map();
+        const metadataCosts = new Map();
+        let stagedMetadataBytes = 0;
         let stagedBytes = 0;
         let omittedBodies = 0;
         let evictedBodies = 0;
@@ -20575,7 +21004,7 @@ const _NetworkPlus = (function () {
           row.responseContentReason = reason;
         };
         let index = 0;
-        const totalCount = await readHarEntries(file.stream(), (rawEntry) => {
+        const totalCount = await readHarEntries(file.stream(), (rawEntry, metadataChars, metadataNodes) => {
           const entry = normalizeHarEntry(rawEntry);
           const row = buildRowFromRequest(entry, 0);
           row._reqObj = null;
@@ -20584,17 +21013,27 @@ const _NetworkPlus = (function () {
             row.responseContent = '';
             row.responseContentState = 'pending-admission';
           } else if (availability.state === 'unavailable') {
-            row.responseContentState = 'unavailable';
+            const parserOmitted = entry.response.content._networkPlus?.reason === HAR_OVERSIZED_BODY_REASON;
+            row.responseContentState = parserOmitted ? 'omitted' : 'unavailable';
             row.responseContentReason = availability.reason;
+            if (parserOmitted) omittedBodies += 1;
           }
           applyHarWebSocketMessages(row, rawEntry._webSocketMessages);
           if (index >= rowLimit) {
             const displaced = rows[index % rowLimit];
+            stagedMetadataBytes -= metadataCosts.get(displaced);
+            metadataCosts.delete(displaced);
             stagedBytes -= bodies.get(displaced) || 0;
             bodies.delete(displaced);
             if (displaced.responseContentState === 'omitted') omittedBodies -= 1;
             if (displaced.responseContentState === 'evicted') evictedBodies -= 1;
           }
+          const metadataBytes = 1024 + 2 * metadataChars + 80 * metadataNodes;
+          stagedMetadataBytes += metadataBytes;
+          if (stagedMetadataBytes > HAR_MAX_RETAINED_METADATA_BYTES) {
+            throw createImportError('Retained HAR request data exceeds the import memory budget. Set a request retention limit and retry.');
+          }
+          metadataCosts.set(row, metadataBytes);
           rows[index % rowLimit] = row;
           index += 1;
           if (typeof row.responseContent !== 'string') return;
@@ -20831,11 +21270,15 @@ const _NetworkPlus = (function () {
     // Reassigned by the mirror-host wiring below; the capture listener calls
     // it for every finished request so a connected pop-out tab stays live.
     let notifyMirrorRowCaptured = () => {};
+    let syncMirrorPendingRows = () => {};
     // Late-bound bridges between the mirror wiring and the stream/resend
     // wiring that runs later in init: the host command executor reads them
     // at command time, and the viewer wiring fills its own resend channel.
     let mirrorStreamCaptureState = () => ({ supported: false, enabled: false });
     let mirrorViewerResendDispatch = null;
+    let getMirrorResendConnection = () => null;
+    let resendInspectedOrigin = '';
+    let resendPageEpoch = 0;
     let mirrorHostResendDispatch = null;
 
     const scheduleLiveRows = (scrollToBottom) => {
@@ -20918,6 +21361,7 @@ const _NetworkPlus = (function () {
       const renderPendingChanges = () => {
         commitPendingLiveRows();
         renderBody();
+        syncMirrorPendingRows();
       };
       const samplePendingRequests = (log, recentCompletions) => {
         if (state.paused || state.sampleCaptureActive || !log || !Array.isArray(log.entries)) return;
@@ -20959,9 +21403,8 @@ const _NetworkPlus = (function () {
       };
       if (typeof network.getHAR === 'function') {
         let pollInFlight = false;
-        const poll = () => {
-          if (pollInFlight || state.paused || state.sampleCaptureActive ||
-              (document.hidden && !mirroredPendingCaptureActive)) return;
+        pollPendingRequests = () => {
+          if (pollInFlight || state.paused || state.sampleCaptureActive) return;
           pollInFlight = true;
           const cutoff = pendingCaptureCutoff;
           const recentCompletions = new Set();
@@ -20978,9 +21421,13 @@ const _NetworkPlus = (function () {
             finishedDuringPoll = null;
           }
         };
-        const timer = setInterval(poll, 1000);
+        const pollVisibleHost = () => {
+          if (!document.hidden) pollPendingRequests();
+        };
+        const timer = setInterval(pollVisibleHost, 1000);
+        document.addEventListener('visibilitychange', pollVisibleHost);
         window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
-        poll();
+        pollVisibleHost();
       }
       chrome.devtools.network.onRequestFinished.addListener((request) => {
         const key = requestKey(request);
@@ -21106,14 +21553,11 @@ const _NetworkPlus = (function () {
       const updateMirrorStatus = () => {
         if (activeMirrorPort) {
           setStatus(
-            mirrorHostPaused
-              ? 'Mirroring the DevTools session (recording paused)'
-              : 'Mirroring the DevTools session',
+            uiText(mirrorHostPaused ? 'statusMirroringPaused' : 'statusMirroring'),
           );
         } else if (mirrorEverConnected) {
           setStatus(
-            'The DevTools session disconnected; captured requests remain available. ' +
-              'To capture without interruption, keep DevTools open — undocked into its own window and minimized is fine.',
+            uiText('statusMirrorDisconnected'),
           );
         } else {
           setStatus(uiText('statusWaitingForDevtools'));
@@ -21345,6 +21789,8 @@ const _NetworkPlus = (function () {
         });
       }
       const applyHostControlState = (control) => {
+        resendInspectedOrigin = typeof control?.resendOrigin === 'string' ? control.resendOrigin : '';
+        resendPageEpoch = Number.isSafeInteger(control?.resendEpoch) ? control.resendEpoch : 0;
         if (!control || typeof control !== 'object') return;
         state.paused = control.paused === true;
         // Announce nothing: the mirror status line owns the viewer's story.
@@ -21475,7 +21921,21 @@ const _NetworkPlus = (function () {
           );
         }
       });
-      mirrorViewerResendDispatch = (spec, done) => viewerSession.sendCommand('resend', { spec }, done);
+      mirrorViewerResendDispatch = (spec, epoch, done) => viewerSession.sendCommand('resend', { spec, epoch }, done);
+      getMirrorResendConnection = () => activeMirrorPort;
+      // A minimized DevTools document can have its own timers throttled.
+      // Keep the pending-request clock in the view the user is watching.
+      const pollVisibleViewer = () => {
+        if (document.hidden || !activeMirrorPort || mirrorHostPaused) return;
+        try {
+          activeMirrorPort.postMessage({ type: 'poll-pending' });
+        } catch (_error) {
+          // A disconnect between the visibility check and the send is transient.
+        }
+      };
+      const pendingPollTimer = setInterval(pollVisibleViewer, 1000);
+      document.addEventListener('visibilitychange', pollVisibleViewer);
+      window.addEventListener('pagehide', () => clearInterval(pendingPollTimer), { once: true });
       mirrorRuntime.onConnect.addListener((port) => {
         if (!port || typeof port.name !== 'string' || !port.name.startsWith(MIRROR_PORT_PREFIX)) return;
         if (mirrorParams.sourceTabId && port.name !== MIRROR_PORT_PREFIX + mirrorParams.sourceTabId) return;
@@ -21497,6 +21957,7 @@ const _NetworkPlus = (function () {
         port.onDisconnect.addListener(() => {
           if (activeMirrorPort !== port) return;
           activeMirrorPort = null;
+          resendInspectedOrigin = '';
           viewerSession.failPendingBodyRequests(
             'The DevTools session disconnected before the response content arrived.',
           );
@@ -21504,6 +21965,7 @@ const _NetworkPlus = (function () {
         });
         try {
           port.postMessage({ type: 'hello', protocolVersion: MIRROR_PROTOCOL_VERSION, pendingRows: true });
+          pollVisibleViewer();
         } catch (_error) {
           // The disconnect listener recovers from a port that died mid-handshake.
         }
@@ -21597,6 +22059,8 @@ const _NetworkPlus = (function () {
           },
           undoAvailable: !!state.clearUndoSnapshot,
           streamCapture: mirrorStreamCaptureState(),
+          resendOrigin: resendInspectedOrigin,
+          resendEpoch: resendPageEpoch,
           devtoolsMinimized: popoutDevtoolsMinimized,
         }),
         // Remote commands reuse the host's own controls so undo snapshots,
@@ -21645,21 +22109,19 @@ const _NetworkPlus = (function () {
               return;
             }
             if (name === 'resend') {
-              const spec = args && args.spec && typeof args.spec === 'object' ? args.spec : null;
-              if (
-                !spec ||
-                !RESEND_METHOD_PATTERN.test(String(spec.method || '')) ||
-                !/^https?:\/\//i.test(String(spec.url || ''))
-              ) {
-                done('The re-send request was not valid.');
+              if (!mirrorHostResendDispatch) {
+                done('resendErrUnavailable');
                 return;
               }
-              if (typeof mirrorHostResendDispatch !== 'function') {
-                done('Re-send is not available in this DevTools session.');
+              if (args?.epoch !== resendPageEpoch) {
+                done('resendErrDocumentChanged');
                 return;
               }
-              mirrorHostResendDispatch(spec);
-              done('');
+              const connection = mirrorPort;
+              mirrorHostResendDispatch(args.spec, () => connection === mirrorPort).then(
+                () => done(''),
+                (error) => done(error.message),
+              );
               return;
             }
             done('Unknown mirror command: ' + name);
@@ -21718,7 +22180,7 @@ const _NetworkPlus = (function () {
         }
         mirrorPort = port;
         mirrorPortConfirmed = false;
-        mirroredPendingCaptureActive = false;
+        let viewerSupportsPendingRows = false;
         hostSession.resetPeer();
         port.onMessage.addListener((message) => {
           if (mirrorPort !== port) return;
@@ -21729,8 +22191,12 @@ const _NetworkPlus = (function () {
             }
           }
           if (message && message.type === 'hello') {
-            mirroredPendingCaptureActive = message.pendingRows === true;
+            viewerSupportsPendingRows = message.pendingRows === true;
             startMirrorSync();
+          }
+          if (message && message.type === 'poll-pending' && viewerSupportsPendingRows && document.hidden) {
+            pollPendingRequests();
+            return;
           }
           hostSession.handleMessage(message);
         });
@@ -21742,7 +22208,6 @@ const _NetworkPlus = (function () {
           const wasConfirmed = mirrorPortConfirmed;
           mirrorPort = null;
           mirrorPortConfirmed = false;
-          mirroredPendingCaptureActive = false;
           stopMirrorSync();
           hostSession.dropImportTransfers();
           if (wasConfirmed && (!popoutWindow || popoutWindow.closed)) {
@@ -21761,6 +22226,9 @@ const _NetworkPlus = (function () {
       };
       notifyMirrorRowCaptured = (row, completedPending) => {
         if (mirrorPort) hostSession.pushRow(row, completedPending);
+      };
+      syncMirrorPendingRows = () => {
+        if (mirrorPortConfirmed) hostSession.sendSync();
       };
       popoutBtn.addEventListener('click', () => {
         if (mirrorPort && mirrorPortConfirmed && (!popoutWindow || popoutWindow.closed)) {
@@ -21810,9 +22278,8 @@ const _NetworkPlus = (function () {
               void (mirrorRuntime.lastError && mirrorRuntime.lastError.message);
               popoutDevtoolsMinimized = !!(response && response.minimized === true);
               setStatus(
-                response && response.minimized === true
-                  ? 'Network+ opened in a browser tab; the DevTools window is minimized and keeps capturing (restore it from the taskbar).'
-                  : 'Network+ opened in a browser tab; DevTools stayed put — undock it into its own window to have it minimized automatically.',
+                uiText(response && response.minimized === true
+                  ? 'statusPopoutOpenedMinimized' : 'statusPopoutOpenedDocked'),
               );
             });
           } catch (_error) {
@@ -21838,9 +22305,21 @@ const _NetworkPlus = (function () {
     if (wsCaptureBtn && inspectedEval && !mirrorViewerActive && !offlineView) {
       wsCaptureBtn.hidden = false;
       const streamCapture = { enabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
+      const streamMemoryByRow = new WeakMap();
+      let streamMemoryUsed = 0;
+      const reserveStreamMemory = (row, bytes) => {
+        if (streamMemoryUsed + bytes > STREAM_CAPTURE_MEMORY_BUDGET) return false;
+        streamMemoryUsed += bytes;
+        streamMemoryByRow.set(row, (streamMemoryByRow.get(row) || 0) + bytes);
+        return true;
+      };
       // Retention eviction disposes rows the socket maps may still hold; the
       // lazy per-event cleanup only ran when that socket spoke again.
       state.streamRowEvictionSweep = (evictedSet) => {
+        for (const row of evictedSet) {
+          streamMemoryUsed -= streamMemoryByRow.get(row) || 0;
+          streamMemoryByRow.delete(row);
+        }
         for (const rows of [streamCapture.socketRows, streamCapture.sseRows]) {
           for (const [socketId, row] of rows) {
             if (evictedSet.has(row)) rows.delete(socketId);
@@ -21908,13 +22387,15 @@ const _NetworkPlus = (function () {
         const rowsByVariant = variant === 'sse' ? streamCapture.sseRows : streamCapture.socketRows;
         // The page-side queue reports its own overflow so a gap in the frame
         // history is named instead of silent.
-        let overflowCount = 0;
-        result = result.filter((event) => {
-          if (event && event.kind === 'ws-overflow') {
-            overflowCount += Number(event.count) || 0;
+        let overflowCount = Math.max(0, result.length - WS_QUEUE_CAP - 1);
+        result = result.slice(0, WS_QUEUE_CAP + 1).filter((event) => {
+          if (event?.kind === 'ws-overflow' && Number.isSafeInteger(event.count) && event.count > 0) {
+            overflowCount += Math.min(event.count, WS_QUEUE_CAP);
             return false;
           }
-          return true;
+          if (isValidStreamEvent(event, variant)) return true;
+          overflowCount += 1;
+          return false;
         });
         if (overflowCount > 0) {
           setStatus(
@@ -21951,8 +22432,23 @@ const _NetworkPlus = (function () {
           return;
         }
         const createdRows = new Set();
+        let memoryLimited = false;
         const changedRows = ingestWsEvents(result, {
+          variant,
+          allowTranscript: (row, event, addedLength, hasFrame) => {
+            const frameBytes = hasFrame && (row._wsFrames?.length || 0) < HAR_WS_MESSAGE_IMPORT_LIMIT
+              ? 96 + 2 * (event.binary ? 0 : event.preview.length) : 0;
+            const retained = reserveStreamMemory(row, 2 * addedLength + frameBytes);
+            if (!retained) memoryLimited = true;
+            return retained;
+          },
           createRow: (event) => {
+            if (rowsByVariant.has(event.socketId)) return;
+            const bytes = 1024 + 2 * (event.url.length + (event.protocols?.length || 0));
+            if (streamMemoryUsed + bytes > STREAM_CAPTURE_MEMORY_BUDGET) {
+              memoryLimited = true;
+              return;
+            }
             if (createdRows.size === 0) {
               disposeClearUndoSnapshot(
                 'live',
@@ -21960,6 +22456,7 @@ const _NetworkPlus = (function () {
               );
             }
             const created = createStreamRow(event, variant);
+            reserveStreamMemory(created, bytes);
             createdRows.add(created);
             pendingSet.add(created);
             return created;
@@ -21981,12 +22478,19 @@ const _NetworkPlus = (function () {
         });
         publishStreamRows(new Set([...createdRows, ...changedRows]));
         if (createdRows.size > 0) scheduleLiveRows(false);
+        if (memoryLimited) setStatus(uiText('statusStreamMemoryBudget'));
       };
       // Swallowing every eval failure left the toggle claiming capture was on
       // while nothing could reach the page; a short streak surfaces it once.
       let streamEvalFailureTicks = 0;
+      let streamDocumentGeneration = 0;
+      const wsDrain = buildStreamDrainSource('__networkPlusWS__');
+      const sseDrain = buildStreamDrainSource('__networkPlusSSE__');
       const drainStreamQueues = () => {
-        inspectedEval('window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []', (result, errorInfo) => {
+        const generation = streamDocumentGeneration;
+        const isCurrent = () => streamCapture.enabled && generation === streamDocumentGeneration;
+        inspectedEval(wsDrain, (result, errorInfo) => {
+          if (!isCurrent()) return;
           if (errorInfo) {
             streamEvalFailureTicks += 1;
             if (streamEvalFailureTicks === 3) {
@@ -21997,14 +22501,16 @@ const _NetworkPlus = (function () {
             return;
           }
           streamEvalFailureTicks = 0;
-          ingestDrainedStream(result, 'ws');
+          ingestDrainedStream(readDrainedStream(result), 'ws');
         });
-        inspectedEval('window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []', (result, errorInfo) => {
-          if (!errorInfo) ingestDrainedStream(result, 'sse');
+        inspectedEval(sseDrain, (result, errorInfo) => {
+          if (isCurrent() && !errorInfo) ingestDrainedStream(readDrainedStream(result), 'sse');
         });
       };
       wsCaptureBtn.addEventListener('click', () => {
         streamCapture.enabled = !streamCapture.enabled;
+        streamDocumentGeneration += 1;
+        streamEvalFailureTicks = 0;
         if (streamCapture.enabled) {
           injectStreamWrappers();
           if (!streamCapture.timer) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
@@ -22029,6 +22535,8 @@ const _NetworkPlus = (function () {
       ) {
         chrome.devtools.network.onNavigated.addListener(() => {
           // The old document took the wrappers and their connections with it.
+          streamDocumentGeneration += 1;
+          streamEvalFailureTicks = 0;
           const navigatedRows = [];
           for (const rowsByVariant of [streamCapture.socketRows, streamCapture.sseRows]) {
             for (const row of rowsByVariant.values()) {
@@ -22044,93 +22552,97 @@ const _NetworkPlus = (function () {
       }
     }
 
-    // --- Edit-and-resend wiring (DevTools sessions, and the mirror tab
-    // through its command channel) ---
+    // --- Edit-and-resend wiring (DevTools sessions and their mirror) ---
     const resendDialog = $('#resendDialog');
-    if (resendDialog && (mirrorViewerResendDispatch || (inspectedEval && !mirrorViewerActive))) {
+    const resendTabId = !offlineView && !mirrorViewerActive && typeof chrome !== 'undefined'
+      ? chrome.devtools?.inspectedWindow?.tabId
+      : null;
+    if (resendDialog && (mirrorViewerResendDispatch || (inspectedEval && Number.isInteger(resendTabId)))) {
+      if (!mirrorViewerResendDispatch) {
+        const updateResendOrigin = (navigatedUrl) => {
+          const epoch = ++resendPageEpoch;
+          resendInspectedOrigin = parseResendUrl(navigatedUrl)?.origin || '';
+          if (typeof navigatedUrl === 'string') return;
+          // On startup DevTools has not emitted a navigation event. Read
+          // only the current origin, with no replay values in this eval.
+          inspectedEval('location.origin', (value, error) => {
+            if (!error && epoch === resendPageEpoch) resendInspectedOrigin = parseResendUrl(value)?.origin || '';
+          });
+        };
+        chrome.devtools.network?.onNavigated?.addListener(updateResendOrigin);
+        updateResendOrigin();
+      }
       const resendMethodInput = $('#resendMethod');
       const resendUrlInput = $('#resendUrl');
       const resendHeadersInput = $('#resendHeaders');
       const resendBodyInput = $('#resendBody');
       const resendCredentialsInput = $('#resendCredentials');
       const resendErrorEl = $('#resendError');
+      const resendSendButton = $('#resendSendBtn');
       let resendInvokerRowId = null;
+      let resendDialogAttempt = null;
       const showResendError = (message) => {
         resendErrorEl.textContent = message;
         resendErrorEl.hidden = !message;
       };
-      const describeResendTarget = (url) => {
+      const resendErrorReason = (error) => {
+        const code = error?.message || '';
+        if (/disconnect|not connected/i.test(code)) return uiText('resendErrNotConnected');
+        return /^resendErr[A-Za-z]+$/.test(code) && UI_TEXT[code] ? uiText(code) : uiText('resendErrUnconfirmed');
+      };
+      const announceResend = (spec, remote = false) => {
+        const url = parseResendUrl(spec.url);
+        setStatus(
+          'Re-sent ' + spec.method + ' to ' + url.origin + url.pathname +
+            (remote ? ' from the DevTools session' : '') +
+            (state.paused ? '. Recording is paused.' : '. The response appears when captured.'),
+        );
+      };
+      if (!mirrorViewerResendDispatch) {
+        mirrorHostResendDispatch = async (spec, isCurrent) => {
+          if (parseResendUrl(spec?.url)?.origin !== resendInspectedOrigin) throw new Error('resendErrSiteMismatch');
+          const epoch = resendPageEpoch;
+          await runInspectedResend(chrome.scripting, resendTabId, spec, () => isCurrent() && epoch === resendPageEpoch);
+          announceResend(spec);
+        };
+      }
+
+      const dispatchResendSpec = async (spec, isCurrent) => {
+        const target = parseResendUrl(spec.url);
+        if (!target) throw new Error('resendErrUrl');
+        const connection = getMirrorResendConnection();
+        if (mirrorViewerResendDispatch && !connection) throw new Error('resendErrNotConnected');
+        if (target.origin !== resendInspectedOrigin) throw new Error('resendErrSiteMismatch');
+        const epoch = resendPageEpoch;
+        if (typeof chrome.permissions?.request !== 'function') throw new Error('resendErrUnavailable');
+        // Call request before the first await and in the original click handler.
+        // A mirror message would lose the browser's user activation.
+        let granted;
         try {
-          const parsed = new URL(url);
-          // origin is the inner origin for blob: and the string 'null' for data:,
-          // so concatenating it onto pathname doubles the URL or prefixes it
-          // with 'null'. Host-less URLs describe themselves.
-          if (!parsed.host) return url;
-          return parsed.origin + parsed.pathname;
-        } catch (_error) {
-          return url;
+          granted = await requestResendPermission(chrome.permissions, target);
+        } catch (error) {
+          throw new Error('resendErrPermission', { cause: error });
         }
-      };
-      // Returns null on dispatch, or the Error when the mirror port is
-      // already gone — the disconnected postMessage throws synchronously,
-      // and an uncaught throw would strand the resend dialog open.
-      const dispatchResendSpec = (spec) => {
+        if (!granted) throw new Error('resendErrPermission');
+        if (!isCurrent()) return;
+        if (epoch !== resendPageEpoch || target.origin !== resendInspectedOrigin) throw new Error('resendErrDocumentChanged');
         if (mirrorViewerResendDispatch) {
-          try {
-            mirrorViewerResendDispatch(spec, (error) => {
-              // The status line stays English by policy; the paused clause
-              // matches what the DevTools session itself would say, because
-              // applyHostControlState mirrors the host's paused state here.
-              setStatus(
-                error
-                  ? 'Re-send failed: ' + error.message
-                  : 'Re-sent ' +
-                      spec.method +
-                      ' to ' +
-                      describeResendTarget(spec.url) +
-                      ' from the DevTools session' +
-                      (state.paused
-                        ? '; recording is paused, so resume it to see the result row.'
-                        : '; the result appears once it is captured.'),
-              );
-            });
-          } catch (error) {
-            const raw = error && error.message ? error.message : '';
-            const reason = !raw || /disconnect|not connected/i.test(raw)
-              ? uiText('resendErrNotConnected')
-              : raw;
-            setStatus(uiTextFormat('resendErrDispatch', { reason }));
-            return error instanceof Error ? error : new Error(reason);
-          }
-          return null;
+          if (connection !== getMirrorResendConnection()) throw new Error('resendErrNotConnected');
+          await new Promise((resolve, reject) => {
+            mirrorViewerResendDispatch(spec, epoch, (error) => error ? reject(error) : resolve());
+          });
+          announceResend(spec, true);
+          return;
         }
-        inspectedEval(buildResendEvalSource(spec), (result, errorInfo) => {
-          if (errorInfo || (result && result.ok === false)) {
-            const reason =
-              (result && result.error) ||
-              (errorInfo && (errorInfo.description || errorInfo.value || errorInfo.code)) ||
-              'evaluation failed';
-            setStatus(uiTextFormat('resendErrDispatch', { reason }));
-            return;
-          }
-          setStatus(
-            'Re-sent ' +
-              spec.method +
-              ' to ' +
-              describeResendTarget(spec.url) +
-              (state.paused
-                ? '; recording is paused, so resume it to see the result row.'
-                : '; the result will appear as a new captured row.'),
-          );
-        });
-        return null;
+        await mirrorHostResendDispatch(spec, isCurrent);
       };
-      if (!mirrorViewerResendDispatch) mirrorHostResendDispatch = dispatchResendSpec;
       resendActions = {
         sendNow: (row) => {
           const spec = buildResendSpecFromRow(row);
           spec.credentials = true;
-          dispatchResendSpec(spec);
+          dispatchResendSpec(spec, () => true).catch((error) => {
+            setStatus(uiTextFormat('resendErrDispatch', { reason: resendErrorReason(error) }));
+          });
         },
         openDialog: (row, invokerRowId) => {
           const spec = buildResendSpecFromRow(row);
@@ -22165,14 +22677,14 @@ const _NetworkPlus = (function () {
           );
         });
       }
-      $('#resendSendBtn').addEventListener('click', () => {
+      resendSendButton.addEventListener('click', async () => {
         const method = resendMethodInput.value.trim() || 'GET';
         if (!RESEND_METHOD_PATTERN.test(method)) {
           showResendError(uiText('resendErrMethod'));
           return;
         }
         const url = resendUrlInput.value.trim();
-        if (!/^https?:\/\//i.test(url)) {
+        if (!parseResendUrl(url)) {
           showResendError(uiText('resendErrUrl'));
           return;
         }
@@ -22181,26 +22693,37 @@ const _NetworkPlus = (function () {
           showResendError(uiTextFormat('resendErrHeaderShape', { line: parsedHeaders.invalidLines[0] }));
           return;
         }
-        const dispatchError = dispatchResendSpec({
-          method,
-          url,
-          headers: parsedHeaders.headers,
-          body: resendBodyInput.value,
-          credentials: resendCredentialsInput.checked,
-        });
-        if (dispatchError) {
-          // Keep the dialog open so the edited request is not lost. Chrome's
-          // raw 'Attempting to use a disconnected port object' names an
-          // internal; the user's situation is that the session is gone.
-          const reason = /disconnect|not connected/i.test(dispatchError.message || '')
-            ? uiText('resendErrNotConnected')
-            : dispatchError.message;
-          showResendError(uiTextFormat('resendErrDispatch', { reason }));
-          return;
+        const attempt = {};
+        const isCurrent = () => resendDialog.open && resendDialogAttempt === attempt;
+        resendDialogAttempt = attempt;
+        resendSendButton.disabled = true;
+        showResendError('');
+        try {
+          await dispatchResendSpec({
+            method,
+            url,
+            headers: parsedHeaders.headers,
+            body: resendBodyInput.value,
+            credentials: resendCredentialsInput.checked,
+          }, isCurrent);
+          if (isCurrent()) resendDialog.close();
+        } catch (error) {
+          if (isCurrent()) {
+            const reason = resendErrorReason(error);
+            showResendError(uiTextFormat('resendErrDispatch', { reason }));
+          }
+        } finally {
+          if (resendDialogAttempt === attempt) {
+            resendDialogAttempt = null;
+            resendSendButton.disabled = false;
+          }
         }
-        resendDialog.close();
       });
       resendDialog.addEventListener('close', () => {
+        if (resendDialog.open) return;
+        resendDialogAttempt = null;
+        resendSendButton.disabled = false;
+        if (resendCurlInput) resendCurlInput.value = '';
         const invokerRowId = resendInvokerRowId;
         resendInvokerRowId = null;
         focusRowOrGridFallback(invokerRowId);
@@ -22488,6 +23011,7 @@ const _NetworkPlus = (function () {
     WS_POLL_INTERVAL_MS,
     buildWsWrapperSource,
     buildSseWrapperSource,
+    buildStreamDrainSource,
     formatWsFrameLine,
     appendBoundedWsText,
     ingestWsEvents,
@@ -22520,7 +23044,11 @@ const _NetworkPlus = (function () {
     parseHeaderLines,
     tokenizeShellCommand,
     parseCurlCommand,
-    buildResendEvalSource,
+    parseResendUrl,
+    requestResendPermission,
+    prepareIsolatedResend,
+    isolatedResend,
+    runInspectedResend,
     JWT_MAX_TOKEN_CHARS,
     decodeBase64UrlJson,
     decodeJwt,

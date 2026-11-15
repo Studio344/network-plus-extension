@@ -18,10 +18,10 @@ Two `TZ=UTC npm run extension:package` builds from the reviewed source produced 
 
 ### Observed repository facts
 
-- `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.17.0`, with one permission (`storage`), packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
+- The working-tree `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.17.0`, with one required permission (`storage`), optional permissions for user-initiated resend, packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
 - The package guard allows only the eleven audited runtime files and rejects remote resources, inline scripts, unexpected privileged manifest surfaces, and permission drift. The one audited background service worker opens the fixed local offline workspace from the toolbar action and minimizes undocked DevTools when the pop-out opens. These operations require no additional permission, read no current-tab URLs or page data, and do not override New Tab.
 - The same runtime uses Chromium extension APIs without an Edge-only code path. Historical pre-v1.16.0 verification used Chrome 151: it loaded the manifest without extension errors, all 98 real-browser regression scenarios passed, and the Network+ DevTools panel was confirmed manually. This is not a new manual verification of the candidate release.
-- The v1.17.0 archive is the reviewed candidate upload source. The package checks and digest describe the archive only. Validate the store item and review status separately.
+- The pinned v1.17.0 ZIP was built before the optional resend permissions in the working tree. The recorded size and digest apply to that ZIP. Review and pin a new archive before submitting these source changes.
 
 ## Developer account prerequisites
 
@@ -57,7 +57,7 @@ Selecting a request opens request and response inspectors for headers, bodies, q
 
 The panel is not confined to the DevTools window. A pop-out action opens Network+ in a full browser tab that mirrors the live capture session, keeping rows, details, and the paused state in sync, which helps on small screens or a second monitor; an undocked DevTools window is minimized automatically at that moment, since capture continues inside it, and a docked DevTools stays as it is. The tab is a full remote control, not just a view: pause and resume, clear with undo, retention changes, HAR or SAZ import, stream capture, and re-sending all execute in the DevTools session over the same extension-internal port, and the tab reflects the session state within a second. An opt-in stream-capture mode records the WebSocket messages the inspected page sends and receives, and the Server-Sent Events it receives, on connections opened while the mode is on, listing them as directional frames in the inspectors; capture is observation only and never alters traffic. HAR files that include WebSocket messages recorded by Chromium-based DevTools are restored the same way on import, and captured conversations round-trip: full HAR exports write the frames back out in the same Chromium shape, while sanitized exports omit them with an explicit per-entry marker.
 
-A captured request can also be re-sent, either unchanged or after editing the method, URL, headers, and body in a dialog. The composed request is issued by the inspected page itself through the DevTools evaluation API, so cookies, CORS, and the page's security policies apply exactly as if the page had made the call, browser-managed headers remain browser-managed, and the reply arrives as a new captured row. A cURL command can also be pasted to prefill the same dialog; unsupported flags are refused by name rather than guessed. JWT-shaped header values such as Bearer tokens decode inline in the header panes with humanized expiry times, locally and for display only; signatures are not verified, and decoded claims never join copies or exports.
+A captured request can also be re-sent to the inspected page’s origin, either unchanged or after editing the method, URL, headers, and body. The browser may request access to that site. The request uses an isolated context in the inspected document and can use the site’s session when selected. Redirects are blocked. The response appears as a new capture when recording is active.
 
 Network+ applies local retention the reader controls. Request rows are retained without a count limit by default, and a limit from 100 to 100,000 can be configured in the Settings dialog, which states the memory cost of the unlimited default. Response bodies remain subject to a 1 MiB per-body limit and a 32 MiB shared cache limit. The status bar reports retention and body-cache conditions so omitted or evicted content is not presented as complete evidence. Clear removes the current working set and offers a bounded 10-second Undo action while retained data remains available.
 
@@ -91,6 +91,8 @@ The four screenshots use only deterministic `.test` sample data and contain no r
 **Single-purpose description:** Network+ provides a local Google Chrome DevTools workbench for capturing, filtering, searching, comparing, inspecting, user-initiated exporting, and user-initiated re-sending of HTTP request and response evidence from the inspected page.
 
 **Permission justification (`storage`):** Stores the user-selected System, Dark, or Light theme, the language for explanatory text (System, English, or Japanese), and boolean search preferences (scope checkboxes, case / whole-word / regular-expression options, and the Matches only state) in `chrome.storage.local` so these settings persist between DevTools sessions. This permission is not used to store search keyword text, captured URLs, headers, request bodies, response bodies, cookies, or request records.
+
+**Optional permission justification (`scripting` and site access):** Resend requests access to the specific HTTP or HTTPS site only when the user asks to send a request. An isolated script in the inspected document preserves the selected browser session without exposing the request to page scripts. Destinations must be the current origin and redirects are blocked.
 
 **Remote code answer:** `No, I am not using remote code.`
 
@@ -184,10 +186,10 @@ The published guide's "Testing your OAuth application" section still walks throu
 Run it on an operator machine, never in CI:
 
 ```
-CHROME_CLIENT_ID=... CHROME_CLIENT_SECRET=... node scripts/chrome-refresh-token.js
+node scripts/chrome-refresh-token.js
 ```
 
-It listens on a free loopback port, prints the consent URL, waits for the redirect, exchanges the code, and prints only the refresh token. Sign in as the account that owns the Chrome Web Store item; that can be a different account from the one that owns the Google Cloud project. The account also needs 2-Step Verification enabled, which the Chrome Web Store requires of any developer publishing through the API.
+Enter the OAuth client ID and secret at the prompts. The secret is typed with echo disabled. The helper listens on a free loopback port, prints the consent URL, waits for the redirect, exchanges the code, and prints only the refresh token. Sign in as the account that owns the Chrome Web Store item; that can be a different account from the one that owns the Google Cloud project. The account also needs 2-Step Verification enabled, which the Chrome Web Store requires of any developer publishing through the API.
 
 Google returns a refresh token only when offline access is requested and the consent is fresh, so the helper forces both. If it still reports no refresh token, revoke the app under `https://myaccount.google.com/permissions` and run it again.
 
