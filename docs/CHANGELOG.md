@@ -4,6 +4,10 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🔧 **Store submissions** — use the current Chrome Web Store API and capture separate review receipts for each store.
+
+## v1.17.0 - 2026-11-15
+
 - 🐛 **Live capture display** — refresh visible request rows, pending responses, and search results when the browser delays a render frame.
 - 🐛 **Export keyboard focus** — restore focus to the invoking control immediately when the export dialog closes.
 - 🐛 **Live stream HAR export** — keep each stream entry’s captured body, sizes, and WebSocket frames from the same revision.

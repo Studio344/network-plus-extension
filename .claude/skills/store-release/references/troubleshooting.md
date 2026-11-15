@@ -202,9 +202,6 @@ with Playwright `fill()`, save the draft, and require an exact read-back.
   `CHROME_ITEM_ID` is per-extension. Edge shares `EDGE_CLIENT_ID` +
   `EDGE_API_KEY`; only `EDGE_PRODUCT_ID` is per-extension.
 - Credential values never enter chat, the repo, or logs. Fingerprints do.
-- The archive reproduces byte-for-byte only under `TZ=UTC`. Entry timestamps
-  normalize to the ZIP epoch in local time, so a JST build writes
-  `01-01-1980 09:00` where CI writes `00:00`: identical entry CRCs, identical
-  206937 bytes, different SHA-256. Phase 4's `cmp` against a fresh local build
-  must run `TZ=UTC npm run extension:package`, or it reports a mismatch that
-  is not one.
+- Use `TZ=UTC npm run extension:package` consistently for release evidence.
+  The builder sets and validates the fixed ZIP entry date fields. Compare
+  bytes and SHA-256 to diagnose any mismatch.
