@@ -977,8 +977,9 @@ browserTest(
         })`,
       );
       expect(keyboardFocus).toEqual({
-        popupOpen: false, triggerExpanded: 'false', focusOnBody: false, onErrorMessage: false,
+        popupOpen: true, triggerExpanded: 'true', focusOnBody: false, onErrorMessage: false,
       });
+      await pressKey(cdp, 'Escape', 'Escape', 27);
 
       const reopened = await evaluate(
         cdp,
@@ -6138,7 +6139,13 @@ function expectAutoHideDifferenceIsVisible(measure, at) {
 browserTest(
   'the wrap drops columns by priority, says how many in the Columns menu, and pins one back on request',
   async () => {
-    const page = await launchPanelPage({ executable: browserExecutable, width: 1920, height: 800 });
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      width: 1920,
+      height: 800,
+      // This test checks the English copy as well as the behavior.
+      initScript: "localStorage.setItem('networkPlus.lang', 'en');",
+    });
     const { cdp } = page;
     const resizeTo = async (width, height) => {
       await cdp.send('Emulation.setDeviceMetricsOverride', {
