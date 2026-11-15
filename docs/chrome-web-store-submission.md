@@ -135,6 +135,8 @@ The owner must make the final external distribution decision. Private, unlisted,
 
 ## Test instructions
 
+For this release, use the reviewed ZIP to open large HARs in DevTools and the pop-out. Confirm the expected request count, row order, and final response content. While a live response is held, check that the pending request appears and updates in place on completion. From the browser’s New Tab, the extension toolbar action opens a separate offline workspace for saved captures.
+
 No account, credentials, subscription, remote service, or live customer traffic is required.
 
 1. Use the exact ZIP identified under Upload artifact. For local reproduction, extract it into a new folder, open `chrome://extensions/`, enable Developer mode, choose `Load unpacked`, and select the extracted folder. A ZIP file itself is not selected by `Load unpacked`.

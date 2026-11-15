@@ -1,4 +1,5 @@
 name: Submit to Stores
+run-name: Store ${{ inputs.store || 'both' }} / ${{ github.ref_name }} / status-only=${{ inputs.status_only || false }} / upload-only=${{ inputs.upload_only || false }}
 
 # Publishing a release makes the reviewed archive available; this takes that
 # same archive to the stores. The archive is rebuilt here and checked against
@@ -28,6 +29,14 @@ on:
         description: Upload the package but do not submit it for review
         type: boolean
         default: false
+      chrome_publisher_id:
+        description: Non-secret Chrome publisher ID (defaults to repository variable)
+        type: string
+        default: ''
+      status_only:
+        description: Read Chrome status only (requires store=chrome; never uploads or submits)
+        type: boolean
+        default: false
       diagnose:
         description: Print a non-reversible fingerprint of each stored credential and stop
         type: boolean
@@ -44,7 +53,8 @@ jobs:
   submit:
     name: Submit to stores
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Each store may require upload and submission readback polling.
+    timeout-minutes: 75
     # Store credentials live in this environment, so a submission can require a
     # reviewer before it runs by adding protection rules to it in repository
     # settings. Without rules the job runs unattended, which is the default.
@@ -54,6 +64,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -66,24 +77,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # A release event checks out the default branch, which may already have
-      # moved past the released tag. Building the archive the release actually
-      # carries is what makes the digest check meaningful.
-      - name: Check out the released tag
-        if: github.event_name == 'release'
-        env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
-        run: |
-          git checkout --detach "refs/tags/$TAG_NAME"
-          echo "building from $TAG_NAME"
-
       - name: Check the extension package
+        if: ${{ !inputs.status_only && !inputs.diagnose }}
         run: npm run extension:check
 
       - name: Build the extension package
+        if: ${{ !inputs.status_only && !inputs.diagnose }}
         run: npm run extension:package
 
       - name: Check store submission kits
+        if: ${{ !inputs.status_only && !inputs.diagnose }}
         run: npm run store:check
 
       - name: Submit to the stores
@@ -92,10 +95,12 @@ jobs:
           EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID }}
           EDGE_API_KEY: ${{ secrets.EDGE_API_KEY }}
           CHROME_ITEM_ID: ${{ secrets.CHROME_ITEM_ID }}
+          CHROME_PUBLISHER_ID: ${{ inputs.chrome_publisher_id || vars.CHROME_PUBLISHER_ID }}
           CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
           CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
           CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
           STORE: ${{ inputs.store || 'both' }}
           UPLOAD_ONLY: ${{ inputs.upload_only && '--upload-only' || '' }}
+          STATUS_ONLY: ${{ inputs.status_only && '--status-only' || '' }}
           DIAGNOSE: ${{ inputs.diagnose && '--diagnose' || '' }}
-        run: npm run store:submit -- --store "$STORE" $UPLOAD_ONLY $DIAGNOSE
+        run: npm run store:submit -- --store "$STORE" $UPLOAD_ONLY $STATUS_ONLY $DIAGNOSE

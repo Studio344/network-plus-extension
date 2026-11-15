@@ -4,7 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- No changes have been recorded since v1.17.0.
+- 🔧 **Store submissions** — use the current Chrome Web Store API and capture separate review receipts for each store.
 
 ## v1.17.0 - 2026-11-15
 
