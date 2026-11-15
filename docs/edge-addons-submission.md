@@ -1,6 +1,6 @@
 # Microsoft Edge Add-ons submission dossier (en-US)
 
-Last reviewed: 2026-10-12
+Last reviewed: 2026-11-15
 
 ## Submission status and evidence boundary
 
@@ -8,10 +8,10 @@ This dossier is a repository-local recommendation for a future Partner Center su
 
 ### Observed repository facts
 
-- `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.16.0`, with one permission (`storage`), packaged 16, 48, and 128 pixel icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
+- `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.17.0`, with one permission (`storage`), packaged 16, 48, and 128 pixel icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
 - The checked-in package guard allows only the eleven audited runtime files and rejects remote resources, inline scripts, unexpected privileged manifest surfaces, and permission drift. The one audited background service worker opens the fixed local offline workspace from the toolbar action and minimizes undocked DevTools when the pop-out opens. These operations require no additional permission, read no current-tab URLs or page data, and do not override New Tab.
-- The public `v1.16.0` GitHub release and `network-plus-extension-1.16.0.zip` were publicly observable and re-downloaded on 2026-10-12. The archive is 301505 bytes and its SHA-256 is `f93f4d9a2afd1e0437d8a1dcf94a8e6816e9a5aedca376e237e129e37cb48dad`. The fresh download was byte-identical to a fresh `TZ=UTC npm run extension:package` build from published commit `891d9fb17692f8f4e66faa1268c197675a376880`. The publishing workflow verified the same archive digest. This evidence establishes the GitHub upload source, not store acceptance, certification, or distribution.
-- The verified download URL is https://github.com/himiyosh/network-plus-extension/releases/download/v1.16.0/network-plus-extension-1.16.0.zip.
+- Two `TZ=UTC npm run extension:package` builds produced the same `network-plus-extension-1.17.0.zip` from reviewed source. The archive contains the merged Network+ improvements through `7494d2c` and the version update. It is 317717 bytes and its SHA-256 is `d2647cc24f747ba1cf70f9a8bdd930136488939947f1332ad42c6b5dd21681ac`. Verify the downloaded GitHub asset against this archive after publication.
+- The download URL after GitHub publication is https://github.com/himiyosh/network-plus-extension/releases/download/v1.17.0/network-plus-extension-1.17.0.zip.
 - The SHA-256 is safe to publish and useful for integrity checking, but it is not a publisher signature. The operator must obtain the ZIP from the trusted release route and compare the complete digest before upload.
 
 ### Checked-in discovery intent
@@ -122,16 +122,16 @@ The policy URL must be checked from a signed-out browser after this document is 
 
 The sections above describe a first submission. When a Partner Center product already exists for this extension, the work is a package update against that product: the account prerequisites are already satisfied and no new product is created.
 
-- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.16.0 is higher than v1.15.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
-- After publication, upload `network-plus-extension-1.16.0.zip` obtained from the trusted release route into the existing product's package section, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
-- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the portal, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for this v1.16.0 cut to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- edge` clears the slots it is replacing and uploads the current contents of `docs/store-assets/` as a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
+- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.17.0 is higher than v1.16.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
+- After publication, upload `network-plus-extension-1.17.0.zip` obtained from the trusted release route into the existing product's package section, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
+- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the portal, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for v1.16.0 and are reused for v1.17.0 to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- edge` clears the slots it is replacing and uploads the current contents of `docs/store-assets/` as a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
 - Certification notes for an update should say what changed. The `## v1.16.0` section of `docs/CHANGELOG.md` is the reviewed source for that text.
 - An update is a fresh certification pass. Availability, markets, and visibility carry over from the existing product unless the operator changes them, and the previously certified package stays live until the new one passes.
 - Field labels and the navigation path for package updates must be confirmed in the live portal, which can change independently of this repository.
 
 ## Automated submission
 
-`npm run store:submit -- --store edge` uploads the packaged archive to the existing Partner Center product and publishes the draft submission through the Update API v1.1. The `Submit to Stores` workflow does not run on a GitHub release event; after explicit release and store-submission authorization, dispatch it manually on `main` from the Actions tab.
+`npm run store:submit -- --store edge` uploads the packaged archive to the existing Partner Center product and publishes the draft submission through the Update API v1.1. The `Submit to Stores` workflow does not run on a GitHub release event; after explicit release and store-submission authorization, dispatch it manually on the verified release tag for this store.
 
 Before uploading anything, the script rebuilds the archive and compares its SHA-256 against the digest recorded in this dossier. A mismatch aborts the run, so the store can only receive bytes that passed review here.
 
@@ -157,7 +157,7 @@ The secrets belong to the `store-submission` GitHub Actions environment. Adding 
 
 No account, credentials, subscription, remote service, or live customer traffic is required.
 
-1. Use the exact ZIP uploaded for certification. For repository-side reproduction, run `npm run extension:package`, extract `dist/network-plus-extension-1.16.0.zip` into a new folder, open `edge://extensions/`, enable Developer mode, choose `Load unpacked`, and select the extracted folder. A ZIP file itself is not selected by `Load unpacked`.
+1. Use the exact ZIP uploaded for certification. For repository-side reproduction, run `npm run extension:package`, extract `dist/network-plus-extension-1.17.0.zip` into a new folder, open `edge://extensions/`, enable Developer mode, choose `Load unpacked`, and select the extracted folder. A ZIP file itself is not selected by `Load unpacked`.
 2. Open a local blank page such as `data:text/html,<title>Network%2B%20certification</title>`, open Microsoft Edge DevTools, and select the `Network+` panel.
 3. With no captured requests, select `Explore sample capture`. Verify that exactly three synthetic requests appear: a 200 GET to `api.network-plus.test`, a 503 POST to `checkout.network-plus.test`, and a 304 GET to `static.network-plus.test`. The status must state `No network traffic was sent.` and that live recording is paused.
 4. Select the 503 `POST /v1/orders/preview` request. Open the Response `Timing` tab and verify a total duration of 2,450 ms, with `Wait (TTFB)` at 2,200 ms as the dominant phase. Open `What do the timing phases mean?` and verify that the guidance says browser timing does not prove packet loss, cabling or RF faults, or a definitive server root cause.
@@ -200,4 +200,4 @@ Machine-readable provenance and expected dimensions are recorded in `docs/store-
 | [Public v1.13.0 release](https://github.com/himiyosh/network-plus-extension/releases/tag/v1.13.0) | Released 2026-08-28 by the main-push publishing workflow with one 214781-byte ZIP asset; SHA-256 re-verified from a fresh download and byte-compared against local builds from two timezones | 2026-08-29 | Superseded as the upload source by v1.14.0 |
 | [Public v1.14.0 release](https://github.com/himiyosh/network-plus-extension/releases/tag/v1.14.0) | Released 2026-09-13 by the main-push publishing workflow with one 298596-byte ZIP asset; SHA-256 re-verified from a fresh download and byte-compared against local builds from two timezones | 2026-09-14 | Superseded as the upload source by v1.15.0 |
 | [Public v1.15.0 release](https://github.com/himiyosh/network-plus-extension/releases/tag/v1.15.0) | Released 2026-10-07 with one 299699-byte ZIP asset; SHA-256 re-verified from a fresh download on 2026-10-12 | 2026-10-12 | Superseded as the upload source by v1.16.0 |
-| [Public v1.16.0 release](https://github.com/himiyosh/network-plus-extension/releases/tag/v1.16.0) | Released 2026-10-12 by the main-push publishing workflow with one 301505-byte ZIP asset; SHA-256 re-verified from a fresh download and byte-compared against a fresh `TZ=UTC` build | 2026-10-12 | Current verified GitHub upload source; store acceptance and certification are not claimed |
+| [Public v1.16.0 release](https://github.com/himiyosh/network-plus-extension/releases/tag/v1.16.0) | Released 2026-10-12 by the main-push publishing workflow with one 301505-byte ZIP asset; SHA-256 re-verified from a fresh download and byte-compared against a fresh `TZ=UTC` build | 2026-10-12 | Superseded as the upload source by v1.17.0 |
