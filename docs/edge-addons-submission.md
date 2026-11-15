@@ -155,6 +155,8 @@ The secrets belong to the `store-submission` GitHub Actions environment. Adding 
 
 ## Certification testing notes
 
+For this release, use the reviewed ZIP to open large HARs in DevTools and the pop-out. Confirm the expected request count, row order, and final response content. While a live response is held, check that the pending request appears and updates in place on completion. From the browser’s New Tab, the extension toolbar action opens a separate offline workspace for saved captures.
+
 No account, credentials, subscription, remote service, or live customer traffic is required.
 
 1. Use the exact ZIP uploaded for certification. For repository-side reproduction, run `npm run extension:package`, extract `dist/network-plus-extension-1.17.0.zip` into a new folder, open `edge://extensions/`, enable Developer mode, choose `Load unpacked`, and select the extracted folder. A ZIP file itself is not selected by `Load unpacked`.

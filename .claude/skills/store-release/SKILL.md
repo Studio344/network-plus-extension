@@ -25,7 +25,7 @@ Two facts shape the whole flow. First, `store-submit.yml` **never fires on the
 release event**: the release is created by `release.yml` using the workflow
 `GITHUB_TOKEN`, and GitHub suppresses workflow triggers from events created
 with that token (recursion prevention). Every submission is started by hand
-with `workflow_dispatch` on `main`. Second, **listing text and images have no
+with `workflow_dispatch` on the verified release tag. Second, **listing text and images have no
 API on either store** — the Chrome Items API and the Edge Update API both take
 packages and nothing else. Package submission is therefore automated in CI;
 the images are swapped by `npm run store:pages`, which drives the two consoles
@@ -36,16 +36,11 @@ because it was only retyped when the dossier changed.
 
 ## Phase 0 — before cutting
 
-- Confirm `main` is green and every feature PR intended for the release is
-  merged. The repo convention: merges happen only after the user confirms.
-- Pick the semver bump (features → minor).
-- The Edge API key expires ~72 days after creation. If in doubt, have the user
-  run `./scripts/publish-edge.sh check` in the sibling dual-subtitles repo
-  before starting; a dead key fails Phase 3, not Phase 1, and is cheaper to
-  learn about now. Credential locations and sharing rules live in CLAUDE.md
-  (「ストア申請の資格情報」).
-- Note whether `docs/store-assets/` or the listing text changed since the last
-  submission. This decides the Phase 3 path.
+- Read back the existing branch, worktree, latest release, and store workflow runs. Work from verified green `main` in the designated checkout or an isolated worktree. Record any running or accepted submission before taking action.
+- Pick a version from the accumulated changelog (new features → minor). Check that the intended version has no prior release or store submission. Use the standing merge and release authorization in `CLAUDE.md` and the current request.
+- Compare both existing listings and the dossier description blocks. Check `docs/store-assets/` against the previously submitted ref. A changed dossier digest alone does not require a listing or media edit.
+- Use the existing `store-submission` environment and the current provider accounts. Chrome Web Store API V2 uses the existing refresh token and the publisher ID from **Publisher → Settings** for the publisher that owns the existing item. Pass the identifier as the workflow’s `chrome_publisher_id` input or reuse the configured `CHROME_PUBLISHER_ID` Actions variable. Use the [Chrome API guide](https://developer.chrome.com/docs/webstore/using-api/) to confirm the account and item. If a publisher ID or a fresh authorization is required, continue the other authorized phases and report what the affected store needs.
+- The Edge API key can expire. Reuse an authorized existing status check when available. Follow [troubleshooting](references/troubleshooting.md) for authentication errors and uncertain submissions.
 
 ## Phase 1 — cut the release (one commit, plus a reopen commit)
 
@@ -69,8 +64,9 @@ sneaks back in.
 2. In `docs/CHANGELOG.md`, rename `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD`.
 3. Build twice and require identical bytes — the digest is only worth pinning
    if the build is reproducible:
-   `npm run extension:package` → record size + `sha256sum`, move the zip
-   aside, build again, `cmp` the two.
+   Run `TZ=UTC npm run extension:package` for both builds. Copy the first ZIP to the
+   evidence directory, compare with `cmp`, and record bytes and SHA-256 with
+   `wc -c` and `shasum -a 256`. Preserve the first ZIP for the public readback.
 4. Repoint the digest pins at the new archive:
    - `scripts/check-store-readiness.js` → `EXPECTED_RELEASE_SHA256`
    - `tests/store-readiness.test.js` → the same digest appears twice
@@ -91,33 +87,50 @@ sneaks back in.
    placeholder bullet `- No changes have been recorded since vX.Y.Z.` — the
    changelog gate requires the section to always exist with a bullet, and the
    release-notes builder skips exactly this placeholder.
-7. Run the gates: `npm test`, `lint`, `format:check`, `extension:check`,
-   `store:check`, `integrity:check`, `contract:check`, `version:check`,
-   `audit:strict`, and `text:check` / `changelog:check` with
-   `--base "$(git merge-base HEAD origin/main)" --head "$(git rev-parse HEAD)"`.
+7. Run the exact candidate gates from `CLAUDE.md`. Derive the suite count
+   from Git and Jest. Run the full suites with installed Edge and Chrome and
+   require zero skips. Use `EDGE_BIN` for Edge and unset it when setting
+   `CHROME_BIN` for Chrome. Load the extracted checked ZIP in fresh browser
+   profiles for changed user journeys. Record source ref, ZIP digest, actual
+   browser version and results. Follow any requested independent review and
+   actual test requirements for the release.
 
 ## Phase 2 — merge and let CI publish the release
 
-1. Push, open the PR, wait for CI, get the user's explicit go-ahead, merge
-   with a merge commit.
-2. Sync develop: `git fetch origin main && git push origin origin/main:refs/heads/develop`.
-3. The push to `main` runs `release.yml`, which rebuilds the archive, checks
-   it against `EXPECTED_RELEASE_SHA256`, and creates tag + release `vX.Y.Z`
-   with the zip attached. Verify the release exists and its asset digest
-   matches the pin. It skips (does not fail) if the tag already has a release.
+1. Push and open the PR. Verify that required Node 22 and Node 24 checks
+   passed for the current head, and that the merge tree matches the reviewed candidate.
+   Merge through the PR once all gates and existing authorization are satisfied.
+2. Synchronize `develop` as the repository permits. Honor the current GitHub
+   branch rules before updating it.
+3. The push to `main` runs `release.yml`. Verify the public tag points to the
+   reviewed merge and re-download its single release ZIP. Check its byte count
+   and whole digest against both dossiers, and `cmp` it against the reviewed ZIP
+   before starting store submission. An existing release can make the job
+   skip. Verify its asset independently in that case.
 
-## Phase 3 — submit to the stores (manual dispatch, always)
+## Phase 3 — submit to each store
 
-Dispatch `store-submit.yml` on ref `main` (Actions tab or API). Inputs:
-`store` = `both` / `edge` / `chrome`, `upload_only`, `diagnose`.
+For the existing listing, reconcile the latest known draft/review state and
+previous dispatches. Chrome V2 reads live submitted and published version
+state before changing the item. Use the Chrome `status_only` workflow input for an authenticated readback without uploading or submitting. Edge's Update API reads specific operation
+IDs. Check the Partner Center draft if a previous Edge result is uncertain.
+Keep the installed listing's visibility and markets.
 
-**Media unchanged** — dispatch once with `store=both`. The run uploads the
-archive to both stores and submits both for review. Done.
+Dispatch the existing `store-submit.yml` with `ref=vX.Y.Z` and explicit
+`store=edge` or `store=chrome`, one run per store. The tag pins both the
+submission code and the archive source. Confirm each run's head matches the
+tag and log shows the expected archive bytes and SHA-256. With GitHub CLI,
+`gh workflow run store-submit.yml --ref vX.Y.Z -f store=edge` is the Edge
+example. The Actions interface or the [dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+accepts the same ref and inputs.
+
+**Media unchanged** — use the normal review submission for each store. Record
+each run, acknowledgement and available operation/version status independently.
 
 **Media changed** — sequence it so one review carries everything:
 
-1. Dispatch with `upload_only=true` (per store or both). The package lands in
-   each store's draft without submitting.
+1. Dispatch once per affected store with `upload_only=true`. The package lands
+   in a draft.
 2. Swap the images with `npm run store:pages` on the operator's machine — it
    cannot run in CI, because it needs an interactive sign-in and a profile
    that survives between runs:
@@ -161,30 +174,25 @@ archive to both stores and submits both for review. Done.
    draft, package and media edits together. (The user pressing the portal's
    own submit button is equivalent.)
 
-Success lines to look for in the run log: `package accepted` then
-`OK: vX.Y.Z submitted to <store>`. A store with no credentials configured is
-skipped unless explicitly named.
+Read each store's log and store-reported result. Record GitHub run URL, tag,
+archive identity, and the Edge upload and submission operation IDs or the
+Chrome item/version and revision state. API acceptance and in-review states
+are separate from approval and public distribution. Reconcile failed, skipped,
+or ambiguous results before retrying, then retry only the affected store.
+An earlier accepted operation can finish after the workflow times out.
 
-If a run fails, read `references/troubleshooting.md` in this skill before
-touching any credential — it maps every error seen so far to its actual
-cause, and the fingerprint diagnosis settles "wrong value stored" vs "value
-itself dead" without re-pasting anything.
+For credentials, policy or consent blockers, record the affected store and
+required operator action and follow [troubleshooting](references/troubleshooting.md).
+Keep credential values out of logs, notes, and handoffs.
 
 ## Phase 4 — record the published release (follow-up PR)
 
-After the release is public, on a fresh branch:
+Record the downloaded asset URL, readback size/digest, verified tag commit,
+and each store's state in the release handoff. Carry pending review and
+distribution status forward so a later operator can check or resume it.
 
-1. Download the release asset, verify size + SHA-256 against the pin, and
-   `cmp` it against a fresh local build. Build it with
-   `TZ=UTC npm run extension:package` — entry timestamps normalize in local
-   time, so a build outside UTC differs from the released bytes on timestamps
-   alone and reports a mismatch that is not one.
-2. Flip both dossiers from cut-time phrasing to observed phrasing ("were
-   publicly observable and re-downloaded on YYYY-MM-DD … byte-identical to
-   the local build") and add the release to the Edge dossier's evidence
-   table.
-3. Add a changelog bullet, run the gates, PR, merge on the user's word.
-
-This is also the natural place to fold in any operational lesson the cycle
-taught — the troubleshooting reference should grow every time a submission
-fails in a new way.
+When recording publication evidence in the repository, use a fresh branch
+and update both dossiers with the date actually observed, exact asset URL,
+size, SHA-256 and byte comparison results. Add the release to the Edge
+evidence table and run the usual PR gates. The Phase 2 comparison already
+establishes GitHub asset identity for Phase 3.

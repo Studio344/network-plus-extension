@@ -7,13 +7,13 @@
 // checked against the digest the submission dossiers pin before a single byte
 // is uploaded, so this script cannot ship an archive nobody reviewed.
 //
-// API contracts (accessed 2026-08-19):
+// API contracts (Chrome V2 checked 2026-11-15; Edge checked 2026-08-19):
 // - Edge Add-ons Update API v1.1
 //   https://learn.microsoft.com/en-us/microsoft-edge/extensions/update/api/using-addons-api
 //   https://learn.microsoft.com/en-us/microsoft-edge/extensions/update/api/addons-api-reference
 // - Chrome Web Store API
-//   https://developer.chrome.com/docs/webstore/using_webstore_api
-//   https://developer.chrome.com/docs/webstore/api_index
+//   https://developer.chrome.com/docs/webstore/using-api
+//   https://developer.chrome.com/docs/webstore/api/reference/rest
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -21,8 +21,8 @@ const path = require('path');
 
 const EDGE_API_ROOT = 'https://api.addons.microsoftedge.microsoft.com';
 const CHROME_TOKEN_URL = 'https://accounts.google.com/o/oauth2/token';
-const CHROME_UPLOAD_ROOT = 'https://www.googleapis.com/upload/chromewebstore/v1.1/items';
-const CHROME_ITEM_ROOT = 'https://www.googleapis.com/chromewebstore/v1.1/items';
+const CHROME_UPLOAD_ROOT = 'https://chromewebstore.googleapis.com/upload/v2';
+const CHROME_ITEM_ROOT = 'https://chromewebstore.googleapis.com/v2';
 
 // Both stores answer "accepted, come back later", so every submission ends in a
 // poll. The ceiling is generous because upload processing is not instant, and
@@ -33,8 +33,9 @@ const POLL_TIMEOUT_MS = 15 * 60 * 1000;
 
 const EDGE_TERMINAL_STATUS = Object.freeze({ Succeeded: 'succeeded', Failed: 'failed' });
 const CHROME_TERMINAL_UPLOAD_STATE = Object.freeze({
-  SUCCESS: 'succeeded',
-  FAILURE: 'failed',
+  SUCCEEDED: 'succeeded',
+  IN_PROGRESS: 'pending',
+  FAILED: 'failed',
   NOT_FOUND: 'failed',
 });
 
@@ -82,14 +83,19 @@ const assertArchiveMatchesReviewedDigest = (archive, expectedSha256) => {
   }
 };
 
-// Reports which stores can actually be submitted to. A store with no
-// credentials is skipped rather than failed, so configuring one store does not
-// block the other; asking for a store explicitly turns that skip into an error.
+// Validate every requested store before mutating any of them. Use --store edge
+// or --store chrome when only one store is intended.
 const planStoreSubmissions = (env, requested) => {
   const wanted = requested === 'both' ? ['edge', 'chrome'] : [requested];
   const required = {
     edge: ['EDGE_PRODUCT_ID', 'EDGE_CLIENT_ID', 'EDGE_API_KEY'],
-    chrome: ['CHROME_ITEM_ID', 'CHROME_CLIENT_ID', 'CHROME_CLIENT_SECRET', 'CHROME_REFRESH_TOKEN'],
+    chrome: [
+      'CHROME_PUBLISHER_ID',
+      'CHROME_ITEM_ID',
+      'CHROME_CLIENT_ID',
+      'CHROME_CLIENT_SECRET',
+      'CHROME_REFRESH_TOKEN',
+    ],
   };
 
   return wanted.map((store) => {
@@ -98,9 +104,7 @@ const planStoreSubmissions = (env, requested) => {
       store,
       ready: missing.length === 0,
       missing,
-      // Only an explicit single-store request treats missing credentials as a
-      // failure; "both" is a convenience, not a claim that both are configured.
-      required: requested === store,
+      required: true,
     };
   });
 };
@@ -176,6 +180,7 @@ const submitToEdge = async (context) => {
     throw new Error(`edge package upload returned ${upload.status}: ${redact(body.text, secrets)}`);
   }
   const uploadOperation = extractOperationId(upload);
+  log(`edge: upload acknowledged, operationId=${redact(uploadOperation, secrets)}`);
 
   await poll('edge package upload', async () => {
     const response = await fetchImpl(`${product}/submissions/draft/package/operations/${uploadOperation}`, {
@@ -185,13 +190,21 @@ const submitToEdge = async (context) => {
     if (!response.ok) {
       return { state: 'failed', detail: `HTTP ${response.status}: ${redact(body.text, secrets)}` };
     }
-    return interpretEdgeOperation(body.json);
+    const result = interpretEdgeOperation(body.json);
+    return { ...result, detail: redact(result.detail, secrets) };
   });
   log('edge: package accepted into the draft submission');
+  log(`edge: upload receipt ${redact(JSON.stringify({ operationId: uploadOperation, state: 'Succeeded' }), secrets)}`);
 
   if (uploadOnly) {
     log('edge: stopping before publish because --upload-only was given');
-    return { store: 'edge', published: false, operationId: uploadOperation };
+    return {
+      store: 'edge',
+      outcome: 'uploaded',
+      submitted: false,
+      operationId: uploadOperation,
+      operationState: 'Succeeded',
+    };
   }
 
   log('edge: publishing the draft submission');
@@ -207,6 +220,7 @@ const submitToEdge = async (context) => {
     throw new Error(`edge publish returned ${publish.status}: ${redact(body.text, secrets)}`);
   }
   const publishOperation = extractOperationId(publish);
+  log(`edge: submission acknowledged, operationId=${redact(publishOperation, secrets)}`);
 
   await poll('edge publish', async () => {
     const response = await fetchImpl(`${product}/submissions/operations/${publishOperation}`, {
@@ -216,10 +230,20 @@ const submitToEdge = async (context) => {
     if (!response.ok) {
       return { state: 'failed', detail: `HTTP ${response.status}: ${redact(body.text, secrets)}` };
     }
-    return interpretEdgeOperation(body.json);
+    const result = interpretEdgeOperation(body.json);
+    return { ...result, detail: redact(result.detail, secrets) };
   });
 
-  return { store: 'edge', published: true, operationId: publishOperation };
+  log(
+    `edge: submission receipt ${redact(JSON.stringify({ operationId: publishOperation, state: 'Succeeded' }), secrets)}`,
+  );
+  return {
+    store: 'edge',
+    outcome: 'submitted',
+    submitted: true,
+    operationId: publishOperation,
+    operationState: 'Succeeded',
+  };
 };
 
 // --- Chrome Web Store -------------------------------------------------------
@@ -243,88 +267,223 @@ const requestChromeAccessToken = async (credentials, fetchImpl, secrets) => {
 };
 
 const interpretChromeUpload = (payload) => {
-  const state = CHROME_TERMINAL_UPLOAD_STATE[payload && payload.uploadState] || 'pending';
-  const errors = (payload && payload.itemError) || [];
-  const detail = [
-    payload && payload.uploadState,
-    errors.map((entry) => entry.error_detail || entry.error_code).join('; '),
-  ]
-    .filter(Boolean)
-    .join(' - ');
-  return { state, detail: detail || 'IN_PROGRESS' };
+  const state = CHROME_TERMINAL_UPLOAD_STATE[payload && payload.uploadState] || 'failed';
+  return { state, detail: (payload && payload.uploadState) || 'missing upload state' };
 };
 
-// ITEM_PENDING_REVIEW means the upload landed but a previous version still
-// occupies the review queue. That is not this run's failure and must not be
-// reported as one, but it does mean nothing was submitted.
-const interpretChromePublish = (payload) => {
-  const statuses = (payload && payload.status) || [];
-  const detail = ((payload && payload.statusDetail) || []).join('; ') || statuses.join('; ');
-  if (statuses.includes('OK')) return { state: 'succeeded', detail };
-  if (statuses.includes('ITEM_PENDING_REVIEW')) return { state: 'pending-review', detail };
-  return { state: 'failed', detail: detail || 'no status returned' };
+const CHROME_ITEM_STATES = new Set([
+  'PENDING_REVIEW',
+  'STAGED',
+  'PUBLISHED',
+  'PUBLISHED_TO_TESTERS',
+  'REJECTED',
+  'CANCELLED',
+]);
+const CHROME_ACCEPTED_STATES = new Set(['PENDING_REVIEW', 'PUBLISHED', 'PUBLISHED_TO_TESTERS']);
+
+const interpretChromePublish = (payload) => ({
+  state: payload && CHROME_ACCEPTED_STATES.has(payload.state) ? 'succeeded' : 'failed',
+  detail: (payload && payload.state) || 'missing submission state',
+});
+
+const chromeResourceName = (credentials) => {
+  for (const key of ['publisherId', 'itemId']) {
+    if (typeof credentials[key] !== 'string' || !/^[A-Za-z0-9_-]+$/.test(credentials[key])) {
+      throw new Error(`chrome ${key} is missing or invalid`);
+    }
+  }
+  return `publishers/${credentials.publisherId}/items/${credentials.itemId}`;
+};
+
+const assertChromeIdentity = (payload, name, itemId) => {
+  if (!payload || payload.name !== name || payload.itemId !== itemId) {
+    throw new Error('chrome response did not identify the requested publisher and item');
+  }
+};
+
+// Only retain documented, non-secret fields for receipts. A status response has
+// no draft version or package hash; lastAsyncUploadState alone proves neither.
+const summarizeChromeStatus = (payload) => {
+  if (
+    payload.lastAsyncUploadState !== undefined &&
+    !Object.hasOwn(CHROME_TERMINAL_UPLOAD_STATE, payload.lastAsyncUploadState) &&
+    payload.lastAsyncUploadState !== 'UPLOAD_STATE_UNSPECIFIED'
+  ) {
+    throw new Error('chrome status has an unknown async upload state');
+  }
+  const revision = (value) => {
+    if (!value) return null;
+    const channels = value.distributionChannels === undefined ? [] : value.distributionChannels;
+    if (!CHROME_ITEM_STATES.has(value.state) || !Array.isArray(channels)) {
+      throw new Error('chrome status has an unknown state or missing revision channels');
+    }
+    const versions = channels.map((channel) => {
+      if (!channel || typeof channel.crxVersion !== 'string' || !/^\d+(?:\.\d+){0,3}$/.test(channel.crxVersion)) {
+        throw new Error('chrome status has a revision without a version');
+      }
+      return channel.crxVersion;
+    });
+    return { state: value.state, versions };
+  };
+  return {
+    name: payload.name,
+    itemId: payload.itemId,
+    publishedRevision: revision(payload.publishedItemRevisionStatus),
+    submittedRevision: revision(payload.submittedItemRevisionStatus),
+    lastAsyncUploadState: payload.lastAsyncUploadState || null,
+    takenDown: payload.takenDown === true,
+    warned: payload.warned === true,
+  };
+};
+
+const matchingChromeRevision = (status, version) => {
+  if (status.takenDown) return null;
+  return [status.submittedRevision, status.publishedRevision].find(
+    (revision) => revision && CHROME_ACCEPTED_STATES.has(revision.state) && revision.versions.includes(version),
+  );
+};
+
+const assertChromeCanSubmit = (status, version) => {
+  if (status.takenDown) throw new Error('chrome item is taken down; check the developer dashboard');
+  const expectedParts = version.split('.').map(Number);
+  const newerPublishedVersion =
+    status.publishedRevision &&
+    status.publishedRevision.versions.find((published) => {
+      const observedParts = published.split('.').map(Number);
+      for (let index = 0; index < 4; index += 1) {
+        const difference = (observedParts[index] || 0) - (expectedParts[index] || 0);
+        if (difference !== 0) return difference > 0;
+      }
+      return false;
+    });
+  if (newerPublishedVersion) {
+    throw new Error(
+      `chrome already has newer published version ${newerPublishedVersion}; refusing to upload v${version}`,
+    );
+  }
+  if (status.lastAsyncUploadState === 'IN_PROGRESS') {
+    throw new Error('chrome has an upload in progress; check status before retrying');
+  }
+  const revision = status.submittedRevision;
+  if (revision && (['PENDING_REVIEW', 'STAGED'].includes(revision.state) || revision.versions.includes(version))) {
+    throw new Error(
+      `chrome has an existing ${revision.state} revision (${revision.versions.join(', ') || 'unknown version'}); check status before retrying`,
+    );
+  }
 };
 
 const submitToChrome = async (context) => {
-  const { archive, credentials, fetchImpl, log, secrets, uploadOnly, poll, publishTarget } = context;
-
-  log('chrome: exchanging the refresh token for an access token');
+  const { archive, credentials, fetchImpl, log, secrets, uploadOnly, poll, version, statusOnly = false } = context;
+  const name = chromeResourceName(credentials);
+  if (context.publishTarget && context.publishTarget !== 'default') {
+    throw new Error('Chrome V2 preserves existing visibility; --publish-target must be default');
+  }
+  if (typeof version !== 'string' || !/^\d+(?:\.\d+){0,3}$/.test(version)) {
+    throw new Error('chrome expected release version is required and must be numeric');
+  }
   const token = await requestChromeAccessToken(credentials, fetchImpl, secrets);
-  const authHeaders = { Authorization: `Bearer ${token}`, 'x-goog-api-version': '2' };
   const allSecrets = [...secrets, token];
-
-  log('chrome: uploading the package');
-  const upload = await fetchImpl(`${CHROME_UPLOAD_ROOT}/${credentials.itemId}`, {
-    method: 'PUT',
-    headers: authHeaders,
-    body: archive.bytes,
+  const authHeaders = { Authorization: `Bearer ${token}` };
+  const resourceUrl = `${CHROME_ITEM_ROOT}/${name}`;
+  const readStatus = async () => {
+    const response = await fetchImpl(`${resourceUrl}:fetchStatus`, { headers: authHeaders });
+    const body = await readBody(response);
+    if (!response.ok) throw new Error(`chrome status returned ${response.status}: ${redact(body.text, allSecrets)}`);
+    assertChromeIdentity(body.json, name, credentials.itemId);
+    return summarizeChromeStatus(body.json);
+  };
+  const receipt = (outcome, status, submitted = false) => ({
+    store: 'chrome',
+    outcome,
+    submitted,
+    expectedVersion: version,
+    // The hash identifies our reviewed upload; it is not a server hash readback.
+    ...(archive ? { localArchiveSha256: archive.sha256 } : {}),
+    ...status,
   });
-  const uploadBody = await readBody(upload);
-  if (!upload.ok) {
-    throw new Error(`chrome package upload returned ${upload.status}: ${redact(uploadBody.text, allSecrets)}`);
-  }
+  const recover = async (stage, error) => {
+    let status;
+    try {
+      status = await readStatus();
+    } catch (readError) {
+      throw new Error(
+        `chrome ${stage} outcome is unconfirmed: ${redact(error.message, allSecrets)}; readback failed: ${redact(readError.message, allSecrets)}; use --store chrome --status-only before retrying`,
+        { cause: readError },
+      );
+    }
+    if (matchingChromeRevision(status, version)) return receipt('observed-after-error', status);
+    throw new Error(
+      `chrome ${stage} was not confirmed for v${version}: ${redact(error.message, allSecrets)}; status=${JSON.stringify(status)}; use --store chrome --status-only before retrying`,
+    );
+  };
 
-  let uploadResult = interpretChromeUpload(uploadBody.json);
-  if (uploadResult.state === 'pending') {
-    await poll('chrome package upload', async () => {
-      const response = await fetchImpl(`${CHROME_ITEM_ROOT}/${credentials.itemId}?projection=DRAFT`, {
-        headers: authHeaders,
-      });
-      const body = await readBody(response);
-      if (!response.ok) {
-        return { state: 'failed', detail: `HTTP ${response.status}: ${redact(body.text, allSecrets)}` };
-      }
-      return interpretChromeUpload(body.json);
+  const before = await readStatus();
+  log(`chrome: status ${JSON.stringify(before)}`);
+  if (statusOnly) return receipt('status-only', before);
+  if (matchingChromeRevision(before, version)) return receipt('already-submitted-or-published', before);
+  assertChromeCanSubmit(before, version);
+
+  let uploadVersionVerified = false;
+  try {
+    log('chrome: uploading the reviewed package');
+    const upload = await fetchImpl(`${CHROME_UPLOAD_ROOT}/${name}:upload`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/zip' },
+      body: archive.bytes,
     });
-  } else if (uploadResult.state === 'failed') {
-    throw new Error(`chrome package upload failed: ${redact(uploadResult.detail, allSecrets)}`);
-  }
-  log('chrome: package accepted as the item draft');
-
-  if (uploadOnly) {
-    log('chrome: stopping before publish because --upload-only was given');
-    return { store: 'chrome', published: false };
-  }
-
-  log('chrome: submitting the draft for review');
-  const publish = await fetchImpl(
-    `${CHROME_ITEM_ROOT}/${credentials.itemId}/publish?publishTarget=${encodeURIComponent(publishTarget)}`,
-    { method: 'POST', headers: { ...authHeaders, 'Content-Length': '0' } },
-  );
-  const publishBody = await readBody(publish);
-  if (!publish.ok) {
-    throw new Error(`chrome publish returned ${publish.status}: ${redact(publishBody.text, allSecrets)}`);
-  }
-  const result = interpretChromePublish(publishBody.json);
-  if (result.state === 'failed') {
-    throw new Error(`chrome publish failed: ${redact(result.detail, allSecrets)}`);
-  }
-  if (result.state === 'pending-review') {
-    log(`chrome: item is still in review from an earlier submission (${result.detail})`);
-    return { store: 'chrome', published: false, pendingReview: true };
+    const body = await readBody(upload);
+    if (!upload.ok) throw new Error(`upload returned ${upload.status}: ${redact(body.text, allSecrets)}`);
+    assertChromeIdentity(body.json, name, credentials.itemId);
+    const result = interpretChromeUpload(body.json);
+    if (body.json.crxVersion && body.json.crxVersion !== version)
+      throw new Error('upload returned a different version');
+    if (result.state === 'failed') throw new Error(`upload failed: ${result.detail}`);
+    if (result.state === 'succeeded') {
+      if (body.json.crxVersion !== version) throw new Error('upload did not confirm the expected version');
+      uploadVersionVerified = true;
+    } else {
+      await poll('chrome package upload', async () => {
+        const status = await readStatus();
+        return interpretChromeUpload({ uploadState: status.lastAsyncUploadState });
+      });
+    }
+  } catch (error) {
+    return recover('upload', error);
   }
 
-  return { store: 'chrome', published: true };
+  const uploaded = await readStatus();
+  if (uploadOnly) return { ...receipt('uploaded', uploaded), uploadState: 'SUCCEEDED', uploadVersionVerified };
+  if (matchingChromeRevision(uploaded, version)) return receipt('already-submitted-or-published', uploaded);
+  assertChromeCanSubmit(uploaded, version);
+  try {
+    log('chrome: submitting the draft for review with existing visibility and rollout');
+    const publish = await fetchImpl(`${resourceUrl}:publish`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const body = await readBody(publish);
+    if (!publish.ok) throw new Error(`publish returned ${publish.status}: ${redact(body.text, allSecrets)}`);
+    assertChromeIdentity(body.json, name, credentials.itemId);
+    const result = interpretChromePublish(body.json);
+    if (result.state !== 'succeeded') throw new Error(`publish failed: ${result.detail}`);
+    if (body.json.warningInfo)
+      log(`chrome: publish warnings ${redact(JSON.stringify(body.json.warningInfo), allSecrets)}`);
+    log(`chrome: submission acknowledged, state=${result.detail}; verifying version`);
+    const verified = await poll('chrome submission readback', async () => {
+      const status = await readStatus();
+      if (matchingChromeRevision(status, version)) return { state: 'succeeded', status };
+      const rejected =
+        status.takenDown ||
+        (status.submittedRevision &&
+          status.submittedRevision.versions.includes(version) &&
+          ['REJECTED', 'CANCELLED', 'STAGED'].includes(status.submittedRevision.state));
+      return { state: rejected ? 'failed' : 'pending', detail: JSON.stringify(status) };
+    });
+    return receipt('submitted', verified.status, true);
+  } catch (error) {
+    return recover('publish', error);
+  }
 };
 
 // --- Entry point ------------------------------------------------------------
@@ -335,12 +494,14 @@ const parseArguments = (argv) => {
     archive: '',
     notesFile: '',
     uploadOnly: false,
+    statusOnly: false,
     publishTarget: 'default',
     diagnose: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--upload-only') options.uploadOnly = true;
+    else if (argument === '--status-only') options.statusOnly = true;
     else if (argument === '--diagnose') options.diagnose = true;
     else if (argument === '--store') options.store = argv[(index += 1)];
     else if (argument === '--archive') options.archive = argv[(index += 1)];
@@ -351,8 +512,11 @@ const parseArguments = (argv) => {
   if (!['edge', 'chrome', 'both'].includes(options.store)) {
     throw new Error(`--store must be edge, chrome, or both (received ${options.store})`);
   }
-  if (!['default', 'trustedTesters'].includes(options.publishTarget)) {
-    throw new Error(`--publish-target must be default or trustedTesters (received ${options.publishTarget})`);
+  if (options.publishTarget !== 'default') {
+    throw new Error('--publish-target must be default; Chrome V2 preserves the existing store visibility');
+  }
+  if (options.statusOnly && (options.store !== 'chrome' || options.uploadOnly || options.diagnose)) {
+    throw new Error('--status-only requires --store chrome and cannot be combined with --upload-only or --diagnose');
   }
   return options;
 };
@@ -368,6 +532,7 @@ const main = async () => {
       'EDGE_CLIENT_ID',
       'EDGE_API_KEY',
       'CHROME_ITEM_ID',
+      'CHROME_PUBLISHER_ID',
       'CHROME_CLIENT_ID',
       'CHROME_CLIENT_SECRET',
       'CHROME_REFRESH_TOKEN',
@@ -378,21 +543,26 @@ const main = async () => {
   }
   const root = process.cwd();
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-  const archivePath = options.archive || path.join(root, 'dist', `network-plus-extension-${version}.zip`);
-  if (!fs.existsSync(archivePath)) {
-    throw new Error(`${archivePath} is missing; run npm run extension:package first`);
+  const plans = planStoreSubmissions(process.env, options.store);
+  for (const plan of plans) {
+    if (!plan.ready) throw new Error(`${plan.store} was requested but is missing ${plan.missing.join(', ')}`);
   }
-
-  const { EXPECTED_RELEASE_SHA256 } = require('./check-store-readiness.js');
-  const archive = describeArchive(archivePath);
-  assertArchiveMatchesReviewedDigest(archive, EXPECTED_RELEASE_SHA256);
-  process.stdout.write(`archive ${archive.name} verified: ${archive.size} bytes, SHA-256 ${archive.sha256}\n`);
+  let archive;
+  if (!options.statusOnly) {
+    const archivePath = options.archive || path.join(root, 'dist', `network-plus-extension-${version}.zip`);
+    if (!fs.existsSync(archivePath)) {
+      throw new Error(`${archivePath} is missing; run npm run extension:package first`);
+    }
+    const { EXPECTED_RELEASE_SHA256 } = require('./check-store-readiness.js');
+    archive = describeArchive(archivePath);
+    assertArchiveMatchesReviewedDigest(archive, EXPECTED_RELEASE_SHA256);
+    process.stdout.write(`archive ${archive.name} verified: ${archive.size} bytes, SHA-256 ${archive.sha256}\n`);
+  }
 
   const notes = options.notesFile
     ? fs.readFileSync(options.notesFile, 'utf8').trim()
     : `Network+ for DevTools v${version}. Release notes: https://github.com/himiyosh/network-plus-extension/releases/tag/v${version}`;
 
-  const plans = planStoreSubmissions(process.env, options.store);
   const secrets = [process.env.EDGE_API_KEY, process.env.CHROME_CLIENT_SECRET, process.env.CHROME_REFRESH_TOKEN].filter(
     Boolean,
   );
@@ -407,21 +577,16 @@ const main = async () => {
 
   const results = [];
   for (const plan of plans) {
-    if (!plan.ready) {
-      const message = `${plan.store}: skipped, missing ${plan.missing.join(', ')}`;
-      if (plan.required) throw new Error(message.replace('skipped, missing', 'was requested but is missing'));
-      log(message);
-      results.push({ store: plan.store, skipped: true, missing: plan.missing });
-      continue;
-    }
-
     const shared = {
       archive,
       notes,
-      fetchImpl: fetch,
+      version,
+      // Bound each HTTP call as well as the polling loop; never retry a POST.
+      fetchImpl: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(120000) }),
       log,
       secrets,
       uploadOnly: options.uploadOnly,
+      statusOnly: options.statusOnly,
       poll,
       publishTarget: options.publishTarget,
     };
@@ -441,6 +606,7 @@ const main = async () => {
         await submitToChrome({
           ...shared,
           credentials: {
+            publisherId: process.env.CHROME_PUBLISHER_ID,
             itemId: process.env.CHROME_ITEM_ID,
             clientId: process.env.CHROME_CLIENT_ID,
             clientSecret: process.env.CHROME_CLIENT_SECRET,
@@ -449,13 +615,17 @@ const main = async () => {
         }),
       );
     }
+    const result = results[results.length - 1];
+    log(
+      `receipt ${JSON.stringify({
+        expectedVersion: version,
+        ...(archive ? { localArchiveSha256: archive.sha256 } : {}),
+        ...result,
+      })}`,
+    );
   }
-
-  const submitted = results.filter((result) => result.published).map((result) => result.store);
   process.stdout.write(
-    submitted.length > 0
-      ? `OK: v${version} submitted to ${submitted.join(' and ')}\n`
-      : 'OK: no store submission was published; see the per-store lines above\n',
+    'OK: requested store operations completed; see each receipt for submission and publication state\n',
   );
 };
 
@@ -479,6 +649,7 @@ module.exports = {
   pollUntilTerminal,
   redact,
   submitToChrome,
+  summarizeChromeStatus,
   submitToEdge,
   CHROME_ITEM_ROOT,
   CHROME_TOKEN_URL,
