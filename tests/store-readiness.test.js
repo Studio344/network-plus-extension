@@ -151,7 +151,7 @@ describe('browser store submission kits', () => {
       .replace('**Category recommendation:** `Developer Tools`', '**Category recommendation:** `Shopping`')
       .replace('## Test instructions', '### Test instructions')
       .replace(
-        'f93f4d9a2afd1e0437d8a1dcf94a8e6816e9a5aedca376e237e129e37cb48dad',
+        'd2647cc24f747ba1cf70f9a8bdd930136488939947f1332ad42c6b5dd21681ac',
         '0000000000000000000000000000000000000000000000000000000000000000',
       );
     write(root, dossierPath, dossier);
@@ -159,7 +159,7 @@ describe('browser store submission kits', () => {
     expect(validate(root)).toEqual(
       expect.arrayContaining([
         'Chrome submission dossier is missing required section: Test instructions',
-        'Chrome submission dossier is missing required disclosure: f93f4d9a2afd1e0437d8a1dcf94a8e6816e9a5aedca376e237e129e37cb48dad',
+        'Chrome submission dossier is missing required disclosure: d2647cc24f747ba1cf70f9a8bdd930136488939947f1332ad42c6b5dd21681ac',
         'Chrome dossier summary must match manifest description',
         'Chrome dossier category recommendation must be `Developer Tools`',
       ]),
