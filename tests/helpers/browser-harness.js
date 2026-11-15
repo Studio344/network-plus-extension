@@ -356,6 +356,12 @@ async function launchPanelPage({ executable, query = '', initScript = null, widt
   try {
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable');
+    // macOS can occlude headless windows and throttle their frames and
+    // timers. These fixtures model an active panel unless a case simulates
+    // its own visibility transitions.
+    if (process.platform === 'darwin') {
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    }
     if (initScript) {
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: initScript });
     }

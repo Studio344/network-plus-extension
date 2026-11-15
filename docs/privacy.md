@@ -1,6 +1,6 @@
 # Privacy notice for Network+ for DevTools
 
-Last updated: 2026-08-22
+Last updated: 2026-11-16
 
 ## Scope
 
@@ -29,7 +29,7 @@ Network+ does not sell or transfer inspected traffic to the developer or to thir
 Network+ stores only UI preferences locally:
 
 - The selected System, Dark, or Light theme is stored through `chrome.storage.local`, with panel local storage used as a fallback.
-- The selected language for explanatory text (System, English, or Japanese) is stored the same way. Control labels are not translated, and the choice affects display only.
+- The selected language for explanatory text and dialogs (System, English, or Japanese) is stored the same way. Toolbar button labels and column headers stay in English, and the choice affects display only.
 - One-time guide dismissals — currently the mirror tab's undock explainer — are stored in panel local storage as a flag.
 - Search preferences — the search scope checkboxes, the case / whole-word / regular-expression match options, and the Matches only state — are stored through `chrome.storage.local` as booleans. Search keyword text is never stored.
 - The retention setting, column order, visibility, and widths, the configured header-column name, and the domain-summary visibility flag are stored in panel local storage.
@@ -57,7 +57,7 @@ Imported HAR or SAZ files are processed locally and become part of the same boun
 
 ## Optional support links
 
-The panel toolbar includes an optional `☕` button that opens a Support dialog. The dialog contains no payment form, no third-party script or frame, and no embedded checkout, and it performs no network request. It offers two outbound links, https://github.com/sponsors/himiyosh and https://ko-fi.com/studio344, each as a button that opens that page in a browser tab. The dialog writes nothing to the clipboard and stores no state about itself. Any payment is completed on the destination site under that site's own terms and processing; no payment, account, or card data is entered into, handled by, or visible to Network+.
+The panel toolbar includes an optional `☕` button that opens a Support dialog. The dialog contains no payment form, no third-party script or frame, and no embedded checkout, and it performs no network request. It offers two outbound links, https://github.com/sponsors/himiyosh and https://himiyosh.gumroad.com/coffee, each as a button that opens that page in a browser tab. The dialog writes nothing to the clipboard and stores no state about itself. Any payment is completed on the destination site under that site's own terms and processing; no payment, account, or card data is entered into, handled by, or visible to Network+.
 
 Following a link opens the destination in a normal browser tab, where that site's own privacy practices and payment processing apply. Network+ sends those sites no captured traffic, no usage data, and no identifier, and it receives nothing back from them. It cannot determine whether a user opened a link or contributed, and it stores no state about the dialog. Every Network+ feature remains available regardless of whether a user contributes.
 

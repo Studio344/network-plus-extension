@@ -6010,19 +6010,28 @@ const _NetworkPlus = (function () {
 
   function scheduleCaptureRender(render) {
     let timer;
-    const frame = window.requestAnimationFrame(() => {
+    let rendered = false;
+    const renderOnce = () => {
+      if (rendered) return;
+      rendered = true;
+      window.cancelAnimationFrame(frame);
       clearTimeout(timer);
+      document.removeEventListener('visibilitychange', updateFallback);
       render();
-    });
-    // Visible DevTools and mirror panels can miss frames. Hidden panels
-    // still commit retained data and repaint on their next animation frame.
-    if (!document.hidden) {
-      timer = setTimeout(() => {
-        if (document.hidden) return;
-        window.cancelAnimationFrame(frame);
-        render();
-      }, LIVE_RENDER_MAX_WAIT_MS);
-    }
+    };
+    const updateFallback = () => {
+      clearTimeout(timer);
+      if (!document.hidden) {
+        timer = setTimeout(() => {
+          if (!document.hidden) renderOnce();
+        }, LIVE_RENDER_MAX_WAIT_MS);
+      }
+    };
+    const frame = window.requestAnimationFrame(renderOnce);
+    // A queued frame can stay suspended when the DevTools window comes
+    // back. Restart the visible fallback without painting while hidden.
+    document.addEventListener('visibilitychange', updateFallback);
+    updateFallback();
   }
 
   function recordSkippedImportRows(skippedCount) {
@@ -6847,9 +6856,17 @@ const _NetworkPlus = (function () {
       en: 'github.com/sponsors/himiyosh · one-time or monthly · no platform fee',
       ja: 'github.com/sponsors/himiyosh · 単発または月額 · プラットフォーム手数料なし',
     },
-    supportKofiHint: {
-      en: 'ko-fi.com/studio344 · one-time · no account needed',
-      ja: 'ko-fi.com/studio344 · 単発 · アカウント不要',
+    supportGumroadHint: {
+      en: 'himiyosh.gumroad.com/coffee · one-time support',
+      ja: 'himiyosh.gumroad.com/coffee · 単発の支援',
+    },
+    supportGumroadAction: {
+      en: 'Buy a coffee',
+      ja: 'コーヒーで応援',
+    },
+    ariaSupportGumroadLink: {
+      en: 'Buy a coffee on Gumroad, opens a new browser tab',
+      ja: 'コーヒーで応援(Gumroad、新しいタブで開く)',
     },
     sampleGuideIntro: {
       en: 'Inspect the three local requests before revealing the evidence.',
@@ -22853,6 +22870,7 @@ const _NetworkPlus = (function () {
     normalizeHarHeaders,
     validateHarDocument,
     readHarEntries,
+    scheduleCaptureRender,
     normalizeHarEntry,
     parseSazEntryPath,
     validateSazArchiveEntryBudget,
