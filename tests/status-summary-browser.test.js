@@ -5607,15 +5607,25 @@ browserTest(
   TEST_TIMEOUT_MS,
 );
 
-// Tier 1 UX review fix-ups: the reopened details pane re-clamps its remembered
-// width, the grid's elastic Path column fills a wide wrap without changing the
-// stored widths, and the Match gutter clips its label by real width.
+// DOM and geometry checks can still measure layout when a headless tab becomes
+// occluded and Chromium suspends animation callbacks.
+const SETTLE_LAYOUT_IN_PAGE = `
+  const settleLayout = (delayMs = 50) => new Promise((resolve) => {
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        clearTimeout(frameDeadline);
+        setTimeout(resolve, delayMs);
+      });
+    });
+    const frameDeadline = setTimeout(() => {
+      cancelAnimationFrame(frame);
+      resolve();
+    }, 300 + delayMs);
+  });
+`;
+
 const settleLayout = (cdp) =>
-  evaluate(
-    cdp,
-    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 50))))',
-    true,
-  );
+  evaluate(cdp, `(() => {${SETTLE_LAYOUT_IN_PAGE} return settleLayout(); })()`, true);
 
 // Reloads the already-open panel in another language. Everything the panel
 // persists is cleared first, so the next pass starts from the same blank
@@ -5636,12 +5646,11 @@ const reloadInLanguage = async (page, language) => {
 const activateSampleCapture = (cdp) =>
   evaluate(
     cdp,
-    `(async () => {
+    `(async () => {${WAIT_FOR_CAPTURE_ROWS_IN_PAGE}
       const sampleButton = document.querySelector('[data-action="explore-sample-capture"]');
       if (!sampleButton) throw new Error('Sample capture action was not found.');
       sampleButton.click();
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      return document.querySelectorAll('#tbody tr[data-row-id]').length;
+      return waitForCaptureRows(2);
     })()`,
     true,
   );
@@ -7134,6 +7143,17 @@ const WAIT_FOR_IN_PAGE = `
   };
 `;
 
+const WAIT_FOR_CAPTURE_ROWS_IN_PAGE = `${WAIT_FOR_IN_PAGE}
+  const waitForCaptureRows = async (minimum) => {
+    const countRows = () => document.querySelectorAll('#tbody tr[data-row-id]').length;
+    if (!(await waitFor(() => countRows() >= minimum, 3000))) {
+      throw new Error('Expected at least ' + minimum + ' captured rows; found ' + countRows() +
+        ' with page visibility ' + document.visibilityState + '.');
+    }
+    return countRows();
+  };
+`;
+
 const LIVE_CAPTURE_INIT_SCRIPT = `(() => {
   const chromeApi = globalThis.chrome || {};
   chromeApi.storage = {
@@ -7809,9 +7829,7 @@ browserTest(
       await waitForLiveNetworkListener(cdp);
       const injected = await evaluate(
         cdp,
-        `(async () => {
-          const settle = () =>
-            new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60))));
+        `(async () => {${WAIT_FOR_CAPTURE_ROWS_IN_PAGE}
           const query = Array.from({ length: 31 }, (_u, i) => 'p' + i + '=' + 'v'.repeat(30) + i).join('&');
           const adUrl =
             'https://securepubads.example.test/gampad/ads/deep/nested/segments/for/ellipsis/final-segment.js?' + query;
@@ -7881,8 +7899,7 @@ browserTest(
               },
             });
           });
-          await settle();
-          return { rows: document.querySelectorAll('#tbody tr[data-row-id]').length, cookieLength: cookie.length, adUrl };
+          return { rows: await waitForCaptureRows(entries.length), cookieLength: cookie.length, adUrl };
         })()`,
         true,
       );
@@ -8281,16 +8298,20 @@ browserTest(
           text: title.textContent,
         };
       })()`;
-      await evaluate(cdp, "document.querySelector('#details').style.flexBasis = '900px'");
-      await settleLayout(cdp);
+      const fitOperationAtWidth = (width, hidden) => evaluate(cdp, `(async () => {${WAIT_FOR_IN_PAGE}
+        document.querySelector('#details').style.flexBasis = '${width}px';
+        if (!(await waitFor(() => document.querySelector('#detailsTitle .details-title-operation')?.hidden === ${hidden}, 2000))) {
+          throw new Error('Request title did not refit at ${width}px; page visibility is ' + document.visibilityState);
+        }
+      })()`, true);
+      await fitOperationAtWidth(900, false);
       const wideOperation = await evaluate(cdp, OPERATION_MEASURE);
       expect(wideOperation.detailsWidth).toBe(900);
       expect(wideOperation.operationHidden).toBe(false);
       expect(wideOperation.operationText).toBe('· ViewerProfileWithEverything');
       expect(wideOperation.path).toBe('/v1/graphql/gateway/edge');
 
-      await evaluate(cdp, "document.querySelector('#details').style.flexBasis = '440px'");
-      await settleLayout(cdp);
+      await fitOperationAtWidth(440, true);
       const narrowOperation = await evaluate(cdp, OPERATION_MEASURE);
       expect(narrowOperation.detailsWidth).toBe(440);
       expect(narrowOperation.operationHidden).toBe(true);
@@ -8336,8 +8357,7 @@ browserTest(
       // Not vacuous: at this width the path really has lost its head, so the
       // line above is not satisfied by a row that was never shortened.
       expect(narrowOperation.pathLeadsWithEllipsis).toBe(true);
-      await evaluate(cdp, "document.querySelector('#details').style.flexBasis = '900px'");
-      await settleLayout(cdp);
+      await fitOperationAtWidth(900, false);
       // Widening gives the operation back: it yields, it is not discarded.
       // This one discriminates — fitDetailsTitle only unhides the operation
       // because it resets `hidden` before it re-measures. Its neighbour, the
@@ -8491,9 +8511,7 @@ const URL_ROW_FIXTURES = [
   },
 ];
 
-const URL_ROW_FIXTURE_INJECT = `(async () => {
-  const settle = () =>
-    new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60))));
+const URL_ROW_FIXTURE_INJECT = `(async () => {${WAIT_FOR_CAPTURE_ROWS_IN_PAGE}
   const fixtures = ${JSON.stringify(URL_ROW_FIXTURES)};
   fixtures.forEach((fixture, index) => {
     globalThis.__networkPlusLiveListener({
@@ -8512,8 +8530,7 @@ const URL_ROW_FIXTURE_INJECT = `(async () => {
       },
     });
   });
-  await settle();
-  return document.querySelectorAll('#tbody tr[data-row-id]').length;
+  return waitForCaptureRows(fixtures.length);
 })()`;
 
 // Selects the whole URL row the way a reader drags across it, and reports the
@@ -10280,9 +10297,7 @@ browserTest(
 const COOKIE_TABLE_LONG_VALUE = 'a1b2c3d4'.repeat(40);
 const COOKIE_TABLE_DATE = 'Wed, 02 Sep 2026 09:00:01 GMT';
 
-const COOKIE_TABLE_INJECT = `(async () => {
-  const settle = () =>
-    new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60))));
+const COOKIE_TABLE_INJECT = `(async () => {${WAIT_FOR_CAPTURE_ROWS_IN_PAGE}
   const long = ${JSON.stringify(COOKIE_TABLE_LONG_VALUE)};
   const entries = [
     {
@@ -10335,8 +10350,7 @@ const COOKIE_TABLE_INJECT = `(async () => {
       },
     });
   });
-  await settle();
-  return { rows: document.querySelectorAll('#tbody tr[data-row-id]').length, long };
+  return { rows: await waitForCaptureRows(entries.length), long };
 })()`;
 
 // What the tables ARE, read off the DOM rather than off a screenshot: the
@@ -10835,9 +10849,7 @@ browserTest(
 // screen at once: a phase reported as a genuine zero, a phase under the
 // formatter's own resolution, a phase the capture never reported at all, and a
 // reported duration the phases fall short of.
-const TIMING_TABLE_INJECT = `(async () => {
-  const settle = () =>
-    new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60))));
+const TIMING_TABLE_INJECT = `(async () => {${WAIT_FOR_CAPTURE_ROWS_IN_PAGE}
   globalThis.__networkPlusLiveListener({
     startedDateTime: new Date(1704067200000).toISOString(),
     time: 1000,
@@ -10859,12 +10871,12 @@ const TIMING_TABLE_INJECT = `(async () => {
       callback('{"ok":true}', '');
     },
   });
-  await settle();
+  await waitForCaptureRows(1);
   document.querySelector('#tbody tr[data-row-id="1"]').click();
-  await settle();
   document.querySelector('#res-tab-timing').click();
-  await settle();
-  return document.querySelectorAll('#res-timing .timing-table > .timing-name').length;
+  const countPhases = () => document.querySelectorAll('#res-timing .timing-table > .timing-name').length;
+  await waitFor(() => countPhases() >= 9, 1500);
+  return countPhases();
 })()`;
 
 // Everything the table claims, read back as fractions of its own rail and as
@@ -12114,7 +12126,8 @@ browserTest(
             input.value = value;
             input.dispatchEvent(new Event('input', { bubbles: true }));
             if (!await waitFor(() => ready(snapshot(id)), 1000)) {
-              throw new Error('Pane search did not update for ' + id + ': ' + value);
+              throw new Error('Pane search did not update for ' + id + ': ' + value +
+                '; last state ' + JSON.stringify(snapshot(id)));
             }
             return snapshot(id);
           };
@@ -12470,10 +12483,12 @@ browserTest(
         `(async () => {${WAIT_FOR_IN_PAGE}
           const count = () => document.querySelector('#req-body .pane-search-count').textContent;
           const input = document.querySelector('#req-body .pane-search-input');
-          const countBefore = count();
           input.value = 'fullName';
           input.dispatchEvent(new Event('input', { bubbles: true }));
-          await waitFor(() => count() !== countBefore, 400);
+          if (!(await waitFor(() => count() === '1 / 1', 1000))) {
+            throw new Error('Body search did not reach one match; got ' + count() +
+              ' with page visibility ' + document.visibilityState);
+          }
           const str = document.querySelector('#req-body .json-tree-str');
           const before = str.classList.contains('json-tree-str--expanded');
           document.querySelector('#req-body .pane-search-nav[title="Next match (Enter)"]').click();
@@ -15565,11 +15580,8 @@ browserTest(
 // string it paints. Resend is absent by design: it needs a DevTools session,
 // and its dictionary entries are pinned in tests/panel.test.js instead.
 const ROW_MENU_STRINGS_BUILD = `(async () => {
-  const settle = async () => {
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await new Promise((resolve) => setTimeout(resolve, 120));
-  };
+  ${SETTLE_LAYOUT_IN_PAGE}
+  const settle = () => settleLayout(120);
   const rows = () => Array.from(document.querySelectorAll('#tbody tr[data-row-id]'));
   const rightClickPath = (tr) => {
     const cell = tr.querySelector('td[data-col-id="path"]');
@@ -15648,8 +15660,7 @@ const openSampleCaptureInAnyLanguage = async (cdp, language) => {
     if (ready) break;
     await delay(50);
   }
-  await evaluate(cdp, "document.querySelector('.empty-state-action').click(); true");
-  await settleLayout(cdp);
+  await activateSampleCapture(cdp);
 };
 
 browserTest(
@@ -15799,11 +15810,8 @@ browserTest(
 // inspector divider's value text and the tab bars' accessible names. It reads
 // only what those surfaces paint, through the same clicks a person makes.
 const LOCALIZED_SURFACES_BUILD = `(async () => {${WAIT_FOR_IN_PAGE}
-  const settle = async () => {
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await new Promise((resolve) => setTimeout(resolve, 120));
-  };
+  ${SETTLE_LAYOUT_IN_PAGE}
+  const settle = () => settleLayout(120);
   const text = (el) => (el ? el.textContent : null);
   const statusText = () => document.querySelector('#statusText').textContent;
 

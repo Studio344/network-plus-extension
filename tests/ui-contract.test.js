@@ -3089,7 +3089,7 @@ describe('shortcut help static contracts', () => {
 describe('optional support dialog', () => {
   const supportLinks = [
     { id: 'supportSponsorsLink', url: 'https://github.com/sponsors/himiyosh' },
-    { id: 'supportKofiLink', url: 'https://ko-fi.com/studio344' },
+    { id: 'supportGumroadLink', url: 'https://himiyosh.gumroad.com/coffee' },
   ];
   const supportBlock = js.slice(
     js.indexOf("const supportDialog = $('#supportDialog');"),

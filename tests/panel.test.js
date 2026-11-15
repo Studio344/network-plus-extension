@@ -10,6 +10,63 @@ const np = require('../panel.js');
 
 const PANEL_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
 
+describe('capture rendering after a hidden document becomes visible', () => {
+  let originalWindow;
+  let originalDocument;
+  let frame;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    originalWindow = global.window;
+    originalDocument = global.document;
+    global.document = new EventTarget();
+    global.window = {
+      requestAnimationFrame: jest.fn((callback) => {
+        frame = callback;
+        return 42;
+      }),
+      cancelAnimationFrame: jest.fn(),
+    };
+  });
+
+  afterEach(() => {
+    global.window = originalWindow;
+    global.document = originalDocument;
+    jest.useRealTimers();
+  });
+
+  test.each([true, false])('repaints even if the queued frame stays suspended (starts hidden: %s)', (startsHidden) => {
+    document.hidden = startsHidden;
+    const render = jest.fn();
+    np.scheduleCaptureRender(render);
+    document.hidden = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    jest.runOnlyPendingTimers();
+    expect(render).not.toHaveBeenCalled();
+
+    document.hidden = false;
+    document.dispatchEvent(new Event('visibilitychange'));
+    jest.runOnlyPendingTimers();
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(global.window.cancelAnimationFrame).toHaveBeenCalledWith(42);
+
+    frame();
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('cancels the fallback and removes the visibility listener when the frame paints first', () => {
+    document.hidden = false;
+    const render = jest.fn();
+    np.scheduleCaptureRender(render);
+    frame();
+    expect(render).toHaveBeenCalledTimes(1);
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});
+
 describe('incremental HAR reader', () => {
   const encoder = new TextEncoder();
   const entry = {
