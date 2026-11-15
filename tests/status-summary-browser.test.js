@@ -1231,7 +1231,11 @@ browserTest(
         `(async () => {
           document.querySelector('#searchAddBtn').click();
           globalThis.__deepRegex.type(1, 'api[.]example');
-          await globalThis.__deepRegex.settle(1350);
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const state = globalThis.__deepRegex.snapshot();
+            if (state.requestAnnouncement === 'showing 2 of 3 requests, showing search matches only') return state;
+            await globalThis.__deepRegex.settle(100);
+          }
           return globalThis.__deepRegex.snapshot();
         })()`,
         true,
@@ -15245,7 +15249,11 @@ browserTest(
 browserTest(
   'Server done defaults on, migrates v4 layouts, and remains hideable and responsive',
   async () => {
-    const page = await launchPanelPage({ executable: browserExecutable, width: 1920, height: 800 });
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      width: 1920,
+      initScript: "localStorage.setItem('networkPlus.lang', 'en');",
+    });
     const { cdp } = page;
     const readColumns = async () => {
       await settleLayout(cdp);
@@ -16889,9 +16897,14 @@ browserTest(
         })`)).toEqual({ dialog: true, focus: 'langSelect', search: 'none' });
         await evaluate(cdp, "document.querySelector('#settingsCloseBtn').click()");
       }
-      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers: 4 });
-      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70, modifiers: 4 });
-      expect(await evaluate(cdp, "document.activeElement.classList.contains('search-keyword-input')")).toBe(true);
+      const afterClose = await evaluate(cdp, `(() => {
+        const modalOpen = document.querySelector('#settingsDialog').open;
+        const shortcutHandled = !document.activeElement.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }),
+        );
+        return { modalOpen, shortcutHandled, focus: document.activeElement.classList.contains('search-keyword-input') };
+      })()`);
+      expect(afterClose).toEqual({ modalOpen: false, shortcutHandled: true, focus: true });
     } finally {
       await page.close();
     }
