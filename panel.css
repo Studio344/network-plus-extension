@@ -186,6 +186,14 @@ html[data-theme="light"]{
   .brand-sub-text{display:none}
   .brand-sub{width:22px;height:11px}
 }
+@media (max-width:440px){
+  .topbar{padding-inline:6px}
+  .topbar .left,.topbar .right{gap:4px}
+  .topbar .separator{margin-inline:1px}
+  .topbar button.brand{gap:4px;padding-inline:4px}
+  .topbar .brand-support-hint{display:none}
+  .topbar #searchToggleBtn,.topbar #filterBtn{padding-inline:8px}
+}
 
 /* === Unified Search Area === */
 .search-count{font-size:11px;color:var(--text-muted);white-space:nowrap;flex:0 0 70px;width:70px;overflow:hidden;text-overflow:ellipsis}
@@ -1264,6 +1272,7 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
 .empty-state .icon{font-size:32px;opacity:0.5}
 .empty-state-title{margin:0;color:var(--fg);font:inherit;font-weight:700}
 .empty-state-description{max-width:380px;font-size:12px;overflow-wrap:anywhere}
+.empty-state-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:6px}
 .empty-state-action{min-height:32px;max-width:100%;margin-top:4px;padding:5px 12px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-dim);color:var(--text-accent);font:inherit;font-weight:600;line-height:1.5;white-space:nowrap;cursor:pointer;transition:background-color 0.15s,border-color 0.15s,color 0.15s}
 .empty-state-action:hover{background:var(--accent-fill);color:var(--on-accent)}
 .empty-state-action:active{background:var(--accent-fill);color:var(--on-accent);box-shadow:inset 0 0 0 1px var(--on-accent)}
@@ -1347,6 +1356,9 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
   .details{flex:1 1 68%;min-width:0;min-height:160px;border-left:0;border-top:1px solid var(--separator)}
   .content.capture-empty .tableWrap{flex:1 1 100%;min-height:0}
   .content.capture-empty .resizer,.content.capture-empty .details{display:none}
+  .content.filtered-empty .tableWrap{min-height:min(200px,100%)}
+  .content.filtered-empty .empty-state{padding:8px 12px;gap:4px}
+  .content.filtered-empty .empty-state .icon{display:none}
 }
 /* === Compact status bar === */
 /* Status breakpoint (STATUS_DETAILS_MEDIA_QUERY in panel.js): side by side between 801 and 900px the full counter row no longer fits on one line, so the details go behind the toggle before the layout stacks. */

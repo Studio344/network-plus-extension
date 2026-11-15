@@ -16,7 +16,7 @@ const BROWSER_REQUIRED_IN_CI_MESSAGE =
   'Real-browser regression tests require an executable Chrome or Edge in CI. ' +
   'Set EDGE_BIN or CHROME_BIN to an executable browser path.';
 const TRANSIENT_PROFILE_CLEANUP_ERRORS = new Set(['ENOTEMPTY', 'EBUSY']);
-const TOOLBAR_VIEWPORT_WIDTHS = [375, 500, 800, 1254, 1255, 1280, 1500];
+const TOOLBAR_VIEWPORT_WIDTHS = [375, 500, 600, 800, 1254, 1255, 1280, 1500];
 const TOOLBAR_FOCUS_VIEWPORT_WIDTHS = [375, 500, 800, 1280];
 const GRID_FOCUS_VIEWPORT_WIDTHS = [375, 500, 800, 1280];
 const STATUS_WORKSPACE_VIEWPORT_WIDTHS = [320, 375, 414, 768, 1280];
@@ -3887,11 +3887,11 @@ browserTest(
         'pauseBtn',
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'popoutBtn',
@@ -3902,6 +3902,12 @@ browserTest(
         expect(measurement.toolbarOverflowX).toBe('auto');
         expect(measurement.actions).toHaveLength(12);
         expect(measurement.actions.map((action) => action.id)).toEqual(expectedActionOrder);
+        for (const id of ['searchToggleBtn', 'filterBtn']) {
+          expect(measurement.actions.find((action) => action.id === id)).toMatchObject({
+            hidden: false,
+            fullyVisible: true,
+          });
+        }
         // The pop-out button exists only for a DevTools session; outside one
         // it must not just carry the hidden attribute but actually render at
         // zero width (the .topbar button[hidden] guard).
@@ -3909,7 +3915,8 @@ browserTest(
         expect(popoutAction.hidden).toBe(true);
         expect(popoutAction.width).toBe(0);
       }
-      expect(viewportMeasurements.slice(0, 3).every((measurement) => measurement.toolbarOverflow > 0)).toBe(true);
+      expect(viewportMeasurements.filter((measurement) => measurement.width <= 800)
+        .every((measurement) => measurement.toolbarOverflow > 0)).toBe(true);
       const measurementsByWidth = new Map(viewportMeasurements.map((measurement) => [measurement.width, measurement]));
       // The "for DevTools" sub-label hides only below the width where every
       // toolbar control still fits beside it (the full toolbar fits from
@@ -3939,11 +3946,11 @@ browserTest(
       const expectedTabOrder = [
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'shortcutBtn',
@@ -4265,10 +4272,10 @@ browserTest(
       for (const pointerCase of pointerCases) {
         let pointerWidth = pointerCase.width;
         if (pointerWidth == null) {
-          // Measure at a width where the toolbar overflows: packed positions
-          // are width-independent, unlike the space-between spread layout.
+          // Measure outside the smallest spacing breakpoint and where the
+          // toolbar still overflows, so packed positions match the target.
           await cdp.send('Emulation.setDeviceMetricsOverride', {
-            width: 375,
+            width: 500,
             height: 800,
             deviceScaleFactor: 1,
             mobile: false,
@@ -4488,11 +4495,11 @@ browserTest(
       const toolbarTabOrder = [
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'shortcutBtn',
@@ -7328,6 +7335,154 @@ browserTest(
       expect(observed.copied).toContain('/match-a');
       expect(observed.copied).toContain('/match-b');
       expect(observed.copied).not.toContain('/hidden-');
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'zero-result recovery restores the request list without losing search keywords',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      width: 600,
+      height: 620,
+      initScript: LIVE_CAPTURE_INIT_SCRIPT + "localStorage.setItem('networkPlus.lang', 'en');",
+    });
+    const { cdp } = page;
+    try {
+      await waitForLiveNetworkListener(cdp);
+      const capture = (paths, firstIndex = 0) => evaluate(cdp, `${JSON.stringify(paths)}.forEach((path, index) => {
+        window.__networkPlusLiveListener({
+          startedDateTime: new Date(1704067200000 + (${firstIndex} + index) * 1000).toISOString(), time: 40,
+          request: { method: 'GET', url: 'https://capture.example.test' + path, headers: [] },
+          response: { status: 200, headers: [], content: { size: 0, mimeType: 'text/plain' } },
+          getContent(callback) { callback('', ''); },
+        });
+      })`);
+      await capture(['/alpha', '/target', '/beta']);
+
+      const wait = async (predicate) => {
+        expect(await evaluate(cdp, `(async () => {${WAIT_FOR_IN_PAGE}
+          return waitFor(() => ${predicate}, 3000);
+        })()`, true)).toBe(true);
+      };
+      const snapshot = () => evaluate(cdp, `(() => {
+        const empty = document.querySelector('#empty-state-msg');
+        const rows = Array.from(document.querySelectorAll('#tbody tr[data-row-id]'));
+        return {
+          rows: rows.map((row) => row.dataset.rowId),
+          highlights: rows.filter((row) => row.classList.contains('search-match-row')).map((row) => row.dataset.rowId),
+          title: empty.style.display === 'none' ? null : empty.querySelector('h2').textContent,
+          actions: empty.style.display === 'none' ? [] : Array.from(empty.querySelectorAll('button'), (button) => button.textContent),
+          filters: document.querySelector('#filterBtn').getAttribute('aria-label'),
+          matchesOnly: document.querySelector('#searchMatchesOnlyToggle').checked,
+          keyword: document.querySelector('.search-keyword-input').value,
+          focusedRow: document.activeElement.dataset.rowId || null,
+          focusedAction: document.activeElement.dataset.action || null,
+        };
+      })()`);
+      const click = (selector) => evaluate(cdp, `document.querySelector(${JSON.stringify(selector)}).click()`);
+      const setLanguage = (language) => evaluate(cdp, `(() => {
+        const select = document.querySelector('#langSelect');
+        select.value = ${JSON.stringify(language)};
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      const setKeyword = (keyword) => evaluate(cdp, `(() => {
+        const input = document.querySelector('.search-keyword-input');
+        input.value = ${JSON.stringify(keyword)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      const setIdFilter = async (value) => {
+        await click('#filterBtn');
+        await evaluate(cdp, `(() => {
+          const input = document.querySelector('#columnFilterPopup input[aria-label="ID filter value"]');
+          input.value = ${JSON.stringify(value)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        await pressKey(cdp, 'Escape', 'Escape', 27);
+      };
+      const activate = async (action) => {
+        await evaluate(cdp, `document.querySelector('#empty-state-msg [data-action="${action}"]').focus()`);
+        await pressKey(cdp, ' ', 'Space', 32);
+      };
+
+      await wait("document.querySelectorAll('#tbody tr[data-row-id]').length === 3");
+      await click('#searchToggleBtn');
+      await setKeyword('unmatched-result');
+      await click('#searchMatchesOnlyToggle');
+      await wait("!!document.querySelector('#empty-state-msg [data-action=show-requests]')");
+      expect(await snapshot()).toMatchObject({
+        rows: [], title: 'No requests match your search.', actions: ['Show requests', 'Edit search'],
+        filters: 'Column Filters, no active filters',
+      });
+      expect(await evaluate(cdp, `(() => {
+        const table = document.querySelector('#tableWrap');
+        const viewport = table.getBoundingClientRect();
+        const actions = Array.from(document.querySelectorAll('#empty-state-msg button'));
+        return {
+          scrollTop: table.scrollTop,
+          reachable: actions.map((button) => {
+            const { x, y, width, height, bottom } = button.getBoundingClientRect();
+            return bottom <= viewport.bottom &&
+              document.elementFromPoint(x + width / 2, y + height / 2) === button;
+          }),
+        };
+      })()`)).toEqual({ scrollTop: 0, reachable: [true, true] });
+      await click('#searchToggleBtn');
+      await activate('edit-search');
+      expect(await evaluate(cdp, `document.activeElement.matches('.search-keyword-input') &&
+        document.querySelector('#searchToggleBtn').getAttribute('aria-expanded') === 'true'`)).toBe(true);
+      await click('#pauseBtn');
+      expect((await snapshot()).title).toBe('No requests match your search.');
+      await click('#pauseBtn');
+      await setLanguage('ja');
+      await wait("document.documentElement.lang === 'ja'");
+      expect(await snapshot()).toMatchObject({
+        title: '検索条件に一致するリクエストはありません。', actions: ['リクエストを表示', '検索条件を編集'],
+      });
+      await evaluate(cdp, "document.querySelector('#empty-state-msg [data-action=show-requests]').focus()");
+      await capture(['/late'], 3);
+      await wait("document.querySelector('#counter').textContent.includes('0 / 4 requests')");
+      expect(await snapshot()).toMatchObject({ rows: [], focusedAction: 'show-requests' });
+      await pressKey(cdp, ' ', 'Space', 32);
+      expect(await snapshot()).toMatchObject({
+        rows: ['1', '2', '3', '4'], title: null, matchesOnly: false, keyword: 'unmatched-result', focusedRow: '1',
+      });
+
+      await setLanguage('en');
+      await wait("document.documentElement.lang === 'en'");
+      await setKeyword('target');
+      await wait("document.querySelector('#searchCount').textContent === '1 matches'");
+      await setIdFilter('1');
+      await wait("document.querySelectorAll('#tbody tr[data-row-id]').length === 1");
+      await click('#searchMatchesOnlyToggle');
+      expect(await snapshot()).toMatchObject({ rows: [], actions: ['Show requests', 'Edit search'] });
+      await activate('show-requests');
+      expect(await snapshot()).toMatchObject({
+        rows: ['1'], matchesOnly: false, keyword: 'target', focusedRow: '1', filters: 'Column Filters, 1 active',
+      });
+
+      await setIdFilter('999');
+      await wait("!!document.querySelector('#empty-state-msg [data-action=clear-column-filters]')");
+      expect(await snapshot()).toMatchObject({ rows: [], actions: ['Clear column filters'] });
+      await activate('clear-column-filters');
+      expect(await snapshot()).toMatchObject({ rows: ['1', '2', '3', '4'], highlights: ['2'], keyword: 'target' });
+
+      await setIdFilter('999');
+      await wait("document.querySelectorAll('#tbody tr[data-row-id]').length === 0");
+      await evaluate(cdp, "document.querySelector('#empty-state-msg [data-action=clear-column-filters]').focus()");
+      await click('#searchMatchesOnlyToggle');
+      expect(await snapshot()).toMatchObject({ rows: [], actions: ['Show all requests'], focusedAction: 'show-requests' });
+      expect(await evaluate(cdp, "document.querySelector('#empty-state-description').textContent"))
+        .toContain('Clear column filters and turn off Matches only');
+      await activate('show-requests');
+      expect(await snapshot()).toMatchObject({
+        rows: ['1', '2', '3', '4'], highlights: ['2'], matchesOnly: false, keyword: 'target',
+        filters: 'Column Filters, no active filters', focusedRow: '1',
+      });
     } finally {
       await page.close();
     }

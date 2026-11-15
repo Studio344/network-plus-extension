@@ -6713,6 +6713,18 @@ const _NetworkPlus = (function () {
       en: 'Clear column filters',
       ja: '列フィルターを解除',
     },
+    emptySearchAction: {
+      en: 'Show requests',
+      ja: 'リクエストを表示',
+    },
+    emptyCombinedAction: {
+      en: 'Show all requests',
+      ja: 'すべてのリクエストを表示',
+    },
+    emptyEditSearchAction: {
+      en: 'Edit search',
+      ja: '検索条件を編集',
+    },
     emptyCaptureAction: {
       en: 'Explore sample capture',
       ja: 'サンプルキャプチャを試す',
@@ -7051,6 +7063,18 @@ const _NetworkPlus = (function () {
     emptyFilteredDesc: {
       en: 'Clear or adjust filters to show captured requests.',
       ja: 'フィルターを解除または調整すると、キャプチャ済みのリクエストが表示されます。',
+    },
+    emptySearchTitle: {
+      en: 'No requests match your search.',
+      ja: '検索条件に一致するリクエストはありません。',
+    },
+    emptySearchDesc: {
+      en: 'Turn off Matches only to return to the list. Your keywords and column filters are kept.',
+      ja: '「一致のみ表示」を解除して一覧に戻ります。検索語句と列フィルターは保持されます。',
+    },
+    emptyCombinedDesc: {
+      en: 'Clear column filters and turn off Matches only to show all requests. Your keywords are kept.',
+      ja: '列フィルターと「一致のみ表示」を解除して、すべてのリクエストを表示します。検索語句は保持されます。',
     },
     emptyCapturePausedTitle: {
       en: 'Recording is paused.',
@@ -8410,6 +8434,18 @@ const _NetworkPlus = (function () {
       en: 'Column filters cleared',
       ja: '列フィルターを消去しました',
     },
+    statusMatchesOnlyOn: {
+      en: 'Matches only is on; valid keywords narrow requests',
+      ja: '「一致のみ表示」がオンです。有効な検索語句でリクエストを絞り込みます。',
+    },
+    statusMatchesOnlyOff: {
+      en: 'Showing all requests with search highlights',
+      ja: 'すべてのリクエストを表示しています。検索結果は強調表示されます。',
+    },
+    statusMatchesOnlyOffWithFilters: {
+      en: 'Showing requests that pass the column filters',
+      ja: '列フィルターに一致するリクエストを表示しています。',
+    },
     statusDomainFilterCleared: {
       en: 'Cleared the {domain} domain filter.',
       ja: '{domain} のドメインフィルターを消去しました。',
@@ -9524,6 +9560,20 @@ const _NetworkPlus = (function () {
       }
       return true;
     });
+  }
+
+  function setMatchesOnly(matchesOnly) {
+    state.search.matchesOnly = matchesOnly;
+    renderBody();
+    syncSearchUIAfterRender();
+    saveSearchPrefs(currentSearchPrefs());
+    let statusKey = 'statusMatchesOnlyOn';
+    if (!matchesOnly) {
+      statusKey = state.filteredRows.length < state.rows.length
+        ? 'statusMatchesOnlyOffWithFilters'
+        : 'statusMatchesOnlyOff';
+    }
+    setStatus(uiText(statusKey));
   }
 
   function clearColumnFilters() {
@@ -14894,6 +14944,15 @@ const _NetworkPlus = (function () {
 
   function restoreFocusAfterEmptyStateChange(shouldRestore) {
     if (!shouldRestore) return;
+    const emptyState = document.getElementById('empty-state-msg');
+    if (emptyState && emptyState.style.display !== 'none') {
+      if (emptyState.contains(document.activeElement)) return;
+      const action = emptyState.querySelector('.empty-state-action');
+      if (action) {
+        action.focus({ preventScroll: true });
+        return;
+      }
+    }
     const tbody = $('#tbody');
     const target = (tbody && tbody.querySelector('tr[tabindex="0"]')) || $('#filterBtn');
     if (target && target.focus) target.focus({ preventScroll: true });
@@ -14941,7 +15000,10 @@ const _NetworkPlus = (function () {
     const mode = getEmptyStateMode(state.rows.length, visibleRowCount);
     syncGridControlTabStops(state.rows.length, visibleRowCount);
     const content = $('#content');
-    if (content) content.classList.toggle('capture-empty', mode === 'capture');
+    if (content) {
+      content.classList.toggle('capture-empty', mode === 'capture');
+      content.classList.toggle('filtered-empty', mode === 'filtered');
+    }
     updateSampleGuideAvailability(visibleRowCount);
     let emptyState = document.getElementById('empty-state-msg');
     if (mode === 'hidden') {
@@ -14954,7 +15016,12 @@ const _NetworkPlus = (function () {
       emptyState.className = 'empty-state';
       tableWrap.appendChild(emptyState);
     }
-    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage;
+    const searchRestrictsRows = mode === 'filtered' && state.search.matchesOnly &&
+      hasActiveSearchKeywords(state.search.keywords, state.search.options);
+    // Disabling Matches only works whenever the column filters already admit rows.
+    const clearFiltersForSearch = searchRestrictsRows && state.filteredRows.length === 0;
+    const recovery = searchRestrictsRows ? (clearFiltersForSearch ? 'combined' : 'search') : 'columns';
+    const renderKey = [mode, recovery, state.paused ? 'paused' : 'recording', activeLanguage].join(':');
     if (emptyState.dataset.renderKey !== renderKey) {
       emptyState.textContent = '';
       emptyState.dataset.renderKey = renderKey;
@@ -14968,8 +15035,10 @@ const _NetworkPlus = (function () {
       description.className = 'empty-state-description';
       if (mode === 'filtered') {
         icon.textContent = '🔎';
-        title.textContent = uiText('emptyFilteredTitle');
-        description.textContent = uiText('emptyFilteredDesc');
+        title.textContent = uiText(recovery === 'search' ? 'emptySearchTitle' : 'emptyFilteredTitle');
+        const descriptionKey = recovery === 'combined' ? 'emptyCombinedDesc'
+          : recovery === 'search' ? 'emptySearchDesc' : 'emptyFilteredDesc';
+        description.textContent = uiText(descriptionKey);
       } else if (isOfflinePanelView()) {
         icon.textContent = '📂';
         title.textContent = uiText('emptyOfflineTitle');
@@ -14995,10 +15064,38 @@ const _NetworkPlus = (function () {
         const action = document.createElement('button');
         action.type = 'button';
         action.className = 'empty-state-action';
-        action.textContent = uiText('emptyFilteredAction');
         action.setAttribute('aria-describedby', description.id);
-        action.addEventListener('click', clearColumnFilters);
-        emptyState.appendChild(action);
+        if (searchRestrictsRows) {
+          action.dataset.action = 'show-requests';
+          action.textContent = uiText(clearFiltersForSearch ? 'emptyCombinedAction' : 'emptySearchAction');
+          action.addEventListener('click', () => {
+            if (clearFiltersForSearch) state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
+            setMatchesOnly(false);
+          });
+        } else {
+          action.dataset.action = 'clear-column-filters';
+          action.textContent = uiText('emptyFilteredAction');
+          action.addEventListener('click', clearColumnFilters);
+        }
+        if (recovery === 'search') {
+          const actions = document.createElement('div');
+          actions.className = 'empty-state-actions';
+          const editSearch = document.createElement('button');
+          editSearch.type = 'button';
+          editSearch.className = 'empty-state-action';
+          editSearch.dataset.action = 'edit-search';
+          editSearch.textContent = uiText('emptyEditSearchAction');
+          editSearch.addEventListener('click', () => {
+            const searchToggle = $('#searchToggleBtn');
+            if (searchToggle.getAttribute('aria-expanded') !== 'true') searchToggle.click();
+            $('.search-keyword-input')?.focus();
+          });
+          actions.appendChild(action);
+          actions.appendChild(editSearch);
+          emptyState.appendChild(actions);
+        } else {
+          emptyState.appendChild(action);
+        }
       }
       if (mode === 'capture' && !getMirrorViewParams(window.location ? window.location.search : '').viewerMode) {
         const action = document.createElement('button');
@@ -18820,7 +18917,7 @@ const _NetworkPlus = (function () {
       }
       state.paused = !state.paused;
       updateRecordState();
-      updateEmptyState(state.filteredRows.length);
+      updateEmptyState(countVisibleRows());
     });
     updateRecordState();
 
@@ -20602,15 +20699,7 @@ const _NetworkPlus = (function () {
     }
 
     searchMatchesOnlyToggle.addEventListener('change', () => {
-      state.search.matchesOnly = searchMatchesOnlyToggle.checked;
-      renderBody();
-      updateSearchUI();
-      saveSearchPrefs(currentSearchPrefs());
-      setStatus(
-        state.search.matchesOnly
-          ? 'Matches only is on; valid keywords narrow requests'
-          : 'Showing all requests with search highlights',
-      );
+      setMatchesOnly(searchMatchesOnlyToggle.checked);
     });
 
     for (const optionButton of searchOptionButtons) {
