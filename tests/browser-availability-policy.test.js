@@ -396,7 +396,7 @@ const replaceWithAlternateLayout = (source, pattern, layouts, mutationName) => {
 const VIEWPORT_CONTRACTS = [
   {
     constantName: 'TOOLBAR_VIEWPORT_WIDTHS',
-    expectedWidths: [375, 500, 800, 1254, 1255, 1280, 1500],
+    expectedWidths: [375, 500, 600, 800, 1254, 1255, 1280, 1500],
     journeyTitle: TOOLBAR_FOCUS_JOURNEY_TITLE,
   },
   {
@@ -533,7 +533,7 @@ test.each([
 );
 
 test('locks toolbar branding coverage to both exact sides of the content breakpoint', () => {
-  assertExactViewportWidths(browserSuiteSource, 'TOOLBAR_VIEWPORT_WIDTHS', [375, 500, 800, 1254, 1255, 1280, 1500]);
+  assertExactViewportWidths(browserSuiteSource, 'TOOLBAR_VIEWPORT_WIDTHS', [375, 500, 600, 800, 1254, 1255, 1280, 1500]);
 });
 
 test('locks toolbar focus coverage to narrow, stacked, and split layouts', () => {
@@ -1187,6 +1187,10 @@ test('retains the local-only skip when no browser executable is discoverable', (
     {
       skipped: true,
       title: 'matches-only grid navigation and range selection exclude hidden rows and comparison Escape restores focus',
+    },
+    {
+      skipped: true,
+      title: 'zero-result recovery restores the request list without losing search keywords',
     },
     {
       skipped: true,
