@@ -110,11 +110,11 @@ const STEPS = Object.freeze({
     {
       secret: 'CHROME_REFRESH_TOKEN',
       instructions: [
-        'Run this in another terminal, in this repository, and paste what it prints:',
+        'Run this in another terminal, in this repository, and paste the refresh token it prints:',
         '',
-        '  CHROME_CLIENT_ID=<the id above> CHROME_CLIENT_SECRET=<the secret above> \\',
-        '    node scripts/chrome-refresh-token.js',
+        '  node scripts/chrome-refresh-token.js',
         '',
+        'Enter the OAuth client ID and secret when prompted. The secret input is hidden.',
         'It opens a consent URL. Sign in as the account that OWNS the store item, which may differ',
         'from the account that owns the Cloud project, and accept.',
       ],

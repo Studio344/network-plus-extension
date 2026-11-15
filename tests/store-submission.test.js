@@ -609,9 +609,25 @@ describe('chrome refresh token helper', () => {
     awaitAuthorizationCode,
     buildConsentUrl,
     extractAuthorizationCode,
+    readCredentials,
     readRefreshToken,
     SCOPE,
   } = require('../scripts/chrome-refresh-token');
+
+  test('reads an interactive client secret without writing it to the terminal', async () => {
+    const { PassThrough } = require('node:stream');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    input.isTTY = true;
+    input.setRawMode = () => {};
+    let transcript = '';
+    output.on('data', (chunk) => { transcript += chunk; });
+    const prompt = readCredentials({ CHROME_CLIENT_ID: 'synthetic-client' }, input, output);
+    input.write('synthetic-secret\r');
+    await expect(prompt).resolves.toEqual({ clientId: 'synthetic-client', clientSecret: 'synthetic-secret' });
+    expect(transcript).toContain('OAuth client secret (input hidden)');
+    expect(transcript).not.toContain('synthetic-secret');
+  });
 
   test('asks for offline access, or the flow returns no refresh token at all', () => {
     const url = new URL(buildConsentUrl('client-123', 'http://127.0.0.1:5000'));

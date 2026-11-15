@@ -1331,5 +1331,17 @@ test('retains the local-only skip when no browser executable is discoverable', (
       skipped: true,
       title: 'status summary chips align zero and growing counts without losing semantics or narrow wrapping',
     },
+    {
+      skipped: true,
+      title: 'popup forms allow keyboard traversal and preserve text editing keys',
+    },
+    {
+      skipped: true,
+      title: 'request Find shortcuts respect an open modal and work after dismissal',
+    },
+    {
+      skipped: true,
+      title: 'Japanese operational messages describe sample exit Clear Undo and sanitized export',
+    },
   ]);
 });

@@ -10,7 +10,7 @@ Automated coverage lives in [tests/](../tests); see the test table in the [READM
 - [ ] With DevTools and its pop-out open, hold an HTTP response for several seconds. Both tables show **Pending** and update the same row after the response.
 - [ ] The persistent offline scope and empty-state import guidance appear in English and Japanese. Pause/Resume, live recording styling, Stream capture, and pop-out controls stay hidden.
 - [ ] The empty-state import action opens the HAR/SAZ picker. Import a synthetic saved capture, inspect its response, filter and compare requests, then export sanitized HAR. The offline scope remains visible throughout.
-- [ ] Opening Network+ inside DevTools still records the inspected page, and the existing pop-out mirrors that session. The manifest still requests only `storage`.
+- [ ] Opening Network+ inside DevTools still records the inspected page, and the existing pop-out mirrors that session. Capture and mirroring run without granting the optional resend permissions.
 
 ## Guided local sample
 
@@ -116,12 +116,13 @@ Automated coverage lives in [tests/](../tests); see the test table in the [READM
 ## Edit and resend, and JWT decode
 
 - [ ] Inside a DevTools session, the row menu of an http(s) request offers `Resend unchanged` and `Edit and resend...`; a WS row offers neither. (The pop-out mirror tab offers both and executes them remotely — covered in the mirror section above.)
-- [ ] `Resend unchanged` on a GET immediately produces a new captured row for the same URL, and the status bar names the target; while recording is paused the status says the row will appear after resuming, and it does.
-- [ ] `Edit and resend...` opens the dialog prefilled with the row's method, URL, headers (no `:authority`-style pseudo-headers), and body; editing the URL and adding a header sends exactly the edited request (verify against an echo endpoint or the new row's request pane).
+- [ ] `Resend unchanged` on a same-origin GET, after granting site access, produces a new captured row for the same URL, and the status bar names the target; while recording is paused the status says recording is paused.
+- [ ] `Edit and resend...` opens the dialog prefilled with the row's method, URL, headers (no `:authority`-style pseudo-headers), and body; editing the URL path on the same origin and adding a header sends the edited request (verify against an echo endpoint or the new row's request pane).
 - [ ] Pasting a Chrome "Copy as cURL (bash)" command into the dialog and choosing `Fill fields from cURL` populates method, URL, headers, and body; a command with `-F` or `-d @file` is refused inside the dialog naming the reason, and `-b`/`--compressed` import with a status note instead of failing.
 - [ ] A header line without a colon blocks Send with a visible message and keeps the dialog open; a `Host:` or `Sec-*` line is silently not applied, as the dialog's hint states.
+- [ ] Decline the initial site permission prompt and check that no request was issued. After granting access, replace `window.fetch` in the inspected page, then resend and verify the replacement receives no request fields.
 - [ ] Unchecking the cookies toggle re-sends without credentials (verify a logged-in endpoint returns 401/anonymous), and re-checking restores the logged-in behavior.
-- [ ] A resent POST actually re-executes the server action — use a harmless endpoint when verifying, and confirm CORS- or CSP-blocked targets surface as a failed row or console error rather than a silent success.
+- [ ] A resent POST actually re-executes the server action — use a harmless endpoint when verifying, and verify that a refused permission, another origin or port, and a redirect are reported. The dialog stays open on failure.
 - [ ] A request whose Authorization header carries a Bearer JWT shows a `JWT in Authorization` section in the request Headers pane: expanding it shows the decoded header and claims, `exp` with a humanized `expires in … / expired … ago` label (red when expired), and the note that the signature is not verified.
 - [ ] A JWT-shaped value in any other header (request or response side) gets the same treatment; sanitized copies still redact the raw token, and the decoded claims appear nowhere in copies or exports.
 - [ ] The token itself reads as three tinted segments with a break after each `.`, and the row carries a `JWT · expires in 2h 14m` chip (red, `JWT · expired 3d ago`, once past `exp`) beside the value. The decoded section is filed directly under that row rather than below the whole grid, and in Japanese its summary and its `ヘッダー` / `ペイロード` headings are Japanese too — no English left under a translated chip. Drag-select the row: the chip is not in what you copy.

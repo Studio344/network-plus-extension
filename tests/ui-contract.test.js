@@ -732,8 +732,8 @@ describe('guided sample capture static contracts', () => {
     );
     expect(clearBlock).toContain('render();');
     expect(clearBlock).toContain('clearButton.focus({ preventScroll: true });');
-    expect(clearBlock).toContain('Local sample capture cleared. Live capture resumed.');
-    expect(clearBlock).toContain('Undo available for ');
+    expect(clearBlock).toContain("uiText(state.paused ? 'statusSampleClearedPaused' : 'statusSampleClearedActive')");
+    expect(clearBlock).toContain("uiTextFormat('statusUndoClearAvailable', { seconds: CLEAR_UNDO_TIMEOUT_MS / 1000 })");
     expect(js).toContain("const fallbackControl = document.querySelector('.empty-state-action') || $('#clearBtn');");
 
     const importCommitBlock = js.slice(
@@ -1032,8 +1032,8 @@ describe('sample evidence guide static contracts', () => {
     expect(exitUiBlock).toContain(
       "document.querySelector('.empty-state-action') || $('#clearBtn')",
     );
-    expect(exitUiBlock).toContain('Previous recording state and column filters restored.');
-    expect(exitUiBlock).toContain("state.paused ? 'Recording remains paused.' : 'Live recording is active.'");
+    expect(js).toContain('Previous recording state and column filters restored.');
+    expect(exitUiBlock).toContain("uiText(state.paused ? 'statusSampleExitedPaused' : 'statusSampleExitedActive')");
     expect(exitUiBlock).toContain(
       "statusButton.addEventListener('click', exitLocalSampleCapture);",
     );
@@ -1235,7 +1235,7 @@ describe('recoverable Clear Undo static contracts', () => {
       'toggleSearchPanel(restorePlan.searchPanelVisible, false);',
       'restoreSearchNavigation(restorePlan);',
       'state.pendingRowFocusId = focusRow ? String(focusRow.id) : null;',
-      'Restored ',
+      "uiTextFormat(missingCount > 0 ? 'statusRestoredRequestsWithEviction' : 'statusRestoredRequests'",
     ]) {
       expect(restoreBlock).toContain(expected);
     }
@@ -1396,9 +1396,9 @@ describe('capture retention static contracts', () => {
     const detailsEnd = js.indexOf('// Section 14: Export', detailsStart);
     const detailsBlock = js.slice(detailsStart, detailsEnd);
     expect(detailsBlock).toContain('cacheResponseContent(row)');
-    expect(detailsBlock).toContain('Response-body retry failed for request ');
-    expect(detailsBlock).toContain('. Open Response > Body for details.');
-    expect(detailsBlock).toContain("'. Open Response > Body for details.',\n            true,");
+    expect(js).toContain('Response-body retry failed for request {id}. Open Response > Body for details.');
+    expect(detailsBlock).toContain("uiTextFormat('statusResponseBodyRetryFailed', { id: row.id })");
+    expect(detailsBlock).toContain("uiTextFormat('statusResponseBodyRetryFailed', { id: row.id }),\n            true,");
     expect(js).toContain('const pending = fetchResponsePayload(row);');
     expect(js).toContain('let statusGeneration = 0;');
     expect(js).toContain('if (failureStatusGeneration === statusGeneration)');
@@ -2292,7 +2292,9 @@ describe('outbound data-safety static contracts', () => {
     );
     expect(authorizationGuard).toBeGreaterThan(-1);
     expect(authorizationGuard).toBeLessThan(exportSource.indexOf('resolveHarResponseContent(row)'));
-    expect(exportSource.indexOf('har.log._networkPlus.failedClosed')).toBeLessThan(exportSource.indexOf('new Blob'));
+    expect(exportSource.indexOf('sanitized._networkPlus.failedClosed')).toBeLessThan(
+      exportSource.indexOf('new Blob([JSON.stringify(sanitized.entries[0])])'),
+    );
     expect(exportSource).toContain('const downloadUrl = objectUrl;');
     expect(exportSource.indexOf('objectUrl = null;')).toBeLessThan(
       exportSource.indexOf('triggerObjectUrlDownload('),
@@ -3773,7 +3775,7 @@ describe('devtools-session mirror contracts', () => {
     expect(js).toContain("wsCaptureBtn: () => sendViewerCommand('stream-toggle', {}, 'Stream capture'),");
     expect(js).toContain('retentionSaveBtn: () =>');
     expect(js).toContain("viewerSession.sendImportFile(file.name, importBytes, reportImportResult);");
-    expect(js).toContain("mirrorViewerResendDispatch = (spec, done) => viewerSession.sendCommand('resend', { spec }, done);");
+    expect(js).toContain("mirrorViewerResendDispatch = (spec, epoch, done) => viewerSession.sendCommand('resend', { spec, epoch }, done);");
     // Same-element listeners fire in registration order, so remote control
     // must intercept at the document capture phase, ahead of any target
     // listener, and stop the event there.
@@ -3790,7 +3792,7 @@ describe('devtools-session mirror contracts', () => {
     expect(js).toContain("'Waiting for the DevTools session...'");
     expect(js).toContain("'Mirroring the DevTools session'");
     expect(js).toContain("'Mirroring the DevTools session (recording paused)'");
-    expect(js).toContain("'The DevTools session disconnected; captured requests remain available. '");
+    expect(js).toContain("uiText('statusMirrorDisconnected')");
     // Opening the pop-out asks the background worker to tuck an undocked
     // DevTools window away; the worker reads no tab data and answers a
     // docked session with minimized: false.
@@ -3840,7 +3842,7 @@ describe('devtools-session mirror contracts', () => {
     // The disconnect message teaches the keep-capturing workaround instead
     // of leaving the viewer to discover why the stream stopped.
     expect(js).toContain(
-      "'To capture without interruption, keep DevTools open — undocked into its own window and minimized is fine.'",
+      'To capture without interruption, keep DevTools open — undocked into its own window and minimized is fine.',
     );
   });
 
@@ -4087,7 +4089,7 @@ describe('export scope contracts', () => {
     // The parser is pure string work: no network, DOM, or storage access.
     const parserBlock = js.slice(
       js.indexOf('function tokenizeShellCommand'),
-      js.indexOf('function pageResendRunner'),
+      js.indexOf('function requestResendPermission'),
     );
     expect(parserBlock.length).toBeGreaterThan(0);
     expect(parserBlock).not.toMatch(/fetch\s*\(|XMLHttpRequest|document\.|localStorage|chrome\./);
@@ -4181,7 +4183,7 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain("if (!frame.binary) message.data = String(frame.data ?? '').slice(0, WS_FRAME_PREVIEW_CHARS);");
     expect(js).toContain('binaryFramesWithoutPayload: webSocket.binaryFramesWithoutPayload,');
     // SSE rows never get the WebSocket-entry key.
-    expect(js).toContain("if (row.method !== 'SSE') {");
+    expect(js).toContain("const hasStructuredFrame = isFrame && row.method !== 'SSE';");
     // Sanitized output stays allowlist-built and marks the omission.
     expect(js).toContain('Number.isSafeInteger(webSocketFramesOmitted) && webSocketFramesOmitted > 0');
     expect(js).toContain('webSocketFramesOmitted: webSocket.count');
@@ -4213,8 +4215,8 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain('chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)');
     expect(js).toContain('inspectedEval(buildWsWrapperSource(), () => {});');
     expect(js).toContain('inspectedEval(buildSseWrapperSource(), () => {});');
-    expect(js).toContain("inspectedEval('window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []'");
-    expect(js).toContain("inspectedEval('window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []'");
+    expect(js).toContain("const wsDrain = buildStreamDrainSource('__networkPlusWS__');");
+    expect(js).toContain("const sseDrain = buildStreamDrainSource('__networkPlusSSE__');");
     expect(js).toContain('if (streamCapture.enabled) injectStreamWrappers();');
     // Recording discipline matches live capture: paused and sample sessions
     // drop drained events instead of recording them.
@@ -4229,7 +4231,7 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     // addEventListener records the type and always forwards to the native.
     expect(js).toContain('source.addEventListener = function (type, listener, options) {');
     expect(js).toContain('return nativeAdd(type, listener, options);');
-    expect(js).toContain("record({ kind: 'ws-open-attempt', socketId, url: String(url), protocols: '' });");
+    expect(js).toContain("record({ kind: 'ws-open-attempt', socketId, url: source.url, protocols: '' });");
     expect(js).toContain('Wrapped.prototype = Native.prototype;');
     expect(js).toContain("window.EventSource = Wrapped;");
     // SSE close carries no code, so the shared line formatter renders a bare close.
@@ -4259,7 +4261,7 @@ describe('markdown copy and HAR websocket import contracts', () => {
 describe('edit-and-resend contracts', () => {
   test('the resend dialog states the page-context boundary and the managed-header limit', () => {
     expect(html).toContain('<dialog id="resendDialog"');
-    expect(html).toContain('the inspected page itself issues it');
+    expect(html).toContain('to the same origin as the inspected page');
     expect(html).toContain(
       'Browser-managed headers (Host, Cookie, Content-Length, Origin, Referer, and the Sec-* and Proxy-* families) are set by the browser and cannot be overridden here.',
     );
@@ -4270,16 +4272,18 @@ describe('edit-and-resend contracts', () => {
     expect(css).toContain('.resend-error[hidden]{display:none}');
   });
 
-  test('resend rides the DevTools eval channel and stays out of the mirror viewer', () => {
-    expect(js).toContain('if (resendDialog && (mirrorViewerResendDispatch || (inspectedEval && !mirrorViewerActive))) {');
-    expect(js).toContain('inspectedEval(buildResendEvalSource(spec), (result, errorInfo) => {');
+  test('resend is limited to an isolated inspected document', () => {
+    expect(js).not.toContain('buildResendEvalSource');
+    expect(js).toContain("world: 'ISOLATED'");
+    expect(js).toContain('documentIds: [probe.documentId]');
+    expect(js).toContain("mode: 'same-origin'");
+    expect(js).toContain("redirect: 'error'");
     expect(js).toContain('if (resendActions && canResendRow(contextMenuRow)) {');
     expect(js).toContain("createRowMenuButton(uiText('menuResendUnchanged'), () => {");
     expect(js).toContain("createRowMenuButton(uiText('menuResendEdit'), () => {");
     expect(js).toContain("      en: 'Resend unchanged',");
     expect(js).toContain("      en: 'Edit and resend...',");
-    // The composed request is a new fetch in the page; nothing in-flight is touched.
-    expect(js).toContain('fetch(spec.url, init).catch(function () {});');
+    expect(js).toContain('const response = await fetch(url.href, init);');
     expect(js).toContain("row.method !== 'WS'");
   });
 });
