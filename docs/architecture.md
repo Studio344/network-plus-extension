@@ -69,6 +69,10 @@ While recording with the DevTools panel visible or a compatible pop-out connecte
 - SAZ uses fflate streaming inflation, which is compatible with the extension CSP, yielding to the event loop every 16 KiB input chunk and at most every 4 entries. Limits are checked per entry, and only complete retained sessions become rows.
 - Import is atomic: the current capture is replaced only after staging succeeds. Malformed input, JSON or HTTP parse failures, unsupported compression, exceeded limits, and inflation failures all leave existing rows, selection, recording state, and the detail view untouched. The import control is disabled while an import runs, and the same file can be selected again afterward.
 
+## Request resend
+
+A resend originates from a DevTools row or its connected mirror. The click handler requests optional scripting and site access for the reviewed same-origin URL. The host checks the active tab through the DevTools session, verifies its origin without passing request data to it, then sends through the extension’s isolated context in that document. If permission, origin, or the document check fails, no request is attempted. The host reports the result after a response is available or the browser reports a failure. Redirects are blocked.
+
 ## Outbound data safety
 
 The clipboard and HAR downloads are the only outbound surfaces, and sanitized output is always the default. Full output is never the default and is always labelled as unsanitized where it is offered; a confirmed full output applies to that one action and is never saved as a setting or default. The full policy — URL, header, cookie, and body handling, fail-closed behavior, and the `Copy safe support summary` allowlist — is documented in [privacy.md](privacy.md) and summarized in the [README](../README.md#data-safety).

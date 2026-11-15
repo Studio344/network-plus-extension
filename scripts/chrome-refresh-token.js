@@ -4,18 +4,19 @@
 // by running the OAuth consent flow once against a loopback listener.
 //
 // Run it on an operator machine, never in CI:
-//   CHROME_CLIENT_ID=... CHROME_CLIENT_SECRET=... node scripts/chrome-refresh-token.js
+//   node scripts/chrome-refresh-token.js
 //
 // The published Chrome Web Store guide still documents the out-of-band flow
 // (redirect_uri=urn:ietf:wg:oauth:2.0:oob), which Google retired; a client
 // created today is refused by it. A Desktop App client accepts a loopback
 // redirect on any port, which is what this uses.
 //
-// Nothing is written to disk and only the refresh token is printed. The client
-// secret is read from the environment so it never reaches a shell history file
-// through an argument.
+// The client secret prompt suppresses echo. Existing environments can also
+// supply both values to the process.
 
 const http = require('http');
+const readline = require('node:readline/promises');
+const { Writable } = require('node:stream');
 
 const CONSENT_ROOT = 'https://accounts.google.com/o/oauth2/auth';
 const TOKEN_URL = 'https://accounts.google.com/o/oauth2/token';
@@ -104,18 +105,48 @@ const awaitAuthorizationCode = (onListening) =>
     server.listen(0, '127.0.0.1', () => onListening(`http://127.0.0.1:${server.address().port}`));
   });
 
-const main = async () => {
+const readCredentials = async (env, input, output) => {
   const credentials = {
-    clientId: process.env.CHROME_CLIENT_ID,
-    clientSecret: process.env.CHROME_CLIENT_SECRET,
+    clientId: env.CHROME_CLIENT_ID,
+    clientSecret: env.CHROME_CLIENT_SECRET,
   };
-  const missing = Object.entries(credentials)
-    .filter(([, value]) => !value)
-    .map(([key]) => (key === 'clientId' ? 'CHROME_CLIENT_ID' : 'CHROME_CLIENT_SECRET'));
-  if (missing.length > 0) {
-    throw new Error(`set ${missing.join(' and ')} before running this`);
-  }
+  if (credentials.clientId && credentials.clientSecret) return credentials;
+  if (!input.isTTY) throw new Error('Run in a terminal or supply OAuth credentials in the process environment.');
 
+  let muted = false;
+  const terminalOutput = new Writable({
+    write(chunk, encoding, callback) {
+      if (muted) callback();
+      else output.write(chunk, encoding, callback);
+    },
+  });
+  const terminal = readline.createInterface({ input, output: terminalOutput, terminal: true, historySize: 0 });
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  terminal.once('SIGINT', cancel);
+  terminal.once('close', cancel);
+  const question = (prompt) => terminal.question(prompt, { signal: controller.signal });
+  try {
+    if (!credentials.clientId) credentials.clientId = (await question('OAuth client ID: ')).trim();
+    if (!credentials.clientSecret) {
+      output.write('OAuth client secret (input hidden): ');
+      muted = true;
+      try {
+        credentials.clientSecret = (await question('')).trim();
+      } finally {
+        muted = false;
+        output.write('\n');
+      }
+    }
+  } finally {
+    terminal.close();
+  }
+  if (!credentials.clientId || !credentials.clientSecret) throw new Error('Both OAuth credentials are required.');
+  return credentials;
+};
+
+const main = async () => {
+  const credentials = await readCredentials(process.env, process.stdin, process.stderr);
   let redirectUri = '';
   const code = await awaitAuthorizationCode((uri) => {
     redirectUri = uri;
@@ -152,4 +183,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { awaitAuthorizationCode, buildConsentUrl, extractAuthorizationCode, readRefreshToken, SCOPE };
+module.exports = {
+  awaitAuthorizationCode,
+  buildConsentUrl,
+  extractAuthorizationCode,
+  readCredentials,
+  readRefreshToken,
+  SCOPE,
+};

@@ -213,10 +213,10 @@ browserTest(
         window.__wsEvents = [];
         const originalEval = chrome.devtools.inspectedWindow.eval;
         chrome.devtools.inspectedWindow.eval = (source, callback) => {
-          if (source === 'window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []') {
-            callback(window.__wsEvents.splice(0));
-          } else if (source === 'window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []') {
-            callback([]);
+          if (source.includes('function pageDrainStream') && source.includes('__networkPlusWS__')) {
+            callback(JSON.stringify(window.__wsEvents.splice(0)));
+          } else if (source.includes('function pageDrainStream') && source.includes('__networkPlusSSE__')) {
+            callback('[]');
           } else originalEval(source, callback);
         };
         const push = window.__fromHost.push.bind(window.__fromHost);
@@ -346,7 +346,8 @@ browserTest(
       executable: browserExecutable,
       initScript: HOST_STUB + `
         class SyntheticSocket {
-          constructor() { this.readyState = 0; this.listeners = {}; }
+          constructor(url) {
+            this.url = url; this.readyState = 0; this.listeners = {}; }
           addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
           send(data) {
             if (this.readyState !== 1) throw new DOMException('Synthetic socket is connecting', 'InvalidStateError');
@@ -361,10 +362,10 @@ browserTest(
         window.WebSocket = SyntheticSocket;
         const originalEval = chrome.devtools.inspectedWindow.eval;
         chrome.devtools.inspectedWindow.eval = (source, callback) => {
-          if (source === 'window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []') {
-            callback(window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []);
-          } else if (source === 'window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []') {
-            callback([]);
+          if (source.includes('function pageDrainStream') && source.includes('__networkPlusWS__')) {
+            callback(window.eval(source));
+          } else if (source.includes('function pageDrainStream') && source.includes('__networkPlusSSE__')) {
+            callback('[]');
           } else originalEval(source, callback);
         };
         const push = window.__fromHost.push.bind(window.__fromHost);
@@ -497,9 +498,9 @@ browserTest(
         window.__streamQueues = { ws: [], sse: [] };
         const nativeEval = chrome.devtools.inspectedWindow.eval;
         chrome.devtools.inspectedWindow.eval = (source, callback) => {
-          if (source.includes('.drain() : []')) {
+          if (source.includes('function pageDrainStream')) {
             const queue = source.includes('__networkPlusSSE__') ? 'sse' : 'ws';
-            callback(window.__streamQueues[queue].splice(0));
+            callback(JSON.stringify(window.__streamQueues[queue].splice(0)));
           } else nativeEval(source, callback);
         };
         chrome.devtools.network.onNavigated.addListener = (callback) => { window.__navigateStreamHost = callback; };
@@ -623,10 +624,10 @@ browserTest(
         window.__wsEvents = [];
         const originalEval = chrome.devtools.inspectedWindow.eval;
         chrome.devtools.inspectedWindow.eval = (source, cb) => {
-          if (source === 'window.__networkPlusWS__ ? window.__networkPlusWS__.drain() : []') {
-            cb(window.__wsEvents.splice(0), undefined);
-          } else if (source === 'window.__networkPlusSSE__ ? window.__networkPlusSSE__.drain() : []') {
-            cb([], undefined);
+          if (source.includes('function pageDrainStream') && source.includes('__networkPlusWS__')) {
+            cb(JSON.stringify(window.__wsEvents.splice(0)), undefined);
+          } else if (source.includes('function pageDrainStream') && source.includes('__networkPlusSSE__')) {
+            cb('[]', undefined);
           } else originalEval(source, cb);
         };
         // Runtime ports clone messages rather than keeping references to rows.
@@ -1257,7 +1258,7 @@ browserTest(
       // Wave 2: tooltips, dialog prose, and the JS-composed empty state all
       // swap in place from the same dictionary.
       expect(jaTexts.searchTitle).toBe('検索パネルを開閉 (Ctrl+F)');
-      expect(jaTexts.resendIntro).toContain('検査中のページ自身が送信します');
+      expect(jaTexts.resendIntro).toContain('検査対象ページと同じオリジン');
       expect(jaTexts.emptyDesc).toBe(
         'リクエストは DevTools セッションから流れてきます。ガイド付きローカルサンプルは DevTools 側でのみ使えます。',
       );
@@ -1323,7 +1324,24 @@ browserTest(
 browserTest(
   'the host executes remote commands against its own controls and answers each one',
   async () => {
-    const page = await launchPanelPage({ executable: browserExecutable, initScript: HOST_STUB });
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: HOST_STUB + `
+        const evalOrigin = chrome.devtools.inspectedWindow.eval;
+        chrome.devtools.inspectedWindow.eval = (source, cb) => {
+          if (source === 'location.origin') cb('https://api.example.test');
+          else evalOrigin(source, cb);
+        };
+        window.__replayInjections = [];
+        chrome.scripting = {
+          executeScript: async ({ target, world, args }) => {
+            window.__replayInjections.push({ target, world, args });
+            if (target.frameIds) return [{ documentId: 'active-doc', result: true }];
+            return [{ documentId: 'active-doc', result: { status: 200 } }];
+          },
+        };
+      `,
+    });
     try {
       // One captured live row so the snapshot has content.
       await evaluate(
@@ -1416,17 +1434,36 @@ browserTest(
         type: 'command',
         commandId: 16,
         name: 'resend',
-        args: { spec: { method: 'GET', url: 'https://api.example.test/echo', headers: [], body: '', credentials: true } },
+        args: {
+          epoch: firstSync.control.resendEpoch,
+          spec: { method: 'GET', url: 'https://api.example.test/echo', headers: [], body: '', credentials: true },
+        },
       });
       await delay(200);
       messages = await fromHost();
       expect(messages.find((m) => m.type === 'command-result' && m.commandId === 16).ok).toBe(true);
-      expect(
-        await evaluate(
-          page.cdp,
-          "window.__evals.some((s) => s.startsWith('(function pageResendRunner(') && s.includes('api.example.test/echo'))",
-        ),
-      ).toBe(true);
+      const [probe, send] = await evaluate(page.cdp, 'window.__replayInjections');
+      expect(probe.world).toBe('ISOLATED');
+      expect(probe.args[0]).toBe('https://api.example.test');
+      expect(send.world).toBe('ISOLATED');
+      expect(send.target).toEqual({ tabId: 42, documentIds: ['active-doc'] });
+      expect(send.args[0].url).toBe('https://api.example.test/echo');
+      expect(await evaluate(page.cdp, "window.__evals.some((source) => source.includes('api.example.test/echo'))")).toBe(false);
+
+      await drive({
+        type: 'command',
+        commandId: 18,
+        name: 'resend',
+        args: {
+          epoch: firstSync.control.resendEpoch - 1,
+          spec: { method: 'GET', url: 'https://api.example.test/echo', headers: [], body: '', credentials: true },
+        },
+      });
+      await delay(100);
+      expect((await fromHost()).find((m) => m.type === 'command-result' && m.commandId === 18).error).toBe(
+        'resendErrDocumentChanged',
+      );
+      expect(await evaluate(page.cdp, 'window.__replayInjections.length')).toBe(2);
 
       await drive({ type: 'command', commandId: 17, name: 'nope', args: {} });
       await delay(100);
