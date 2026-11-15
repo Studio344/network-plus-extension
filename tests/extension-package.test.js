@@ -303,7 +303,10 @@ describe('release version integrity', () => {
 describe('extension source integrity', () => {
   test('accepts the checked-in runtime and proves every permission is used', () => {
     expect(validateExtension(repositoryRoot)).toEqual([]);
-    expect(readManifest(repositoryRoot).permissions).toEqual(EXPECTED_PERMISSIONS);
+    const manifest = readManifest(repositoryRoot);
+    expect(manifest.permissions).toEqual(EXPECTED_PERMISSIONS);
+    expect(manifest.optional_permissions).toEqual(['scripting']);
+    expect(manifest.optional_host_permissions).toEqual(['http://*/*', 'https://*/*']);
     expect(fs.readFileSync(path.join(repositoryRoot, 'panel.js'), 'utf8')).toContain('chrome.storage.local');
     expect(fs.readFileSync(path.join(repositoryRoot, 'panel.js'), 'utf8')).not.toContain('chrome.downloads');
   });
@@ -377,8 +380,8 @@ describe('extension source integrity', () => {
         'manifest privileged surface is not allowed: content_scripts',
         'manifest privileged surface is not allowed: externally_connectable',
         'manifest privileged surface is not allowed: host_permissions',
-        'manifest privileged surface is not allowed: optional_host_permissions',
-        'manifest privileged surface is not allowed: optional_permissions',
+        'manifest optional host permissions must be exactly: http://*/*, https://*/*',
+        'manifest optional permissions must be exactly: scripting',
         'manifest privileged surface is not allowed: sandbox',
         'manifest privileged surface is not allowed: web_accessible_resources',
         'manifest_version must be exactly 3',

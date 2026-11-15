@@ -74,6 +74,11 @@ describe('captured content and resend privacy in a real browser', () => {
         return;
       }
       if (request.url !== '/favicon.ico') hits.push({ url: request.url, cookie: request.headers.cookie || '' });
+      if (request.url === '/redirect') {
+        response.writeHead(307, { Location: '/must-not-follow' });
+        response.end();
+        return;
+      }
       response.writeHead(200, { 'Content-Type': 'text/plain' });
       response.end('synthetic fixture');
     });
@@ -163,14 +168,44 @@ describe('captured content and resend privacy in a real browser', () => {
     throw new Error('The captured HTML fixture was not found inside the preview.');
   }
 
-  browserTest('unchecked resend excludes same-site cookies while checked resend preserves them', async () => {
+  browserTest('isolated resend preserves optional cookies without exposing request arguments or following redirects', async () => {
+    await evaluate(browser.cdp, `window.__intercepted = []; window.fetch = (...args) => {
+      window.__intercepted.push(args);
+      return Promise.reject(new Error('page fetch was called'));
+    }; true`);
+    const { frameTree } = await browser.cdp.send('Page.getFrameTree');
+    const { executionContextId } = await browser.cdp.send('Page.createIsolatedWorld', {
+      frameId: frameTree.frame.id,
+      worldName: 'privacy-test-resend',
+    });
+    // The real browser executes both production functions in an isolated
+    // world. This adapter stands in for extension permission and tab routing.
+    const scripting = {
+      async executeScript({ world, func, args }) {
+        expect(world).toBe('ISOLATED');
+        const result = await browser.cdp.send('Runtime.evaluate', {
+          expression: '(' + func.toString() + ')(...' + JSON.stringify(args) + ')',
+          contextId: executionContextId,
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+        return [{ documentId: 'fixture-document', result: result.result.value }];
+      },
+    };
+    const replay = (url, credentials) => np.runInspectedResend(scripting, 42, {
+      method: 'GET', url, headers: [{ name: 'Authorization', value: 'Bearer synthetic' }], credentials,
+    }, () => true);
     for (const credentials of [false, true]) {
       const suffix = credentials ? '/checked' : '/unchecked';
-      const source = np.buildResendEvalSource({ method: 'GET', url: origin + suffix, headers: [], credentials });
-      expect(await evaluate(browser.cdp, source)).toEqual({ ok: true });
+      await expect(replay(origin + suffix, credentials)).resolves.toBe(200);
       const hit = await waitUntil(() => hits.find(({ url }) => url === suffix));
       expect(hit.cookie).toBe(credentials ? 'privacy_probe=synthetic' : '');
     }
+    await expect(replay(origin + '/redirect', true)).rejects.toThrow('resendErrNetwork');
+    expect(hits.some(({ url }) => url === '/must-not-follow')).toBe(false);
+    await expect(replay('http://127.0.0.1:1/other-origin', true)).rejects.toThrow('resendErrSiteMismatch');
+    expect(await evaluate(browser.cdp, 'window.__intercepted')).toEqual([]);
   }, 30000);
 
   browserTest('HTML preview makes no passive requests and retains embedded styling and images', async () => {

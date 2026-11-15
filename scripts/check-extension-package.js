@@ -7,6 +7,8 @@ const { unzipSync, zipSync } = require('../vendor/fflate');
 const EXPECTED_MANIFEST_NAME = 'Network+ for DevTools';
 const EXPECTED_CSP = "script-src 'self'; object-src 'self'";
 const EXPECTED_PERMISSIONS = Object.freeze(['storage']);
+const EXPECTED_OPTIONAL_PERMISSIONS = Object.freeze(['scripting']);
+const EXPECTED_OPTIONAL_HOST_PERMISSIONS = Object.freeze(['http://*/*', 'https://*/*']);
 const ALLOWED_MANIFEST_KEYS = Object.freeze([
   'action',
   'background',
@@ -17,14 +19,14 @@ const ALLOWED_MANIFEST_KEYS = Object.freeze([
   'manifest_version',
   'name',
   'permissions',
+  'optional_host_permissions',
+  'optional_permissions',
   'version',
 ]);
 const PRIVILEGED_MANIFEST_SURFACES = Object.freeze([
   'content_scripts',
   'externally_connectable',
   'host_permissions',
-  'optional_host_permissions',
-  'optional_permissions',
   'sandbox',
   'web_accessible_resources',
 ]);
@@ -89,6 +91,7 @@ const assertReproducibleZipTimestamp = (timestamp = ZIP_TIMESTAMP) => {
 };
 const PERMISSION_USAGE = Object.freeze({
   storage: /\bchrome\.storage\./,
+  scripting: /\bchrome\.scripting\b/,
 });
 
 const getReleaseArchiveName = (version) => `network-plus-extension-${version}.zip`;
@@ -292,6 +295,13 @@ const validateExtension = (root, archiveFiles = RUNTIME_FILES) => {
     errors.push(`manifest permissions must be exactly: ${EXPECTED_PERMISSIONS.join(', ')}`);
   }
 
+  if (JSON.stringify(manifest.optional_permissions) !== JSON.stringify(EXPECTED_OPTIONAL_PERMISSIONS)) {
+    errors.push('manifest optional permissions must be exactly: ' + EXPECTED_OPTIONAL_PERMISSIONS.join(', '));
+  }
+  if (JSON.stringify(manifest.optional_host_permissions) !== JSON.stringify(EXPECTED_OPTIONAL_HOST_PERMISSIONS)) {
+    errors.push('manifest optional host permissions must be exactly: ' + EXPECTED_OPTIONAL_HOST_PERMISSIONS.join(', '));
+  }
+
   const fflateBytes = runtimeBytes.get('vendor/fflate.js');
   if (fflateBytes) {
     const digest = crypto.createHash('sha256').update(fflateBytes).digest('hex');
@@ -303,7 +313,10 @@ const validateExtension = (root, archiveFiles = RUNTIME_FILES) => {
   }
 
   const javascript = ['background.js', 'devtools.js', 'panel.js'].map((file) => runtimeText.get(file) ?? '').join('\n');
-  const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
+  const permissions = [
+    ...(Array.isArray(manifest.permissions) ? manifest.permissions : []),
+    ...(Array.isArray(manifest.optional_permissions) ? manifest.optional_permissions : []),
+  ];
   for (const permission of permissions) {
     const usage = PERMISSION_USAGE[permission];
     if (!usage) errors.push(`manifest permission has no audited usage rule: ${permission}`);
