@@ -542,7 +542,7 @@ describe('details collapse static contracts', () => {
 });
 
 describe('guided sample capture static contracts', () => {
-  test('renders one local-only action only for a truly empty capture', () => {
+  test('renders the local sample action only for a truly empty capture', () => {
     expect(js).toContain('const mode = getEmptyStateMode(state.rows.length, visibleRowCount);');
     expect(js).toContain("if (mode === 'filtered')");
     expect(js).toContain("action.textContent = uiText('emptyFilteredAction');");
@@ -826,7 +826,7 @@ describe('guided sample capture static contracts', () => {
       js.indexOf('// Export', js.indexOf("pauseBtn.addEventListener('click'")),
     );
     expect(pauseBlock).toContain('updateRecordState();');
-    expect(pauseBlock).toContain('updateEmptyState(state.filteredRows.length);');
+    expect(pauseBlock).toContain('updateEmptyState(countVisibleRows());');
   });
 
   test('uses a narrow-only accessible disclosure for secondary status telemetry', () => {
@@ -1686,10 +1686,9 @@ describe('settings and language contracts', () => {
     expect(js).toContain("ja: 'レスポンスインスペクター (Response)',");
     expect(html).not.toMatch(/id="pauseBtn"[^>]*data-i18n-title/);
     expect(html).not.toMatch(/id="undoClearBtn"[^>]*data-i18n-title/);
-    // The empty state re-renders in place on a language change: the render
-    // key includes the active language and applyLanguage triggers a refresh.
+    // The empty state re-renders when its language or available recovery changes.
     expect(js).toContain(
-      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage;",
+      "const renderKey = [mode, recovery, state.paused ? 'paused' : 'recording', activeLanguage].join(':');",
     );
     expect(js).toContain('refreshEmptyStateLanguage();');
     expect(js).toContain('updateEmptyState(lastEmptyStateRowCount);');
