@@ -503,7 +503,11 @@ browserTest(
             callback(JSON.stringify(window.__streamQueues[queue].splice(0)));
           } else nativeEval(source, callback);
         };
-        chrome.devtools.network.onNavigated.addListener = (callback) => { window.__navigateStreamHost = callback; };
+        const navigationListeners = [];
+        chrome.devtools.network.onNavigated.addListener = (callback) => navigationListeners.push(callback);
+        window.__navigateStreamHost = () => {
+          for (const callback of navigationListeners) callback('https://navigation.example.test/');
+        };
       `,
     });
     let viewer;
@@ -963,7 +967,7 @@ browserTest(
       expect(await states()).toEqual([['1', '201'], ['2', '200'], ['3', '204']]);
       await evaluate(page.cdp, 'window.__hostListeners.disconnect.forEach((fn) => fn()); true');
       expect(await states()).toEqual([['1', '201'], ['2', '200'], ['3', '204']]);
-      expect(await evaluate(page.cdp, 'document.querySelector("#statusText").textContent')).toContain('disconnected');
+      expect(await evaluate(page.cdp, 'document.querySelector("#statusText").textContent')).toContain('接続が切れました');
     } finally {
       await page.close();
     }
@@ -972,7 +976,7 @@ browserTest(
 );
 
 browserTest(
-  'the host negotiates pending mirror rows and polls while hidden only for a connected capable viewer',
+  'the hidden host polls on request only from a connected capable viewer',
   async () => {
     const page = await launchPanelPage({
       executable: browserExecutable,
@@ -994,6 +998,7 @@ browserTest(
     };
     try {
       await drive({ type: 'hello', protocolVersion: 2 });
+      await drive({ type: 'poll-pending' });
       await delay(1100);
       expect(await evaluate(page.cdp, 'window.__harPolls')).toBe(0);
       await evaluate(page.cdp, `(() => {
@@ -1005,6 +1010,8 @@ browserTest(
         window.__harEntries = [window.__first]; return true;
       })()`);
       await drive({ type: 'hello', protocolVersion: 2, pendingRows: true });
+      expect(await evaluate(page.cdp, 'window.__harPolls')).toBe(0);
+      await drive({ type: 'poll-pending' });
       expect(await waitForImportResult(page.cdp, "window.__fromHost.some((m) => m.type === 'row' && m.row.pending === true)")).toBe(true);
       expect((await snapshotRows()).map((row) => [row.id, row.pending])).toEqual([[1, true]]);
       await drive({ type: 'hello', protocolVersion: 2 });
