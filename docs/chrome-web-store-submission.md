@@ -1,6 +1,6 @@
 # Chrome Web Store submission dossier (en-US)
 
-Last reviewed: 2026-10-12
+Last reviewed: 2026-11-15
 
 ## Submission status and evidence boundary
 
@@ -8,20 +8,20 @@ This dossier is a repository-local recommendation for a future Chrome Web Store 
 
 ### Upload artifact
 
-- **Release:** `v1.16.0` (published 2026-10-12)
-- **ZIP:** `network-plus-extension-1.16.0.zip`
-- **Size:** `301505 bytes`
-- **SHA-256:** `f93f4d9a2afd1e0437d8a1dcf94a8e6816e9a5aedca376e237e129e37cb48dad`
-- **Verified download:** https://github.com/himiyosh/network-plus-extension/releases/download/v1.16.0/network-plus-extension-1.16.0.zip
+- **Release candidate** — `v1.17.0` (cut 2026-11-15)
+- **ZIP** — `network-plus-extension-1.17.0.zip`
+- **Size** — `317717 bytes`
+- **SHA-256** — `d2647cc24f747ba1cf70f9a8bdd930136488939947f1332ad42c6b5dd21681ac`
+- **Download after publication** — https://github.com/himiyosh/network-plus-extension/releases/download/v1.17.0/network-plus-extension-1.17.0.zip
 
-The public `v1.16.0` GitHub release and ZIP were publicly observable and re-downloaded on 2026-10-12. The fresh download matched the size and digest above and was byte-identical to a fresh `TZ=UTC npm run extension:package` build from published commit `891d9fb17692f8f4e66faa1268c197675a376880`. The publishing workflow verified the same archive digest. This establishes the GitHub upload source, not store acceptance, review, or distribution. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature: an operator must still obtain the ZIP from the trusted release route and compare the complete 64-character value before upload.
+Two `TZ=UTC npm run extension:package` builds from the reviewed source produced identical bytes. The v1.17.0 candidate contains the merged Network+ improvements through `7494d2c` and the version update. Verify the downloaded GitHub asset against this archive after publication. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature. Only upload after obtaining the ZIP from the trusted release route and comparing the complete digest.
 
 ### Observed repository facts
 
-- `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.16.0`, with one permission (`storage`), packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
+- `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.17.0`, with one permission (`storage`), packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
 - The package guard allows only the eleven audited runtime files and rejects remote resources, inline scripts, unexpected privileged manifest surfaces, and permission drift. The one audited background service worker opens the fixed local offline workspace from the toolbar action and minimizes undocked DevTools when the pop-out opens. These operations require no additional permission, read no current-tab URLs or page data, and do not override New Tab.
 - The same runtime uses Chromium extension APIs without an Edge-only code path. Historical pre-v1.16.0 verification used Chrome 151: it loaded the manifest without extension errors, all 98 real-browser regression scenarios passed, and the Network+ DevTools panel was confirmed manually. This is not a new manual verification of the candidate release.
-- The published `v1.16.0` archive is the current repository-backed upload source, freshly downloaded and byte-verified as recorded above. Repository evidence does not establish any Chrome Web Store account, item ID, listing URL, review result, or publication state.
+- The v1.17.0 archive is the reviewed candidate upload source. The package checks and digest describe the archive only. Validate the store item and review status separately.
 
 ## Developer account prerequisites
 
@@ -100,7 +100,7 @@ All executable JavaScript and CSS are included in the uploaded package. The Mani
 
 Do not select a no-data answer merely because processing remains on the device. Chrome's User Data FAQ explicitly requires disclosure for local-only processing and identifies domains, URLs, HTTP requests and responses, and cookies as user data.
 
-The user deliberately opens the Network+ DevTools panel to inspect traffic; Network+ has no content script, background worker, or hidden browsing-history collector. If the live dashboard or reviewer determines that a separate prominent in-product disclosure and consent step is required, pause the submission and add that behavior in a newly versioned extension package. A store description or privacy-policy link alone does not satisfy a required in-product disclosure.
+The user deliberately opens the Network+ DevTools panel to inspect traffic; The packaged background worker opens the offline workspace and manages the pop-out window. Request inspection runs in DevTools at the user’s direction. If the live dashboard or reviewer determines that a separate prominent in-product disclosure and consent step is required, pause the submission and add that behavior in a newly versioned extension package. A store description or privacy-policy link alone does not satisfy a required in-product disclosure.
 
 Use the current dashboard labels and apply this conservative mapping:
 
@@ -135,6 +135,8 @@ The owner must make the final external distribution decision. Private, unlisted,
 
 ## Test instructions
 
+For this release, use the reviewed ZIP to open large HARs in DevTools and the pop-out. Confirm the expected request count, row order, and final response content. While a live response is held, check that the pending request appears and updates in place on completion. From the browser’s New Tab, the extension toolbar action opens a separate offline workspace for saved captures.
+
 No account, credentials, subscription, remote service, or live customer traffic is required.
 
 1. Use the exact ZIP identified under Upload artifact. For local reproduction, extract it into a new folder, open `chrome://extensions/`, enable Developer mode, choose `Load unpacked`, and select the extracted folder. A ZIP file itself is not selected by `Load unpacked`.
@@ -150,15 +152,15 @@ No account, credentials, subscription, remote service, or live customer traffic 
 
 The sections above describe a first submission. When a Chrome Web Store item already exists for this extension, the work is a package update against that item: the account prerequisites are already satisfied and no new item is created.
 
-- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.16.0 is higher than v1.15.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
-- After publication, upload `network-plus-extension-1.16.0.zip` obtained from the trusted release route as a new package on the existing item, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
-- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the dashboard, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for this v1.16.0 cut to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- chrome` compares each listing image with `docs/store-assets/`, replaces only the ones that differ, and saves a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
+- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.17.0 is higher than v1.16.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
+- After publication, upload `network-plus-extension-1.17.0.zip` obtained from the trusted release route as a new package on the existing item, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
+- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the dashboard, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for v1.16.0 and are reused for v1.17.0 to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- chrome` compares each listing image with `docs/store-assets/`, replaces only the ones that differ, and saves a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
 - An update is a fresh review. Distribution and visibility settings carry over from the existing item unless the operator changes them, and the previously reviewed package stays live until the new one is approved.
 - Field labels and the navigation path for package updates must be confirmed in the live dashboard, which can change independently of this repository.
 
 ## Automated submission
 
-`npm run store:submit -- --store chrome` uploads the packaged archive as a new package on the existing item and submits it for review through the Chrome Web Store API. The `Submit to Stores` workflow does not run on a GitHub release event; after explicit release and store-submission authorization, dispatch it manually on `main` from the Actions tab.
+`npm run store:submit -- --store chrome` uploads the packaged archive as a new package on the existing item and submits it for review through the Chrome Web Store API. The `Submit to Stores` workflow does not run on a GitHub release event; after explicit release and store-submission authorization, dispatch it manually on the verified release tag for this store.
 
 Before uploading anything, the script rebuilds the archive and compares its SHA-256 against the digest recorded in this dossier. A mismatch aborts the run, so the store can only receive bytes that passed review here.
 

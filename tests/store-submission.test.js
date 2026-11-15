@@ -49,6 +49,7 @@ const instantPoll = (describe, readStatus) =>
   });
 
 const baseContext = (fetchImpl, overrides = {}) => ({
+  version: '9.9.9',
   archive: { name: 'network-plus-extension-9.9.9.zip', size: 4, sha256: 'a'.repeat(64), bytes: Buffer.from('zip!') },
   notes: 'release notes',
   fetchImpl,
@@ -93,6 +94,7 @@ describe('credential planning', () => {
     EDGE_PRODUCT_ID: 'p',
     EDGE_CLIENT_ID: 'c',
     EDGE_API_KEY: 'k',
+    CHROME_PUBLISHER_ID: 'p',
     CHROME_ITEM_ID: 'i',
     CHROME_CLIENT_ID: 'ci',
     CHROME_CLIENT_SECRET: 'cs',
@@ -101,16 +103,16 @@ describe('credential planning', () => {
 
   test('plans both stores when both are configured', () => {
     expect(planStoreSubmissions(full, 'both')).toEqual([
-      { store: 'edge', ready: true, missing: [], required: false },
-      { store: 'chrome', ready: true, missing: [], required: false },
+      { store: 'edge', ready: true, missing: [], required: true },
+      { store: 'chrome', ready: true, missing: [], required: true },
     ]);
   });
 
-  // Configuring one store must not block the other.
-  test('skips an unconfigured store when both were requested', () => {
+  // A missing second store must fail preflight, before the first store uploads.
+  test('requires both stores when both were requested', () => {
     const plans = planStoreSubmissions({ ...full, CHROME_REFRESH_TOKEN: '' }, 'both');
     expect(plans[0]).toMatchObject({ store: 'edge', ready: true });
-    expect(plans[1]).toMatchObject({ store: 'chrome', ready: false, missing: ['CHROME_REFRESH_TOKEN'], required: false });
+    expect(plans[1]).toMatchObject({ store: 'chrome', ready: false, missing: ['CHROME_REFRESH_TOKEN'], required: true });
   });
 
   // Asking for one store by name is a claim that it is configured.
@@ -169,30 +171,21 @@ describe('status interpretation', () => {
     expect(interpretEdgeOperation(null).state).toBe('pending');
   });
 
-  test('maps the documented Chrome upload states', () => {
-    expect(interpretChromeUpload({ uploadState: 'SUCCESS' }).state).toBe('succeeded');
+  test('uses V2 upload enums and rejects unknown or legacy states', () => {
+    expect(interpretChromeUpload({ uploadState: 'SUCCEEDED' }).state).toBe('succeeded');
     expect(interpretChromeUpload({ uploadState: 'IN_PROGRESS' }).state).toBe('pending');
-    expect(interpretChromeUpload({ uploadState: 'FAILURE', itemError: [{ error_detail: 'bad zip' }] })).toEqual({
-      state: 'failed',
-      detail: 'FAILURE - bad zip',
-    });
-    // NOT_FOUND means the item id is wrong; retrying cannot fix it.
-    expect(interpretChromeUpload({ uploadState: 'NOT_FOUND' }).state).toBe('failed');
+    for (const uploadState of ['FAILED', 'NOT_FOUND', 'SUCCESS', 'FAILURE', 'UNRECOGNIZED', undefined]) {
+      expect(interpretChromeUpload({ uploadState }).state).toBe('failed');
+    }
   });
 
-  test('maps a Chrome publish success', () => {
-    expect(interpretChromePublish({ status: ['OK'], statusDetail: ['fine'] })).toEqual({
-      state: 'succeeded',
-      detail: 'fine',
-    });
-  });
-
-  // A queue still holding the previous version is not this run's failure, but
-  // nothing was submitted either, so it gets its own state.
-  test('separates "already in review" from a real publish failure', () => {
-    expect(interpretChromePublish({ status: ['ITEM_PENDING_REVIEW'] }).state).toBe('pending-review');
-    expect(interpretChromePublish({ status: ['NOT_AUTHORIZED'] }).state).toBe('failed');
-    expect(interpretChromePublish({}).state).toBe('failed');
+  test('distinguishes V2 submission acknowledgement from rejected, staged or unknown states', () => {
+    for (const state of ['PENDING_REVIEW', 'PUBLISHED', 'PUBLISHED_TO_TESTERS']) {
+      expect(interpretChromePublish({ state }).state).toBe('succeeded');
+    }
+    for (const state of ['REJECTED', 'CANCELLED', 'STAGED', undefined]) {
+      expect(interpretChromePublish({ state }).state).toBe('failed');
+    }
   });
 });
 
@@ -224,6 +217,7 @@ describe('Edge submission', () => {
 
   test('uploads, waits for the package, then publishes with JSON notes', async () => {
     const calls = [];
+    const log = jest.fn();
     const fetchImpl = async (url, init = {}) => {
       calls.push({ url, method: init.method || 'GET', headers: init.headers, body: init.body });
       if (url.endsWith('/submissions/draft/package')) return response(202, '', { location: 'op-upload' });
@@ -232,9 +226,9 @@ describe('Edge submission', () => {
       return response(200, { status: 'Succeeded' });
     };
 
-    const result = await submitToEdge(baseContext(fetchImpl, { credentials }));
+    const result = await submitToEdge(baseContext(fetchImpl, { credentials, log }));
 
-    expect(result).toEqual({ store: 'edge', published: true, operationId: 'op-publish' });
+    expect(result).toEqual({ store: 'edge', outcome: 'submitted', submitted: true, operationId: 'op-publish', operationState: 'Succeeded' });
     expect(calls[0].url).toBe(`${EDGE_API_ROOT}/v1/products/PRODUCT/submissions/draft/package`);
     expect(calls[0].headers).toMatchObject({
       Authorization: 'ApiKey KEY-12345678',
@@ -244,6 +238,10 @@ describe('Edge submission', () => {
     const publishCall = calls.find((call) => call.method === 'POST' && call.url.endsWith('/submissions'));
     // The published sample body is not valid JSON; this must send real JSON.
     expect(JSON.parse(publishCall.body)).toEqual({ notes: 'release notes' });
+    expect(log.mock.calls.flat().join('\n')).toContain('upload acknowledged, operationId=op-upload');
+    expect(log.mock.calls.flat().join('\n')).toContain('submission acknowledged, operationId=op-publish');
+    expect(log.mock.calls.flat().join('\n')).toContain('"operationId":"op-publish","state":"Succeeded"');
+    expect(log.mock.calls.flat().join('\n')).not.toContain(credentials.apiKey);
   });
 
   test('stops after the upload when only an upload was asked for', async () => {
@@ -254,8 +252,10 @@ describe('Edge submission', () => {
     };
     await expect(submitToEdge(baseContext(fetchImpl, { credentials, uploadOnly: true }))).resolves.toEqual({
       store: 'edge',
-      published: false,
+      outcome: 'uploaded',
+      submitted: false,
       operationId: 'op-upload',
+      operationState: 'Succeeded',
     });
   });
 
@@ -273,98 +273,250 @@ describe('Edge submission', () => {
       submitToEdge(baseContext(fetchImpl, { credentials, secrets: ['KEY-12345678'] })),
     ).rejects.toThrow(/rejected ApiKey \*\*\*/);
   });
+
+  test.each(['upload', 'publish'])('redacts provider error details during %s polling', async (stage) => {
+    const fetchImpl = async (url) => {
+      if (url.endsWith('/submissions/draft/package')) return response(202, '', { location: 'op-upload' });
+      if (url.endsWith('/submissions')) return response(202, '', { location: 'op-publish' });
+      if (stage === 'publish' && url.includes('/draft/package/operations/')) return response(200, { status: 'Succeeded' });
+      return response(200, { status: 'Failed', message: 'provider echoed KEY-12345678', errors: ['KEY-12345678'] });
+    };
+    await expect(submitToEdge(baseContext(fetchImpl, { credentials, secrets: [credentials.apiKey] }))).rejects.toThrow(/provider echoed \*\*\*/);
+    try {
+      await submitToEdge(baseContext(fetchImpl, { credentials, secrets: [credentials.apiKey] }));
+    } catch (error) {
+      expect(error.message).not.toContain(credentials.apiKey);
+    }
+  });
 });
 
-describe('Chrome submission', () => {
+describe('Chrome V2 submission', () => {
   const credentials = {
-    itemId: 'ITEM',
-    clientId: 'client',
-    clientSecret: 'secret-12345678',
-    refreshToken: 'refresh-12345678',
+    publisherId: 'PUBLISHER', itemId: 'ITEM', clientId: 'client',
+    clientSecret: 'secret-12345678', refreshToken: 'refresh-12345678',
   };
-
-  const tokenThenUpload = (uploadBody, publishBody) => async (url, init = {}) => {
-    if (url === CHROME_TOKEN_URL) return response(200, { access_token: 'token-abcdefgh' });
-    if (url.startsWith(CHROME_UPLOAD_ROOT)) return response(200, uploadBody);
-    if (url.includes('/publish')) return response(200, publishBody);
-    if (init.method === undefined) return response(200, uploadBody);
-    throw new Error(`unexpected call to ${url}`);
-  };
-
-  test('exchanges the refresh token, uploads, then publishes', async () => {
+  const identity = { name: 'publishers/PUBLISHER/items/ITEM', itemId: 'ITEM' };
+  const revision = (version = '9.9.9', state = 'PENDING_REVIEW') => ({ state, distributionChannels: [{ crxVersion: version }] });
+  const status = (overrides = {}) => ({ ...identity, ...overrides });
+  const accepted = () => status({ submittedItemRevisionStatus: revision() });
+  const upload = () => ({ ...identity, uploadState: 'SUCCEEDED', crxVersion: '9.9.9' });
+  const setup = ({ before = status(), afterUpload = status(), final = accepted(), uploadBody = upload(), publishBody = { ...identity, state: 'PENDING_REVIEW' }, uploadStatus = 200, publishStatus = 200 } = {}) => {
     const calls = [];
-    const inner = tokenThenUpload({ uploadState: 'SUCCESS' }, { status: ['OK'], statusDetail: ['published'] });
+    let reads = 0;
     const fetchImpl = async (url, init = {}) => {
-      calls.push({ url, method: init.method || 'GET', headers: init.headers, body: init.body });
+      calls.push({ url, method: init.method || 'GET', ...init });
+      if (url === CHROME_TOKEN_URL) return response(200, { access_token: 'token-abcdefgh' });
+      if (url.endsWith(':fetchStatus')) return response(200, [before, afterUpload, final][Math.min(reads++, 2)]);
+      if (url.endsWith(':upload')) return response(uploadStatus, uploadBody);
+      if (url.endsWith(':publish')) return response(publishStatus, publishBody);
+      throw new Error(`unexpected call ${url}`);
+    };
+    return { calls, fetchImpl };
+  };
+  const mutations = (calls) => calls.filter((call) => call.url !== CHROME_TOKEN_URL && call.method === 'POST');
+
+  test('reads before upload and after publish, binds version, and preserves OAuth and visibility', async () => {
+    const { calls, fetchImpl } = setup();
+    const result = await submitToChrome(baseContext(fetchImpl, { credentials }));
+    expect(result).toMatchObject({ store: 'chrome', outcome: 'submitted', submitted: true, expectedVersion: '9.9.9', localArchiveSha256: 'a'.repeat(64), submittedRevision: { state: 'PENDING_REVIEW', versions: ['9.9.9'] } });
+    expect(new URLSearchParams(calls[0].body).get('grant_type')).toBe('refresh_token');
+    expect(new URLSearchParams(calls[0].body).has('scope')).toBe(false);
+    expect(calls.map((call) => call.url)).toEqual([
+      CHROME_TOKEN_URL, `${CHROME_ITEM_ROOT}/${identity.name}:fetchStatus`,
+      `${CHROME_UPLOAD_ROOT}/${identity.name}:upload`, `${CHROME_ITEM_ROOT}/${identity.name}:fetchStatus`,
+      `${CHROME_ITEM_ROOT}/${identity.name}:publish`, `${CHROME_ITEM_ROOT}/${identity.name}:fetchStatus`,
+    ]);
+    expect(mutations(calls)[0]).toMatchObject({ method: 'POST', body: Buffer.from('zip!'), headers: { 'Content-Type': 'application/zip', Authorization: 'Bearer token-abcdefgh' } });
+    expect(mutations(calls)[1]).toMatchObject({ method: 'POST', body: '{}' });
+    expect(calls.some((call) => call.url.includes('v1.1') || call.url.includes('publishTarget'))).toBe(false);
+  });
+
+  test('polls lastAsyncUploadState after an asynchronous upload, then verifies the submitted version', async () => {
+    const { calls, fetchImpl: inner } = setup();
+    let reads = 0;
+    let published = false;
+    const fetchImpl = async (url, init) => {
+      if (url.endsWith(':upload')) {
+        calls.push({ url, ...init });
+        return response(200, { ...identity, uploadState: 'IN_PROGRESS' });
+      }
+      if (url.endsWith(':publish')) published = true;
+      if (url.endsWith(':fetchStatus')) {
+        calls.push({ url, ...init });
+        reads += 1;
+        return response(200, published ? accepted() : status({ lastAsyncUploadState: reads === 2 ? 'IN_PROGRESS' : 'SUCCEEDED' }));
+      }
       return inner(url, init);
     };
-
-    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).resolves.toEqual({
-      store: 'chrome',
-      published: true,
-    });
-
-    expect(new URLSearchParams(calls[0].body).get('grant_type')).toBe('refresh_token');
-    expect(calls[1]).toMatchObject({ url: `${CHROME_UPLOAD_ROOT}/ITEM`, method: 'PUT' });
-    expect(calls[1].headers).toMatchObject({ Authorization: 'Bearer token-abcdefgh', 'x-goog-api-version': '2' });
-    expect(calls[2].url).toBe(`${CHROME_ITEM_ROOT}/ITEM/publish?publishTarget=default`);
-    expect(calls[2].headers).toMatchObject({ 'Content-Length': '0' });
+    expect(await submitToChrome(baseContext(fetchImpl, { credentials }))).toMatchObject({ outcome: 'submitted' });
+    expect(reads).toBe(5);
+    expect(mutations(calls)).toHaveLength(2);
   });
 
-  test('polls the item when the upload has not finished processing', async () => {
-    let itemReads = 0;
-    const fetchImpl = async (url) => {
-      if (url === CHROME_TOKEN_URL) return response(200, { access_token: 'token-abcdefgh' });
-      if (url.startsWith(CHROME_UPLOAD_ROOT)) return response(200, { uploadState: 'IN_PROGRESS' });
-      if (url.startsWith(CHROME_ITEM_ROOT) && url.includes('projection=DRAFT')) {
-        itemReads += 1;
-        return response(200, { uploadState: itemReads > 1 ? 'SUCCESS' : 'IN_PROGRESS' });
+  test.each(['PENDING_REVIEW', 'PUBLISHED', 'PUBLISHED_TO_TESTERS'])('does not upload an already observed target version (%s)', async (state) => {
+    const before = state === 'PENDING_REVIEW' ? status({ submittedItemRevisionStatus: revision('9.9.9', state) }) : status({ publishedItemRevisionStatus: revision('9.9.9', state) });
+    const { calls, fetchImpl } = setup({ before });
+    expect(await submitToChrome(baseContext(fetchImpl, { credentials }))).toMatchObject({ outcome: 'already-submitted-or-published', submitted: false });
+    expect(mutations(calls)).toHaveLength(0);
+  });
+
+  test.each(['FAILED', 'NOT_FOUND', 'IN_PROGRESS', undefined])('does not publish after failed or unfinished async upload (%s)', async (lastAsyncUploadState) => {
+    const current = status({ ...(lastAsyncUploadState ? { lastAsyncUploadState } : {}) });
+    const { calls, fetchImpl } = setup({ uploadBody: { ...identity, uploadState: 'IN_PROGRESS' }, afterUpload: current, final: current });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/upload was not confirmed/);
+    expect(mutations(calls)).toHaveLength(1);
+  });
+
+  test.each(['PENDING_REVIEW', 'STAGED'])('blocks an occupied review queue (%s) before uploading', async (state) => {
+    const { calls, fetchImpl } = setup({ before: status({ submittedItemRevisionStatus: revision('8.8.8', state) }) });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/existing/);
+    expect(mutations(calls)).toHaveLength(0);
+  });
+
+  test('keeps upload-only distinct from a verified submission', async () => {
+    const { calls, fetchImpl } = setup();
+    expect(await submitToChrome(baseContext(fetchImpl, { credentials, uploadOnly: true }))).toMatchObject({ outcome: 'uploaded', submitted: false, uploadVersionVerified: true });
+    expect(mutations(calls)).toHaveLength(1);
+  });
+
+  test('does not replace an upload already in progress', async () => {
+    const { calls, fetchImpl } = setup({ before: status({ lastAsyncUploadState: 'IN_PROGRESS' }) });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/upload in progress/);
+    expect(mutations(calls)).toHaveLength(0);
+  });
+
+  test.each(['10.0.0', '9.10.0', '9.9.9.1'])('refuses an older release when published version is %s', async (version) => {
+    const { calls, fetchImpl } = setup({ before: status({ publishedItemRevisionStatus: revision(version, 'PUBLISHED') }) });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/newer published version/);
+    expect(mutations(calls)).toHaveLength(0);
+  });
+
+  test('compares version components numerically rather than lexically', async () => {
+    const { fetchImpl } = setup({ before: status({ publishedItemRevisionStatus: revision('9.9.8.100', 'PUBLISHED') }) });
+    expect(await submitToChrome(baseContext(fetchImpl, { credentials }))).toMatchObject({ outcome: 'submitted' });
+  });
+
+  test('status-only requires no archive and makes only token exchange and status GET', async () => {
+    const { calls, fetchImpl } = setup({ before: accepted() });
+    const result = await submitToChrome(baseContext(fetchImpl, { credentials, statusOnly: true, archive: undefined }));
+    expect(result).toMatchObject({ outcome: 'status-only', submitted: false });
+    expect(result).not.toHaveProperty('localArchiveSha256');
+    expect(calls).toHaveLength(2);
+    expect(mutations(calls)).toHaveLength(0);
+  });
+
+  test.each([
+    { ...identity, name: 'publishers/OTHER/items/ITEM' },
+    { ...identity, itemId: 'OTHER' },
+  ])('refuses mismatched preflight identity', async (before) => {
+    const { calls, fetchImpl } = setup({ before });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/requested publisher and item/);
+    expect(mutations(calls)).toHaveLength(0);
+  });
+
+  test.each([
+    { ...identity, uploadState: 'SUCCEEDED', crxVersion: '8.8.8' },
+    { ...identity, uploadState: 'SUCCEEDED' },
+    { ...identity, name: 'publishers/OTHER/items/ITEM', uploadState: 'SUCCEEDED', crxVersion: '9.9.9' },
+    { ...identity, uploadState: 'FAILED' },
+    { ...identity, uploadState: 'SUCCESS', crxVersion: '9.9.9' },
+  ])('never publishes a wrong, missing or failed upload version/state', async (uploadBody) => {
+    const { calls, fetchImpl } = setup({ uploadBody });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/upload was not confirmed/);
+    expect(mutations(calls)).toHaveLength(1);
+  });
+
+  test('HTTP publish success cannot substitute for version-matching readback', async () => {
+    const { calls, fetchImpl } = setup({ final: status({ submittedItemRevisionStatus: revision('8.8.8') }) });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/publish was not confirmed/);
+    expect(mutations(calls)).toHaveLength(2);
+  });
+
+  test.each(['REJECTED', 'CANCELLED', 'STAGED'])('does not report final %s as a successful submission', async (state) => {
+    const { fetchImpl } = setup({ final: status({ submittedItemRevisionStatus: revision('9.9.9', state) }) });
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/publish was not confirmed/);
+  });
+
+  test('recovers a duplicate/error acknowledgement by readback without retrying the POST', async () => {
+    const { calls, fetchImpl } = setup({ publishStatus: 409, publishBody: { error: { message: 'already submitted' } } });
+    expect(await submitToChrome(baseContext(fetchImpl, { credentials }))).toMatchObject({ outcome: 'observed-after-error', submitted: false, submittedRevision: { versions: ['9.9.9'] } });
+    expect(mutations(calls)).toHaveLength(2);
+  });
+
+  test('reads status after an uncertain upload and never retries or publishes an unverified draft', async () => {
+    const { calls, fetchImpl: inner } = setup();
+    const fetchImpl = async (url, init) => {
+      if (url.endsWith(':upload')) {
+        calls.push({ url, ...init });
+        throw new Error('connection lost after request');
       }
-      return response(200, { status: ['OK'] });
+      return inner(url, init);
     };
-    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).resolves.toMatchObject({ published: true });
-    expect(itemReads).toBe(2);
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/--status-only before retrying/);
+    expect(mutations(calls)).toHaveLength(1);
+    expect(calls.filter((call) => call.url.endsWith(':fetchStatus'))).toHaveLength(2);
   });
 
-  test('reports an item still in review without calling it a failure', async () => {
-    const fetchImpl = tokenThenUpload({ uploadState: 'SUCCESS' }, { status: ['ITEM_PENDING_REVIEW'] });
-    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).resolves.toEqual({
-      store: 'chrome',
-      published: false,
-      pendingReview: true,
-    });
-  });
-
-  test('fails on a rejected publish', async () => {
-    const fetchImpl = tokenThenUpload({ uploadState: 'SUCCESS' }, { status: ['NOT_AUTHORIZED'], statusDetail: ['nope'] });
-    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/chrome publish failed: nope/);
-  });
-
-  // The access token is minted inside the run, so it is not in the caller's
-  // secret list and has to be redacted on its own.
-  test('keeps the minted access token out of failure messages', async () => {
-    const fetchImpl = async (url) => {
-      if (url === CHROME_TOKEN_URL) return response(200, { access_token: 'token-abcdefgh' });
-      return response(500, 'upstream rejected Bearer token-abcdefgh');
-    };
+  test('keeps minted access tokens out of failure messages', async () => {
+    const { fetchImpl } = setup({ uploadStatus: 500, uploadBody: 'upstream rejected Bearer token-abcdefgh' });
     await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/Bearer \*\*\*/);
   });
 
-  test('fails when the refresh token cannot be exchanged', async () => {
-    const fetchImpl = async () => response(400, '{"error":"invalid_grant"}');
-    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(
-      /chrome token exchange returned 400/,
-    );
+  test('fails token exchange without contacting item endpoints', async () => {
+    const fetchImpl = jest.fn(async () => response(400, { error: 'invalid_grant' }));
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials }))).rejects.toThrow(/chrome token exchange returned 400/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test('requires a valid publisher ID before any network request', async () => {
+    const fetchImpl = jest.fn();
+    await expect(submitToChrome(baseContext(fetchImpl, { credentials: { ...credentials, publisherId: '' } }))).rejects.toThrow(/publisherId/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
 describe('command line', () => {
+  test('status-only requires explicit Chrome and excludes mutation/diagnosis combinations', () => {
+    expect(parseArguments(['--store', 'chrome', '--status-only'])).toMatchObject({ store: 'chrome', statusOnly: true });
+    for (const flags of [[], ['--store', 'edge'], ['--store', 'chrome', '--upload-only'], ['--store', 'chrome', '--diagnose']]) {
+      expect(() => parseArguments([...flags, '--status-only'])).toThrow(/--status-only requires/);
+    }
+  });
+
+  test('the status-only CLI succeeds without an archive and cannot perform store mutations', () => {
+    const { execFileSync } = require('child_process');
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'network-plus-status-'));
+    const preload = path.join(directory, 'mock-fetch.cjs');
+    fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ version: '9.9.9' }));
+    fs.writeFileSync(preload, `global.fetch = async (url, init) => {
+      if (url === '${CHROME_TOKEN_URL}') return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'synthetic-access-token' }) };
+      if (url === '${CHROME_ITEM_ROOT}/publishers/PUBLISHER/items/ITEM:fetchStatus' && !init.method) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ name: 'publishers/PUBLISHER/items/ITEM', itemId: 'ITEM' }) };
+      }
+      throw new Error('unexpected mutation or URL');
+    };`);
+    try {
+      const output = execFileSync(process.execPath, ['--require', preload, path.join(ROOT, 'scripts/submit-to-stores.js'), '--store', 'chrome', '--status-only'], {
+        cwd: directory, encoding: 'utf8', env: {
+          CHROME_PUBLISHER_ID: 'PUBLISHER', CHROME_ITEM_ID: 'ITEM', CHROME_CLIENT_ID: 'synthetic-client',
+          CHROME_CLIENT_SECRET: 'synthetic-secret', CHROME_REFRESH_TOKEN: 'synthetic-refresh',
+        },
+      });
+      expect(output).toContain('"outcome":"status-only"');
+      expect(output).not.toContain('synthetic-access-token');
+      expect(output).not.toContain('localArchiveSha256');
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test('defaults to submitting the packaged release to both stores', () => {
     expect(parseArguments([])).toEqual({
       store: 'both',
       archive: '',
       notesFile: '',
       uploadOnly: false,
+      statusOnly: false,
       publishTarget: 'default',
       diagnose: false,
     });
@@ -372,13 +524,14 @@ describe('command line', () => {
 
   test('accepts the documented flags', () => {
     expect(parseArguments(['--store', 'chrome', '--archive', 'a.zip', '--notes-file', 'n.md', '--upload-only'])).toEqual(
-      { store: 'chrome', archive: 'a.zip', notesFile: 'n.md', uploadOnly: true, publishTarget: 'default', diagnose: false },
+      { store: 'chrome', archive: 'a.zip', notesFile: 'n.md', uploadOnly: true, statusOnly: false, publishTarget: 'default', diagnose: false },
     );
   });
 
   test('rejects an unknown store or publish target rather than guessing', () => {
     expect(() => parseArguments(['--store', 'firefox'])).toThrow(/--store must be edge, chrome, or both/);
     expect(() => parseArguments(['--publish-target', 'everyone'])).toThrow(/--publish-target must be/);
+    expect(() => parseArguments(['--publish-target', 'trustedTesters'])).toThrow(/preserves the existing store visibility/);
     expect(() => parseArguments(['--yolo'])).toThrow(/unknown argument --yolo/);
   });
 });
@@ -426,6 +579,17 @@ describe('store submission workflow', () => {
     ]) {
       expect(workflow).toContain(`${name}: \${{ secrets.${name} }}`);
     }
+  });
+
+  test('passes the non-secret publisher input through env and exposes a read-only status route', () => {
+    expect(workflow).toContain('CHROME_PUBLISHER_ID: ${{ inputs.chrome_publisher_id || vars.CHROME_PUBLISHER_ID }}');
+    expect(workflow).toContain("STATUS_ONLY: ${{ inputs.status_only && '--status-only' || '' }}");
+    expect(workflow).toContain('$UPLOAD_ONLY $STATUS_ONLY $DIAGNOSE');
+    expect(workflow).toContain("if: ${{ !inputs.status_only && !inputs.diagnose }}");
+    expect(workflow).toContain('run-name: Store');
+    expect(workflow).toContain('ref: ${{ github.event.release.tag_name || github.ref }}');
+    expect(workflow.indexOf('ref: ${{ github.event.release.tag_name || github.ref }}')).toBeLessThan(workflow.indexOf('npm ci'));
+    expect(workflow).not.toContain('git checkout --detach');
   });
 
   test('rebuilds and verifies the package before it can be uploaded', () => {
@@ -498,9 +662,9 @@ describe('guided secret setup', () => {
 
   // The wizard and the workflow must agree on every name, or setup completes
   // and the submission still reports missing credentials.
-  test('collects exactly the secrets the submission script requires', () => {
+  test('collects submission secrets while the non-secret publisher ID uses an input or variable', () => {
     const collected = [...STEPS.edge, ...STEPS.chrome].map((step) => step.secret);
-    const required = plan({}, 'both').flatMap((entry) => entry.missing);
+    const required = plan({}, 'both').flatMap((entry) => entry.missing).filter((name) => name !== 'CHROME_PUBLISHER_ID');
     expect(collected.sort()).toEqual(required.sort());
   });
 
