@@ -12,7 +12,7 @@ const ASSET_DIRECTORY = 'docs/store-assets';
 // Keep the dates separate so a privacy-text change does not imply the PNG
 // inventory was re-reviewed on the same day.
 const ASSET_REVIEW_DATE = '2026-10-12';
-const PRIVACY_REVIEW_DATE = '2026-08-22';
+const PRIVACY_REVIEW_DATE = '2026-11-16';
 const MIN_DESCRIPTION_CHARACTERS = 250;
 const MAX_DESCRIPTION_CHARACTERS = 10000;
 const MAX_SEARCH_TERMS = 7;
@@ -110,10 +110,13 @@ const REQUIRED_PRIVACY_TEXT = Object.freeze([
   'one-time confirmation for that action',
   EXPECTED_SUPPORT_URL,
 ]);
-// ko-fi.com is reachable only through the optional Support dialog and the README
-// support section. Network+ sends it no data; widening this set is a deliberate,
-// reviewed decision rather than an incidental link.
-const ALLOWED_URL_HOSTS = new Set(['developer.chrome.com', 'github.com', 'learn.microsoft.com', 'ko-fi.com']);
+// Only the developer's Gumroad host is allowlisted for the optional Coffee link.
+const ALLOWED_URL_HOSTS = new Set([
+  'developer.chrome.com',
+  'github.com',
+  'learn.microsoft.com',
+  'himiyosh.gumroad.com',
+]);
 const PLACEHOLDER_PATTERN =
   /\b(?:TODO|TBD|FIXME|CHANGEME|PLACEHOLDER)\b|(?:insert|replace)\s+(?:text|url|value)\s+here/i;
 const PROHIBITED_CLAIMS = Object.freeze([

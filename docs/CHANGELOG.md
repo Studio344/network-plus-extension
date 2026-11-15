@@ -4,6 +4,8 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🐛 **DevTools redraw** — resume capture repainting when a minimized window becomes visible, even if its queued animation frame is delayed.
+- 🔧 **Optional support** — link to Gumroad Coffee for one-time contributions.
 - 🔒 **Safer sharing and replay** — fix URL and header redaction, quote PowerShell literals safely, and isolate same-origin resend from page scripts.
 - 🐛 **Pop-out pending requests** — keep response-waiting rows timely when the DevTools host is minimized.
 - 🐛 **Stream capture** — keep resolved URLs, terminal SSE states, named events, and actual WebSocket frame types.

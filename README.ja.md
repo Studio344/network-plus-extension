@@ -367,7 +367,7 @@ Network+ は個人開発の MIT ライセンスプロジェクトで、テレメ
 | 場所 | リンク | 備考 |
 |---|---|---|
 | GitHub Sponsors | [github.com/sponsors/himiyosh](https://github.com/sponsors/himiyosh) | 単発または毎月 · プラットフォーム手数料なし |
-| Ko-fi | [ko-fi.com/studio344](https://ko-fi.com/studio344) | 単発 · アカウント不要 |
+| Gumroad Coffee | [himiyosh.gumroad.com/coffee](https://himiyosh.gumroad.com/coffee) | 単発の支援 |
 
 同じリンクはパネル内の Network+ ブランドボタン — ドット絵カワウソと湯気の立つカップのツールバーマーク — の先にあるサポートダイアログにもあります。Network+ がこれらのサイトにキャプチャしたトラフィックや利用データを送ることはなく、あなたが訪問・支援したかどうかを知ることもできません。
 
