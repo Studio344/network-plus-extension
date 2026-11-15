@@ -101,6 +101,38 @@ describe('incremental HAR reader', () => {
     expect(closed).toBe(true);
   });
 
+  test('skips an oversized embedded response without losing its row or following entries', async () => {
+    async function* oversized() {
+      yield encoder.encode('{"log":{"entries":[{"request":{"url":"https://large.test/kept"},"response":{"content":{"\\u0074ext":"');
+      const block = encoder.encode('A'.repeat(1024 * 1024));
+      for (let index = 0; index < 9; index += 1) yield block;
+      yield encoder.encode('","size":9437184}}},{"request":{},"response":{"content":{"text":"small"}}}]}}');
+    }
+    const rows = [];
+    await expect(np.readHarEntries(oversized(), (entry, metadataChars) => rows.push({ entry, metadataChars })))
+      .resolves.toBe(2);
+    expect(rows[0].entry.request.url).toBe('https://large.test/kept');
+    expect(rows[0].entry.response.content).toMatchObject({ size: 9437184, _networkPlus: { status: 'omitted' } });
+    expect(rows[0].entry.response.content).not.toHaveProperty('text');
+    expect(rows[0].metadataChars).toBeLessThan(300);
+    expect(rows[1].entry.response.content.text).toBe('small');
+  });
+
+  test('rejects excessive nesting in ignored metadata and oversized structural entries', async () => {
+    const nested = '{"ignored":' + '['.repeat(256) + ']'.repeat(256) + ',"log":{"entries":[]}}';
+    await expect(np.readHarEntries(chunks(nested), () => {})).rejects.toThrow('nested too deeply');
+    async function* oversized() {
+      yield encoder.encode('{"log":{"entries":[{"request":{"url":"');
+      const block = encoder.encode('A'.repeat(1024 * 1024));
+      for (let index = 0; index < 17; index += 1) yield block;
+      yield encoder.encode('"},"response":{}}]}}');
+    }
+    await expect(np.readHarEntries(oversized(), () => {})).rejects.toThrow('per-entry parsing budget');
+    const manyNodes = '{"log":{"entries":[{"request":{"headers":[' + '{},'.repeat(66000) +
+      '{}]},"response":{}}]}}';
+    await expect(np.readHarEntries(chunks(manyNodes, 65536), () => {})).rejects.toThrow('too many JSON values');
+  });
+
   test('reads more than the V8 string limit as 4096 meaningful entries without collecting the document', async () => {
     const body = '0123456789abcdef'.repeat(8274);
     let bytesRead = 0;
@@ -4648,6 +4680,51 @@ describe('outbound sensitive-data policy', () => {
     expect(new URL(np.sanitizeUrl('https://example.com/#value%GG').value).hash).toContain(np.REDACTION_MARKER);
   });
 
+  test('masks mixed form URL fragments and header aliases across sharing outputs', () => {
+    const url = 'https://example.test/#access_token=fixture-secret&next=https://example.test/callback?view=1';
+    const requestHeaders = [
+      { name: 'Content_Type', value: 'header-secret' },
+      { name: 'XOriginalURL', value: '/header-secret?code=1' },
+      { name: 'CoNtEnT-TyPe', value: 'application/json' },
+    ];
+    const row = { method: 'GET', url, requestHeaders };
+    const har = np.sanitizeHar({ log: { entries: [{ request: { url, headers: requestHeaders } }] } });
+    const outputs = [
+      np.buildClipboardPayload('url', row).text,
+      np.buildClipboardPayload('powershell', row).text,
+      np.buildCsvPayload([row]).text,
+      JSON.stringify(har),
+    ];
+    for (const output of outputs) expect(output).not.toMatch(/fixture-secret|header-secret/);
+    expect(har.log.entries[0].request.headers.map(({ value }) => value))
+      .toEqual([np.REDACTION_MARKER, np.REDACTION_MARKER, 'application/json']);
+    expect(np.sanitizeUrl('data:text/plain,private-payload').value).toBe(np.OMISSION_MARKER);
+    expect(np.sanitizeUrl('mailto:private@example.test').value).toBe(np.OMISSION_MARKER);
+    for (const fragment of [
+      'bare-secret?mode=compact',
+      'access_token=1&bare-secret',
+      '/route?access_token=1&bare-secret',
+      'access_token%3Dbare-secret&state=known',
+      '/access_token%253Dbare-secret?state=known',
+    ]) {
+      expect(np.sanitizeUrl('https://example.test/#' + fragment).value).not.toContain('bare-secret');
+    }
+  });
+
+  test('quotes every PowerShell single-quote delimiter as literal data', () => {
+    const quoteCharacters = "'‘’‚‛";
+    const escaped = "''‘‘’’‚‚‛‛";
+    const output = np.generatePowerShell({
+      method: 'POST',
+      url: 'https://example.test/' + quoteCharacters,
+      requestHeaders: [{ name: 'name' + quoteCharacters, value: 'value' + quoteCharacters }],
+      requestPostData: { text: 'body' + quoteCharacters },
+    });
+    for (const value of ['https://example.test/', 'name', 'value', 'body']) {
+      expect(output).toContain("'" + value + escaped + "'");
+    }
+  });
+
   test('redacts nested secret and PII body fields defensively', () => {
     const body = {
       profile: {
@@ -5718,6 +5795,26 @@ describe('uiText and display-time reason localization', () => {
     );
   });
 
+  test('known disconnected response errors localize without changing canonical rows or exports', () => {
+    const cause = 'The DevTools session is disconnected, so response content cannot be retrieved.';
+    const reason = 'Failed to retrieve response content for request 5: ' + cause;
+    const row = { type: 'text/plain', size: 20, responseContentState: 'error', responseContentReason: reason };
+    const canonicalContent = np.buildHarResponseContent(row);
+    np.applyLanguage('ja');
+    expect(np.localizeBodyReason(reason)).toBe(
+      'リクエスト 5 のレスポンス内容を取得できませんでした：DevTools セッションの接続が切れているため、レスポンス内容を取得できません。',
+    );
+    expect(np.localizeBodyReason(cause)).toBe(
+      'DevTools セッションの接続が切れているため、レスポンス内容を取得できません。',
+    );
+    expect(row.responseContentReason).toBe(reason);
+    expect(np.buildHarResponseContent(row)).toEqual(canonicalContent);
+    const unknown = 'Failed to retrieve response content for request 5: unknown browser detail';
+    expect(np.localizeBodyReason(unknown)).toBe(unknown);
+    np.applyLanguage('en');
+    expect(np.localizeBodyReason(reason)).toBe(reason);
+  });
+
   test('localizeBodyReason is the identity in English', () => {
     np.applyLanguage('en');
     expect(np.localizeBodyReason(np.BODY_RETRIEVAL_FAILED_REASON)).toBe(
@@ -6408,6 +6505,7 @@ describe('details reopen status', () => {
       { key: 'bodyPaneFrame', slot: 'label', values: BODY_STATE_KEYS, others: { reason: np.uiText('reasonBodyEvicted') } },
       { key: 'bodyPaneFrame', slot: 'reason', values: BODY_REASON_KEYS, others: { label: np.uiText('bodyStateEvicted') } },
       { key: 'statusImportFailed', slot: 'reason', values: ['importReasonHarEntriesMissing', 'importReasonSessionTimeout'] },
+      { key: 'reasonResponseRetrievalFailed', slot: 'reason', values: ['importReasonSessionDisconnected', 'importReasonSessionDisconnectedBeforeResponse'], others: { id: 5 } },
       { key: 'importRetentionSummary', slot: 'action', values: ['importRetentionBodyOmitted'] },
     ];
     for (const frame of COMPOSED_JAPANESE_FRAMES) {
@@ -6472,7 +6570,7 @@ describe('WebSocket frame HAR export', () => {
     np.ingestWsEvents(
       [
         { socketId: 1, kind: 'ws-sent', at: 2000, preview: 'hello' },
-        { socketId: 1, kind: 'ws-received', at: 3000, preview: '[binary 12 bytes]' },
+        { socketId: 1, kind: 'ws-received', at: 3000, preview: '[binary 12 bytes]', binary: true },
       ],
       wsContext(wsRow),
     );
@@ -8012,12 +8110,28 @@ describe('websocket capture pieces', () => {
   test('the wrapper source is self-contained and carries its bounds', () => {
     const source = np.buildWsWrapperSource();
     expect(source.startsWith('(function pageWebSocketWrapper(')).toBe(true);
-    expect(source.endsWith(')(' + np.WS_QUEUE_CAP + ',' + np.WS_FRAME_PREVIEW_CHARS + ')')).toBe(true);
+    expect(source).toContain(')(' + np.WS_QUEUE_CAP + ',' + np.WS_FRAME_PREVIEW_CHARS + ',');
     expect(source).toContain('window.__networkPlusWS__');
     expect(source).toContain("kind: 'ws-open-attempt'");
     // Self-contained: nothing from panel scope may leak into the page code.
     expect(source).not.toContain('state.');
     expect(source).not.toContain('chrome.');
+  });
+
+  test('projects only bounded stream fields before returning data through DevTools', () => {
+    const vm = require('node:vm');
+    const source = np.buildStreamDrainSource('__networkPlusWS__');
+    const oversized = 'x'.repeat(3 * 1024 * 1024);
+    const window = { __networkPlusWS__: { drain: () => [
+      { kind: 'ws-received', at: 1000, socketId: 2, preview: 'safe', unexpected: oversized },
+      { kind: 'ws-received', at: 2000, socketId: 2, preview: oversized },
+    ] } };
+    const result = vm.runInNewContext(source, { window });
+    expect(result.length).toBeLessThan(200);
+    expect(JSON.parse(result)).toEqual([
+      { kind: 'ws-received', at: 1000, socketId: 2, preview: 'safe' },
+      { kind: 'ws-received', at: 2000, socketId: 2 },
+    ]);
   });
 
   test('records a WebSocket send only after the native call returns', () => {
@@ -8030,7 +8144,8 @@ describe('websocket capture pieces', () => {
       return nativeResult;
     });
     class SyntheticWebSocket {
-      constructor() {
+      constructor(url) {
+        this.url = url;
         this.send = send;
       }
       addEventListener() {}
@@ -8269,35 +8384,50 @@ describe('edit-and-resend helpers', () => {
     }
   });
 
-  test('buildResendEvalSource produces a self-contained page IIFE with managed headers filtered', () => {
-    const source = np.buildResendEvalSource({
-      method: 'POST',
-      url: 'https://api.example.test/echo?q="quote"',
-      headers: [
-        { name: 'Content-Type', value: 'application/json' },
-        { name: 'Host', value: 'unsettable.test' },
-        { name: 'Sec-Fetch-Site', value: 'none' },
-      ],
-      body: '{"a":"b"}',
-      credentials: true,
-    });
-    expect(source.startsWith('(function pageResendRunner(')).toBe(true);
-    expect(source.endsWith(')')).toBe(true);
-    expect(source).toContain('fetch(spec.url');
-    expect(source).toContain('"credentials":true');
-    expect(source).toContain('Content-Type');
-    expect(source).not.toContain('unsettable.test');
-    expect(source).not.toContain('Sec-Fetch-Site');
-    expect(source).toContain('\\"quote\\"');
-    expect(source).toContain('\\"a\\"');
+  test('requests only the exact scheme, host, and effective port under review', async () => {
+    const permissions = { request: jest.fn().mockResolvedValue(true) };
+    await expect(np.requestResendPermission(permissions, np.parseResendUrl('https://x.test/items'))).resolves.toBe(true);
+    await np.requestResendPermission(permissions, np.parseResendUrl('http://127.0.0.1:1234/path?secret=fixture'));
+    expect(permissions.request.mock.calls).toEqual([
+      [{ permissions: ['scripting'], origins: ['https://x.test:443/*'] }],
+      [{ permissions: ['scripting'], origins: ['http://127.0.0.1:1234/*'] }],
+    ]);
+    expect(np.parseResendUrl('https://user:pass@x.test/')).toBeNull();
+    expect(np.parseResendUrl('https://')).toBeNull();
   });
 
-  test('the page runner skips the body for GET and HEAD', () => {
-    const source = np.buildResendEvalSource({ method: 'GET', url: 'https://x.test/', headers: [], body: 'ignored' });
-    expect(source).toContain("spec.method !== 'GET' && spec.method !== 'HEAD'");
-    expect(source).toContain('"credentials":true');
-    const sameOrigin = np.buildResendEvalSource({ method: 'GET', url: 'https://x.test/', headers: [], credentials: false });
-    expect(sameOrigin).toContain('"credentials":false');
+  test('passes replay data only to the approved isolated document and filters browser-managed headers', async () => {
+    const spec = np.buildResendSpecFromRow(httpRow);
+    spec.headers.push({ name: 'Host', value: 'other.test' }, { name: 'Cookie', value: 'browser-owned' });
+    const scripting = {
+      executeScript: jest.fn()
+        .mockResolvedValueOnce([{ documentId: 'verified', result: true }])
+        .mockResolvedValueOnce([{ documentId: 'verified', result: { status: 403 } }]),
+    };
+
+    await expect(np.runInspectedResend(scripting, 42, spec, () => true)).resolves.toBe(403);
+    const [probe, send] = scripting.executeScript.mock.calls.map(([argument]) => argument);
+    expect(probe.target).toEqual({ tabId: 42, frameIds: [0] });
+    expect(probe.world).toBe('ISOLATED');
+    expect(probe.args).toEqual(['https://api.example.test', expect.any(String)]);
+    expect(send.target).toEqual({ tabId: 42, documentIds: ['verified'] });
+    expect(send.world).toBe('ISOLATED');
+    expect(send.args).toEqual([
+      { ...spec, headers: [['Content-Type', 'application/json'], ['Authorization', 'Bearer abc']], credentials: true },
+      probe.args[0],
+      probe.args[1],
+    ]);
+  });
+
+  test.each([
+    [{ documentId: 'verified', result: false }, true, 'resendErrSiteMismatch'],
+    [{ documentId: 'verified', result: true }, false, 'resendErrDocumentChanged'],
+    [{ result: true }, true, 'resendErrUnavailable'],
+  ])('rejects an unsafe or cancelled probe without injecting the request', async (probe, current, reason) => {
+    const scripting = { executeScript: jest.fn().mockResolvedValue([probe]) };
+    await expect(np.runInspectedResend(scripting, 42, np.buildResendSpecFromRow(httpRow), () => current))
+      .rejects.toThrow(reason);
+    expect(scripting.executeScript).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -8730,7 +8860,7 @@ describe('sse capture pieces', () => {
   test('buildSseWrapperSource is a self-contained page IIFE with the shared caps', () => {
     const source = np.buildSseWrapperSource();
     expect(source.startsWith('(function pageEventSourceWrapper(')).toBe(true);
-    expect(source.endsWith(')(' + np.WS_QUEUE_CAP + ',' + np.WS_FRAME_PREVIEW_CHARS + ')')).toBe(true);
+    expect(source).toContain(')(' + np.WS_QUEUE_CAP + ',' + np.WS_FRAME_PREVIEW_CHARS + ',');
     expect(source).toContain('window.__networkPlusSSE__');
     expect(source).toContain("kind: 'ws-open-attempt'");
     expect(source).toContain("kind: 'ws-received'");
@@ -8738,6 +8868,28 @@ describe('sse capture pieces', () => {
     // Observation only: the wrapped addEventListener always forwards to the native one.
     expect(source).toContain('return nativeAdd(type, listener, options);');
     expect(source).toContain('source.close = function () {');
+  });
+
+  test('keeps placeholder-like WebSocket text and rejects oversized or invalid incoming events', () => {
+    const row = { method: 'WS' };
+    const createRow = jest.fn();
+    np.ingestWsEvents([
+      { kind: 'ws-open-attempt', socketId: 2, at: 1e20, url: 'wss://example.test/events' },
+      { kind: 'ws-received', socketId: 1, at: 1000, preview: 'x'.repeat(100000), binary: false },
+      { kind: 'ws-received', socketId: 1, at: 2000, preview: '[binary 42 bytes]', binary: false },
+    ], { variant: 'ws', createRow, getRow: () => row });
+    expect(createRow).not.toHaveBeenCalled();
+    expect(row._wsFrames).toEqual([
+      { type: 'receive', time: 2000, binary: false, data: '[binary 42 bytes]' },
+    ]);
+  });
+
+  test('bounds JWT matching and treats dates outside the JavaScript range as unavailable', () => {
+    const adversarialHeader = 'eyJ123456-'.repeat(4000) + '.aa';
+    expect(np.findJwtsInHeaders([{ name: 'X-Debug', value: adversarialHeader }])).toEqual([]);
+    expect(np.splitJwtRuns(adversarialHeader)).toEqual([{ jwt: false, text: adversarialHeader }]);
+    expect(np.describeJwtEpochClaim('exp', 1e20, 0)).toBeNull();
+    expect(np.getJwtExpiryState({ exp: 1e20 }, 0)).toEqual({ expired: false, label: '' });
   });
 
   test('formatWsFrameLine renders an SSE close without a close code', () => {
