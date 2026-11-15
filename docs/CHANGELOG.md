@@ -2,6 +2,10 @@
 
 All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/himiyosh/network-plus-extension/releases).
 
+## Unreleased
+
+- No changes have been recorded since v1.17.0.
+
 ## v1.17.0 - 2026-11-15
 
 - 🐛 **Live capture display** — refresh visible request rows, pending responses, and search results when the browser delays a render frame.
