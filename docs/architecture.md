@@ -11,8 +11,8 @@ Microsoft Edge DevTools
         ├── panel.js       all logic (single IIFE, 17 numbered sections)
         ├── panel.css      System / Dark / Light themes via CSS custom properties
         └── vendor/fflate.js  vendored zip codec for SAZ import and packaging (sha256-pinned)
-background.js              toolbar action opens panel.html?view=offline; also
-                           minimizes undocked DevTools when its mirror opens
+launcher.{html,js,css}     icon popup and live recording setup
+background.js              handles undocked window minimization
 ```
 
 - **DevTools panel extension.** Requests are captured through `chrome.devtools.network.onRequestFinished` (the `chrome.*` namespace of the Edge extension API).
@@ -51,7 +51,7 @@ While recording with the DevTools panel visible or a compatible pop-out connecte
 - Live WebSocket and SSE rows carry a revision. The host publishes each changed row once per drain, and the viewer reconciles newer revisions in place, including from a reconnect snapshot. A changed revision invalidates the viewer's cached response transcript.
 - The viewer's toolbar is a remote control: a document-level capture listener turns its buttons into commands (pause, clear, undo, retention, stream toggle, resend), import files travel as bounded base64 chunks (each chunk is decoded separately, and the final byte count must match the declared size), and the host executes every command through its own controls so guards and undo snapshots behave like local clicks. Commands time out (30 s; import results 120 s) rather than hanging.
 - A mirror tab that outlives its DevTools session is adopted back: the reopened host briefly probes the port at startup and a surviving tab resyncs instead of stranding; clicking 🪟 while adopted points at the existing tab. Theme and language changes propagate live between both pages via `chrome.storage.onChanged`.
-- The background worker opens the fixed local `panel.html?view=offline` URL through `chrome.tabs.create` when the toolbar action is clicked, including from New Tab. This requires no additional permission and does not read or replace the current tab. The explicit offline view offers saved HAR/SAZ inspection and hides capture controls.
+- The toolbar opens the bundled launcher. The saved-file action opens the offline workspace. The live guide describes how to open Network+ in DevTools and then navigate to the site to record in the same tab.
 - The same worker asks `chrome.windows` (permissionless) to minimize an undocked DevTools window when the pop-out opens; a docked session stays put and the viewer explains the one-time undock in a dialog.
 
 ## Settings and language

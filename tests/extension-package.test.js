@@ -315,15 +315,16 @@ describe('extension source integrity', () => {
     undefined,
     {},
     { default_title: 'Another action' },
-    { default_title: 'Open Network+ (offline)', default_popup: 'panel.html' },
-    { default_title: 'Open Network+ (offline)', default_icon: 'https://example.test/icon.png' },
+    { default_title: 'Open Network+', default_popup: 'panel.html' },
+    { default_title: 'Open Network+', default_popup: 'https://example.test/launcher.html' },
+    { default_title: 'Open Network+', default_popup: 'launcher.html', default_icon: 'https://example.test/icon.png' },
   ])('rejects unaudited toolbar action declarations: %p', (action) => {
     const root = createFixture();
     const manifest = readManifest(root);
     manifest.action = action;
     writeManifest(root, manifest);
     expect(validateExtension(root)).toContain(
-      'manifest action must be exactly: { "default_title": "Open Network+ (offline)" }',
+      'manifest action must be exactly: {"default_title":"Open Network+","default_popup":"launcher.html"}',
     );
   });
 
@@ -411,8 +412,13 @@ describe('extension source integrity', () => {
       "\n@import './theme.css';\n.remote{background:url(https://example.com/image.png)}\n.protocol{background:url(//example.com/image.png)}\n",
     );
 
+    fs.appendFileSync(path.join(root, 'launcher.html'), '<script src="https://example.com/launcher.js"></script>');
+    fs.appendFileSync(path.join(root, 'launcher.css'), '.invalid{background:url(unbundled.png)}');
+
     expect(validateExtension(root)).toEqual(
       expect.arrayContaining([
+        'launcher.html script must be local: https://example.com/launcher.js',
+        'static resource is not in the archive allowlist: unbundled.png',
         'panel.html iframe src must be local: //example.com/frame',
         'panel.html object data must be local: data:text/plain,unsafe',
         'static resource is not in the archive allowlist: README.md',
