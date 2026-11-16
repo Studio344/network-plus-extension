@@ -3713,11 +3713,10 @@ describe('devtools-session mirror contracts', () => {
     expect(backgroundJs).toContain('devtoolsWindows.find((candidate) => candidate.focused === true)');
     expect(backgroundJs).toContain("(devtoolsWindows.length === 1 ? devtoolsWindows[0] : null)");
     expect(backgroundJs).toContain("chrome.windows.update(target.id, { state: 'minimized' }");
-    // Opening the fixed offline workspace is the worker's only Tabs API use;
-    // tab inspection, navigation, and capture still require a separate review.
-    expect(backgroundJs).not.toMatch(/chrome\.tabs\.(?!create\b)/);
+    expect(backgroundJs).not.toMatch(/chrome\.tabs\./);
     const manifestJson = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
     expect(manifestJson.background).toEqual({ service_worker: 'background.js' });
+    expect(manifestJson.action).toEqual({ default_title: 'Open Network+', default_popup: 'launcher.html' });
     expect(manifestJson.permissions).toEqual(['storage']);
     // The viewer never runs automatic body prefetch: bodies cross the port
     // only when a row asks, and a closed DevTools session must not turn the

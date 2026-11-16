@@ -7081,8 +7081,8 @@ const _NetworkPlus = (function () {
       ja: '保存済みキャプチャを調べます。',
     },
     statusOfflineReady: {
-      en: 'Import HAR or SAZ to inspect saved requests. For live capture, open Network+ in DevTools on the page you want to inspect.',
-      ja: 'HAR または SAZ をインポートして保存済みリクエストを調べられます。ライブキャプチャには、調べたいページで DevTools の Network+ を開いてください。',
+      en: 'Import HAR or SAZ to inspect saved requests.',
+      ja: 'HAR または SAZ をインポートして保存済みリクエストを調べられます。',
     },
     offlineViewScope: {
       en: 'Offline · no live capture',

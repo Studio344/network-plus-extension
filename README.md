@@ -70,9 +70,9 @@ Open the listing for your browser, add the extension, then open DevTools (<kbd>F
 
 The DevTools panel and its pop-out can show a request as **Pending** while it waits for a response, then update the same row when it finishes. Requests that finish between checks can appear directly as completed.
 
-### Open saved captures from a New Tab
+### Open Network+ from the browser icon
 
-Click **Network+** in the browser’s Extensions menu (or pin it to the toolbar) from any page, including **New Tab**. It opens an offline workspace in a separate tab for importing HAR/SAZ, filtering, inspecting, comparing, and exporting saved requests. The offline label remains visible and recording controls are hidden. For live capture, open DevTools → **Network+** on the page you want to inspect. Your New Tab page stays unchanged.
+Click **Network+** in the browser’s Extensions menu or on the toolbar. Choose **Open HAR or SAZ** to inspect a saved capture. For a live recording, choose **Start live recording**, open DevTools → **Network+** in the setup tab, and use a bookmark or the address bar to open the site in the same tab.
 
 ### Install from the release ZIP
 
@@ -328,7 +328,7 @@ Repository conventions, the panel's section layout, XSS rules, and the review to
 - The panel renders user-controlled values with `textContent` or DOM APIs. HTML response previews first parse into a detached template, then remove resource hints and nested documents before rendering in a sandbox with network access blocked.
 - The Content Security Policy is declared explicitly in [manifest.json](manifest.json): `script-src 'self'; object-src 'self'`.
 - The required permission is `storage`, used for UI preferences. Resend requests optional `scripting` and site access for the specific HTTP or HTTPS destination. Capture, import, and export work without that grant.
-- The manifest is limited to audited top-level keys and one fixed toolbar action. Its sole permitted background worker, `background.js`, opens the local offline workspace and minimizes undocked DevTools on pop-out without extra permissions; The validator rejects New Tab overrides, required host permissions, declared content scripts, and other workers.
+- The audited toolbar action opens the bundled launcher. The background worker minimizes undocked DevTools on pop-out. The package validator rejects New Tab overrides, required host permissions, declared content scripts, and other workers.
 - `npm run extension:check` verifies exact permission parity and real usage, runtime path symlink and root boundaries, resource locality, the inline-script ban, the CSP, and the distribution allowlist.
 
 ## 🚧 Limitations

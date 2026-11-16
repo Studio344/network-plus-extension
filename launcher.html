@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Network+ for DevTools</title>
+  <link rel="stylesheet" href="launcher.css">
+  <script src="launcher.js" defer></script>
+</head>
+<body>
+  <main class="launcher">
+    <header class="launcher-brand">
+      <img src="icons/icon48.png" width="32" height="32" alt="">
+      <h1>Network<span>+</span></h1>
+    </header>
+    <div id="launcher-actions" class="launcher-actions">
+      <button id="open-saved" type="button" data-copy="saved">Open HAR or SAZ</button>
+      <button id="open-live" type="button" data-copy="live">Start live recording</button>
+    </div>
+    <section id="live-setup" aria-labelledby="setup-title" hidden>
+      <h2 id="setup-title" data-copy="setupTitle">Set up live recording</h2>
+      <ol class="launcher-instructions">
+        <li data-copy="stepDevTools">Open DevTools in this tab and select Network+.</li>
+        <li data-copy="stepNavigate">Use a bookmark or the address bar to open the site you want to record in this same tab.</li>
+      </ol>
+    </section>
+    <p id="launcher-status" role="status" aria-live="polite" aria-atomic="true"></p>
+  </main>
+</body>
+</html>
