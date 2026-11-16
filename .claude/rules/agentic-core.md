@@ -18,7 +18,7 @@ description: "Concise organization-neutral rules for safe, verifiable agentic en
 2. State the observable outcome and pair each planned step with a check that can prove it. Resolve assumptions from evidence; escalate material choices instead of silently deciding for the user.
 3. Implement the smallest coherent change that meets the outcome, preserving existing contracts.
 4. Run focused checks for affected behavior and relevant failure paths. Expand validation when focused evidence is insufficient.
-5. Read back externally written state, record recovery context, and give a visible summary of change, evidence, remaining risk, and next owner/action.
+5. Read back external changes and save deliverables and recovery context. Close and verify finished task-owned windows, tabs, consoles, and background processes before reporting completion. See engineering §3.5 for ownership and cleanup. Summarize the change, evidence, remaining risk, and next owner/action.
 
 Do not claim completion from file existence, non-empty output, or agent confidence alone.
 Do not open a work view by writing a file alone, and do not end a turn silently or with progress claims that no validation supports.

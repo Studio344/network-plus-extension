@@ -7,17 +7,21 @@
 `agentic-core.instructions.md` は相対 symlink で同じ実体を参照する。
 `AGENTS.md -> CLAUDE.md` を維持し、既存のプロジェクト指示・リリース制約を優先する。
 
-固定元は [agentic-rules](https://github.com/himiyosh/agentic-rules/tree/a0248b7a876de1ddaa21fea5569b08ed7d94fe0f)
-（bundle 0.10.0、PR #31 draft）。正式リリースの導入とは扱わない。
-`.agentic-rules.lock.json` は manifest のSHA-256、固定 commit、取り込んだ18 assetの
-**実際の保存先とバイト列**を記録する。元manifestの41件のchecksumを照合してから手動統合した。
-公式installerで未変更のprofileを導入した状態とは異なる。
+基礎の固定版は bundle 0.10.0 の PR #31 draft。元 manifest の41件のチェックサムを照合し、18件の
+asset を手動統合した。`.agentic-rules.lock.json` の commit と manifest SHA-256 はこの基礎版を識別し、
+各 asset の SHA-256 は実際の保存先のバイト列を記録する。
+[基礎の固定版](https://github.com/himiyosh/agentic-rules/tree/a0248b7a876de1ddaa21fea5569b08ed7d94fe0f)
+
+片付けルールは、agentic-rules のマージコミット `f9c2a817bdaeffc80bab6bb0a90e0b2ba09a5168` を
+基礎版に追加で適用した。常時適用 core の全体と、engineering の §3.5 が同コミットの内容に一致する。
+lock の該当2件は適用後のバイト列を示し、残り16件は基礎版と一致する。
+[片付けルールの適用元](https://github.com/himiyosh/agentic-rules/commit/f9c2a817bdaeffc80bab6bb0a90e0b2ba09a5168)
 
 配布版からの意図した差分:
 
 - `AGENTS.template.md` で上書きせず、既存CLAUDE.mdへ参照と手順を追加した。
 - `improvement_orchestrator.toml` は置かない。主セッションだけが統括し、同時子担当は最大3。
-- 共有knowledgeの保存先を既存の `.claude` に統一した。内容は固定元と同一。
+- 共有 knowledge の保存先を既存の `.claude` に統一した。片付けルールを適用した2件の出典は前段に記録する。
 - Codexの9役TOML、hooks.json、Pythonハンドラーは固定元と同一。
 - Claudeの9役Markdownは同名のCodex TOML内 `developer_instructions` を読む薄いadapter。
   Claudeの名前はハイフン、Codexはアンダースコア。同じ役割契約を複製しない。
@@ -57,7 +61,7 @@ Claudeの通常のプロジェクト信頼画面と `/hooks` / `/agents` で確�
 bounded retry後にStopが停止を許しても、品質合格を意味しない。
 
 更新時は新しい固定manifestを別の作業領域で検証し、lockとの差分を確認する。
-既存リンク、プロジェクト指示、Claude設定を保ち、役割adapterの参照先を揃える。
+片付けルールの取り込み状況も比較し、既存リンク、プロジェクト指示、Claude設定、役割adapterの参照先を揃える。
 共通機能の不足は上流への候補として整理し、Network+へ検証ロジックを複製しない。
 
 仕様参照: [Codex hooks](https://learn.chatgpt.com/docs/hooks)、

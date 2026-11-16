@@ -88,13 +88,13 @@
           "id": "codex-agentic-core",
           "source": "agentic-core.instructions.md",
           "target": ".claude/rules/agentic-core.md",
-          "sha256": "164e0ee2d686886501b2ae122c3ea6ec3412047ce7a7c7ada256a0cd69b9e67e"
+          "sha256": "98881f03dbb1f406c339b009459811bac1bec7eb86882795434949ff7ee51a95"
         },
         {
           "id": "codex-agentic-engineering",
           "source": "agentic-engineering-rules.md",
           "target": ".claude/knowledge/agentic-rules/agentic-engineering-rules.md",
-          "sha256": "6741e35a8e383d9c8361d7f72d165208325ffd1c9fb619c4b16d1717e10cf3a0"
+          "sha256": "df4d4121d4f1e295635a2159c59eb4d868c64bb04c47c83e958fa39ac60b0abf"
         },
         {
           "id": "codex-agent-persona",
