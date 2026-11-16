@@ -4,6 +4,10 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- No changes have been recorded since v1.18.0.
+
+## v1.18.0 - 2026-11-17
+
 - ✨ **Bug reports** — open a form from the toolbar with Network+, browser, and OS details filled in, and describe the problem in one field.
 - 🔧 **Toolbar menu** — make both actions look clearly clickable, add a shared language selector, and refresh the Network+ icon.
 - 🔧 **Launcher design** — add the coffee otter to the icon menu, distinguish both actions by color, and illustrate the live guide's request flow.
