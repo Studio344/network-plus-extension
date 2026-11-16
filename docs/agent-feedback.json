@@ -42,6 +42,13 @@
       "source": "https://github.com/himiyosh/network-plus-extension/pull/39#issuecomment-6032170089; docs/DESIGN.md",
       "scope": "Inspector tabs and visual evidence",
       "status": "active"
+    },
+    {
+      "id": "task-resource-cleanup",
+      "rule": "Track task-owned temporary work resources, save needed evidence, and verify they close once finished. Preserve user work and active monitoring.",
+      "source": "https://github.com/himiyosh/agentic-rules/pull/32",
+      "scope": "Agent work environment and closeout",
+      "status": "active"
     }
   ]
 }
