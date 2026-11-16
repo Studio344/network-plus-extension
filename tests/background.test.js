@@ -1,6 +1,5 @@
 'use strict';
-// Direct unit coverage for the background worker's toolbar action and
-// undocked DevTools minimize behavior. The worker source is
+// Direct unit coverage for the background worker's undocked DevTools minimize behavior. The worker source is
 // executed against a scripted chrome.windows so every response branch —
 // focused pick, single-window fallback, ambiguous decline, error paths —
 // can fail a gate instead of only being reachable in a real browser.
@@ -11,14 +10,9 @@ const workerSource = fs.readFileSync(path.resolve(__dirname, '..', 'background.j
 
 function runWorker({ windows, getAllError = null, updateError = null } = {}) {
   const updates = [];
-  const createdTabs = [];
   let listener = null;
-  let actionListener = null;
   const chromeMock = {
-    action: { onClicked: { addListener: (fn) => { actionListener = fn; } } },
-    tabs: { create: (options) => { createdTabs.push(options); } },
     runtime: {
-      getURL: (relativePath) => 'chrome-extension://network-plus-test/' + relativePath,
       lastError: null,
       onMessage: {
         addListener: (fn) => {
@@ -43,7 +37,7 @@ function runWorker({ windows, getAllError = null, updateError = null } = {}) {
   };
   new Function('chrome', workerSource)(chromeMock);
   if (typeof listener !== 'function') throw new Error('The worker registered no onMessage listener.');
-  return { listener, updates, actionListener, createdTabs };
+  return { listener, updates };
 }
 
 function ask(listener, message) {
@@ -55,16 +49,6 @@ function ask(listener, message) {
 }
 
 describe('background worker minimize handshake', () => {
-  test('the toolbar action opens only the local offline panel and ignores current-tab data', () => {
-    const { actionListener, createdTabs, updates } = runWorker();
-    expect(typeof actionListener).toBe('function');
-    expect(createdTabs).toEqual([]);
-    const currentTab = new Proxy({}, { get() { throw new Error('Current-tab data must not be read'); } });
-    actionListener(currentTab);
-    expect(createdTabs).toEqual([{ url: 'chrome-extension://network-plus-test/panel.html?view=offline' }]);
-    expect(updates).toEqual([]);
-  });
-
   test('minimizes the focused DevTools window among several', () => {
     const { listener, updates } = runWorker({
       windows: [
@@ -126,7 +110,6 @@ describe('background worker minimize handshake', () => {
   test('unrelated messages are ignored without touching windows', () => {
     let touched = false;
     const chromeMock = {
-      action: { onClicked: { addListener: () => {} } },
       runtime: { lastError: null, onMessage: { addListener: () => {} } },
       windows: {
         getAll: () => {
@@ -147,5 +130,61 @@ describe('background worker minimize handshake', () => {
     });
     expect(result).toBeUndefined();
     expect(touched).toBe(false);
+  });
+});
+
+const launcherSource = fs.readFileSync(path.join(__dirname, '..', 'launcher.js'), 'utf8');
+
+function runLauncher({ search = '' } = {}) {
+  const elements = new Map();
+  const chrome = {
+    storage: { local: { get: (_keys, callback) => callback({}) } },
+    runtime: {
+      getURL: (file) => 'chrome-extension://network-plus-test/' + file,
+    },
+    tabs: { create: jest.fn(async () => ({})) },
+  };
+  const document = {
+    body: { dataset: {} },
+    documentElement: { style: {} },
+    querySelectorAll: () => [],
+    getElementById(id) {
+      if (!elements.has(id)) {
+        elements.set(id, {
+          disabled: false, hidden: false, textContent: '', handlers: {},
+          addEventListener(name, handler) { this.handlers[name] = handler; },
+        });
+      }
+      return elements.get(id);
+    },
+  };
+  const location = { search };
+  const window = { close: jest.fn() };
+  new Function('chrome', 'document', 'location', 'navigator', 'window', launcherSource)(
+    chrome, document, location, { language: 'en-US' }, window,
+  );
+  const get = (id) => document.getElementById(id);
+  return { chrome, get, close: window.close };
+}
+
+describe('extension icon launcher', () => {
+  test.each([
+    ['open-saved', 'panel.html?view=offline'],
+    ['open-live', 'launcher.html?view=live'],
+  ])('opens the audited destination for %s', async (id, target) => {
+    const { get, chrome, close } = runLauncher();
+    expect(get('launcher-actions').hidden).toBe(false);
+    expect(get('live-setup').hidden).toBe(true);
+    await get(id).handlers.click();
+    expect(chrome.tabs.create).toHaveBeenCalledWith({ url: 'chrome-extension://network-plus-test/' + target });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  test('the live guide leaves navigation to the user in the same tab', () => {
+    const { chrome, get, close } = runLauncher({ search: '?view=live' });
+    expect(get('live-setup').hidden).toBe(false);
+    expect(get('launcher-actions').hidden).toBe(true);
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 });

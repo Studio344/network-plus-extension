@@ -4,6 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- ✨ **Network+ launcher** — open HAR/SAZ or prepare live recording from the same icon, then follow a bookmark in the recording tab.
 - 🔧 **Support** — refresh the dialog and localized actions, and animate a coffee-cup otter in the toolbar.
 - 🐛 **DevTools redraw** — resume capture repainting when a minimized window becomes visible, even if its queued animation frame is delayed.
 - 🔧 **Optional support** — link to Gumroad Coffee for one-time contributions.
