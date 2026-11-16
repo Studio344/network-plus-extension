@@ -110,11 +110,11 @@ Use the current dashboard labels and apply this conservative mapping:
 |---|---|
 | Data types | Select at least the categories corresponding to `Web history` and `Website content`. Because inspected request and response values can also contain authentication, personal, communication, user-generated, financial, health, or location information, select each current dashboard category whose definition covers values visible in arbitrary HTTP traffic; do not claim that Network+ can technically exclude those values before local inspection. |
 | Purpose | Provide the extension's visible network-inspection, search, comparison, retention, clipboard, and export features at the user's direction. |
-| Developer collection | None. Captured traffic is not sent to or stored in developer-controlled systems. |
-| Third-party transfer | None by Network+. There is no telemetry, analytics, advertising, account service, or external SDK. |
+| Developer collection | Captured traffic is not sent to or stored in developer-controlled systems. The developer can read bug reports users submit through Google Forms. |
+| Third-party transfer | Captured traffic stays on the device. The toolbar's optional bug report link opens Google Forms with only the selected display language, Network+ version, browser name and major version, and OS family when available. |
 | Persistent storage | UI preferences and named filter configuration only. Captured request and response records, headers, bodies, cookies, and search results are not persisted by Network+. |
 | User-created output | Clipboard payloads and HAR files are created only after a user action. Sanitized output is the default; full output is never the default, is always labelled as unsanitized, and requires a warning and one-time confirmation for HAR export and for full body copies. |
-| Human access | None through the extension. A user independently posting information to a public GitHub issue is outside the automatic extension data flow. |
+| Human access | Maintainers can read reports that users choose to submit through Google Forms or post as public GitHub issues. Captured traffic stays local. |
 | Sale or advertising use | None. Data is not sold, used for creditworthiness, or used for personalized, retargeted, or interest-based advertising. |
 | Limited-use certification | Certify only after confirming that the live statements match the submitted version. The repository behavior is designed to satisfy allowed-use, allowed-transfer, prohibited-advertising, and prohibited-human-access limits. |
 

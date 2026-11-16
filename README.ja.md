@@ -72,7 +72,9 @@ DevTools パネルとポップアウトでは、応答前のリクエストを *
 
 ### アイコンから Network+ を使う
 
-ブラウザーの拡張機能メニューまたはツールバーの **Network+** をクリックします。保存済みファイルは **HAR・SAZを開く** から調べられます。**ライブ記録を始める** を選ぶと、開発者ツールを開くショートカットが表示されます。開発者ツールで **Network+** を選び、記録したいサイトを同じタブで開きます。案内画面の **日本語** または **English** で表示言語を切り替えられます。
+ブラウザーの拡張機能メニューまたはツールバーの **Network+** をクリックします。保存済みファイルは **HAR・SAZを開く** から調べられます。**ライブ記録を始める** を選ぶと、開発者ツールを開くショートカットが表示されます。開発者ツールで **Network+** を選び、記録したいサイトを同じタブで開きます。
+
+メニューの **表示言語** は拡張機能の言語設定と共通で、ライブ記録の案内にも反映されます。案内画面の **日本語** または **English** で、その画面だけを切り替えることもできます。
 
 ### リリース ZIP からインストール
 
@@ -358,7 +360,9 @@ Issue も Pull Request も歓迎です。PR を開く前に:
 
 ## 💬 サポート
 
-質問とバグ報告は [GitHub Issues](https://github.com/himiyosh/network-plus-extension/issues/new/choose) へ。Issue は公開されます: 投稿前に資格情報・顧客データ・実トラフィックを取り除き、`Copy safe support summary` の出力も貼る前に確認してください。
+不具合は Network+ のツールバーメニューの **不具合を報告** からお知らせください。[Google フォーム](https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform) では、起きたことを1欄に記入すれば送信できます。メニューから開くと、取得できる範囲で Network+ のバージョン、ブラウザーのメジャーバージョン、OS の種類が入力済みになります。送信前に内容を確認したり、削除したりできます。
+
+質問や公開での不具合報告には [GitHub Issues](https://github.com/himiyosh/network-plus-extension/issues/new/choose) を使えます。資格情報・顧客データ・実際の通信内容は取り除き、`Copy safe support summary` の出力も貼る前に確認してください。
 
 ## 💖 スポンサー
 
