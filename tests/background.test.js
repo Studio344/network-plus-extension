@@ -135,10 +135,25 @@ describe('background worker minimize handshake', () => {
 
 const launcherSource = fs.readFileSync(path.join(__dirname, '..', 'launcher.js'), 'utf8');
 
-function runLauncher({ search = '' } = {}) {
+function runLauncher({
+  search = '',
+  uiLocale,
+  languages = ['en-US'],
+  preferences = {},
+  deferStorage = false,
+} = {}) {
   const elements = new Map();
+  const guideLanguageKey = 'networkPlus.liveGuideLang';
+  let loadPreferences;
   const chrome = {
-    storage: { local: { get: (_keys, callback) => callback({}) } },
+    i18n: { getUILanguage: () => uiLocale },
+    storage: { local: {
+      get(_keys, callback) {
+        loadPreferences = () => callback(preferences);
+        if (!deferStorage) loadPreferences();
+      },
+      set: jest.fn((_values, callback) => callback()),
+    } },
     runtime: {
       getURL: (file) => 'chrome-extension://network-plus-test/' + file,
     },
@@ -147,11 +162,19 @@ function runLauncher({ search = '' } = {}) {
   const document = {
     body: { dataset: {} },
     documentElement: { style: {} },
-    querySelectorAll: () => [],
+    querySelectorAll(query) {
+      if (query === '[data-copy]') {
+        const title = this.getElementById('setup-title');
+        title.dataset = { copy: 'setupTitle' };
+        return [title];
+      }
+      return [];
+    },
     getElementById(id) {
       if (!elements.has(id)) {
         elements.set(id, {
-          disabled: false, hidden: false, textContent: '', handlers: {},
+          disabled: false, hidden: false, textContent: '', handlers: {}, attributes: {},
+          setAttribute(name, value) { this.attributes[name] = value; },
           addEventListener(name, handler) { this.handlers[name] = handler; },
         });
       }
@@ -161,10 +184,10 @@ function runLauncher({ search = '' } = {}) {
   const location = { search };
   const window = { close: jest.fn() };
   new Function('chrome', 'document', 'location', 'navigator', 'window', launcherSource)(
-    chrome, document, location, { language: 'en-US' }, window,
+    chrome, document, location, { language: languages[0], languages }, window,
   );
   const get = (id) => document.getElementById(id);
-  return { chrome, get, close: window.close };
+  return { chrome, get, close: window.close, root: document.documentElement, loadPreferences, guideLanguageKey };
 }
 
 describe('extension icon launcher', () => {
@@ -186,5 +209,40 @@ describe('extension icon launcher', () => {
     expect(get('launcher-actions').hidden).toBe(true);
     expect(chrome.tabs.create).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['ja-JP', ['en-US'], {}, 'ja'],
+    ['en-US', ['ja-JP', 'ja'], {}, 'ja'],
+    ['fr-FR', ['fr-FR', 'ja'], {}, 'ja'],
+    ['ja-JP', ['ja-JP'], { 'networkPlus.lang': 'en' }, 'en'],
+    ['en-US', ['en-US'], { 'networkPlus.lang': 'en', 'networkPlus.liveGuideLang': 'ja' }, 'ja'],
+  ])('initializes the live guide from UI locale %s and language preferences', (uiLocale, languages, preferences, expected) => {
+    const { get, root } = runLauncher({ search: '?view=live', uiLocale, languages, preferences });
+    expect(root.lang).toBe(expected);
+    expect(get('setup-title').textContent).toBe(expected === 'ja' ? 'ライブ記録の準備' : 'Set up live recording');
+    expect(get('guide-' + expected).attributes['aria-pressed']).toBe('true');
+  });
+
+  test('switches the guide to Japanese even before preferences load and saves the guide preference only', () => {
+    const { get, root, chrome, loadPreferences, guideLanguageKey } = runLauncher({
+      search: '?view=live',
+      preferences: { 'networkPlus.lang': 'en' },
+      deferStorage: true,
+    });
+    get('guide-ja').handlers.click();
+    loadPreferences();
+    expect(root.lang).toBe('ja');
+    expect(get('setup-title').textContent).toBe('ライブ記録の準備');
+    expect(get('guide-en').attributes['aria-pressed']).toBe('false');
+    expect(chrome.storage.local.set).toHaveBeenLastCalledWith({ [guideLanguageKey]: 'ja' }, expect.any(Function));
+    get('guide-en').handlers.click();
+    expect(root.lang).toBe('en');
+    expect(chrome.storage.local.set).toHaveBeenLastCalledWith({ [guideLanguageKey]: 'en' }, expect.any(Function));
+  });
+
+  test('the guide language override does not change the popup language', () => {
+    const { root } = runLauncher({ preferences: { 'networkPlus.lang': 'en', 'networkPlus.liveGuideLang': 'ja' } });
+    expect(root.lang).toBe('en');
   });
 });

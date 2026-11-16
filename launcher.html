@@ -19,10 +19,35 @@
       <button id="open-live" type="button" data-copy="live">Start live recording</button>
     </div>
     <section id="live-setup" aria-labelledby="setup-title" hidden>
-      <h2 id="setup-title" data-copy="setupTitle">Set up live recording</h2>
+      <div class="setup-header">
+        <h2 id="setup-title" data-copy="setupTitle">Set up live recording</h2>
+        <div class="setup-languages" role="group" aria-label="Guide language" data-label="guideLanguage">
+          <button id="guide-ja" type="button" lang="ja" aria-pressed="false">日本語</button>
+          <button id="guide-en" type="button" lang="en" aria-pressed="true">English</button>
+        </div>
+      </div>
       <ol class="launcher-instructions">
-        <li data-copy="stepDevTools">Open DevTools in this tab and select Network+.</li>
-        <li data-copy="stepNavigate">Use a bookmark or the address bar to open the site you want to record in this same tab.</li>
+        <li>
+          <h3 data-copy="stepDevTools">Open DevTools in this tab</h3>
+          <dl class="setup-shortcuts">
+            <div>
+              <dt>Mac</dt>
+              <dd><kbd>⌘ Command</kbd> + <kbd>⌥ Option</kbd> + <kbd>I</kbd></dd>
+            </div>
+            <div>
+              <dt>Windows / Linux</dt>
+              <dd><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>I</kbd></dd>
+            </div>
+          </dl>
+        </li>
+        <li>
+          <h3 data-copy="stepPanel">Select the Network+ tab</h3>
+          <p data-copy="stepPanelHelp">If it is hidden, look under » or the + button (More tools) in DevTools.</p>
+        </li>
+        <li>
+          <h3 data-copy="stepNavigate">Open a bookmark in this tab</h3>
+          <p data-copy="stepNavigateHelp">Keep DevTools open and go to the site you want to record from your bookmarks or favorites.</p>
+        </li>
       </ol>
     </section>
     <p id="launcher-status" role="status" aria-live="polite" aria-atomic="true"></p>

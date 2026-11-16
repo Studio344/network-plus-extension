@@ -72,7 +72,7 @@ The DevTools panel and its pop-out can show a request as **Pending** while it wa
 
 ### Open Network+ from the browser icon
 
-Click **Network+** in the browser’s Extensions menu or on the toolbar. Choose **Open HAR or SAZ** to inspect a saved capture. For a live recording, choose **Start live recording**, open DevTools → **Network+** in the setup tab, and use a bookmark or the address bar to open the site in the same tab.
+Click **Network+** in the browser’s Extensions menu or on the toolbar. Choose **Open HAR or SAZ** to inspect a saved capture. For a live recording, choose **Start live recording**. The guide shows the keyboard shortcut for opening DevTools. Select **Network+** in DevTools, then open your site from a bookmark in the same tab. Use **日本語** or **English** to switch the guide language.
 
 ### Install from the release ZIP
 

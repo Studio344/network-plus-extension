@@ -7,7 +7,7 @@ Automated coverage lives in [tests/](../tests); see the test table in the [READM
 ## Offline workspace from the browser toolbar
 
 - [ ] From Chrome or Edge **New Tab**, open the Network+ toolbar menu. **Open HAR or SAZ** opens the offline workspace in a separate tab.
-- [ ] Choose **Start live recording** from the same menu. Open DevTools → **Network+** in the guide tab, then click a bookmark to open a test page in that tab. Check that Network+ records the initial document.
+- [ ] Choose **Start live recording** from the same menu. Switch the guide between **日本語** and **English** and confirm the choice survives reopening. Use the shortcut shown to open DevTools, select **Network+**, and follow a bookmark in the same tab. Check that Network+ records the initial document and the guide remains readable in a narrow docked layout.
 - [ ] With DevTools and its pop-out open, hold an HTTP response for several seconds. Both tables show **Pending** and update the same row after the response.
 - [ ] The persistent offline scope and empty-state import guidance appear in English and Japanese. Pause/Resume, live recording styling, Stream capture, and pop-out controls stay hidden.
 - [ ] The empty-state import action opens the HAR/SAZ picker. Import a synthetic saved capture, inspect its response, filter and compare requests, then export sanitized HAR. The offline scope remains visible throughout.

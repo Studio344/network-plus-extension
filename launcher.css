@@ -25,13 +25,32 @@ button { cursor: pointer; font-weight: 650; text-align: start; }
 button:hover { background: var(--hover); }
 button:disabled { opacity: .72; cursor: wait; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-body[data-view="live"] .launcher { width: min(100%, 530px); margin: 48px auto 0; padding: 0 16px 24px; }
-#live-setup { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-#setup-title { margin: 0; font-size: 18px; }
-.launcher-instructions { margin: 10px 0 0; padding-inline-start: 1.6em; color: var(--muted); word-break: auto-phrase; overflow-wrap: break-word; }
-.launcher-instructions li + li { margin-top: 6px; }
+body[data-view="live"] .launcher {
+  width: min(100%, 760px);
+  margin: clamp(16px, 6vh, 56px) auto 0;
+  padding: 0 clamp(12px, 3vw, 24px) 24px;
+}
+#live-setup {
+  padding: clamp(16px, 4vw, 32px);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+.setup-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+#setup-title { margin: 0; font-size: clamp(26px, 5vw, 34px); line-height: 1.25; }
+.setup-languages { display: flex; flex-wrap: wrap; gap: 6px; }
+.setup-languages button { font-size: 16px; }
+.setup-languages button[aria-pressed="true"] { background: var(--hover); color: var(--accent); border-color: var(--accent); }
+.launcher-instructions { margin: 24px 0 0; padding-inline-start: 1.5em; font-size: 18px; line-height: 1.6; }
+.launcher-instructions li { padding-inline-start: 4px; }
+.launcher-instructions li::marker { color: var(--accent); font-weight: 700; }
+.launcher-instructions li + li { margin-top: 20px; }
+.launcher-instructions h3 { margin: 0; font-size: 21px; line-height: 1.45; }
+.launcher-instructions p { margin: 6px 0 0; }
+.setup-shortcuts { display: grid; gap: 10px 20px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); margin: 10px 0 0; }
+.setup-shortcuts dt { color: var(--muted); font-size: 16px; font-weight: 650; }
+.setup-shortcuts dd { margin: 4px 0 0; }
+.setup-shortcuts kbd { display: inline-block; padding: 1px 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--background); font: inherit; font-weight: 650; }
 #launcher-status { margin: 8px 0 0; color: var(--muted); overflow-wrap: anywhere; }
 #launcher-status:empty { margin: 0; }
-@media (max-height: 410px) {
-  body[data-view="live"] .launcher { margin-top: 16px; }
-}
