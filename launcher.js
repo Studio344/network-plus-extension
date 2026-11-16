@@ -3,8 +3,11 @@
 const copy = {
   en: {
     saved: 'Open HAR or SAZ',
+    savedDescription: 'Inspect a saved capture',
     live: 'Start live recording',
+    liveDescription: 'Set up before visiting a site',
     setupTitle: 'Set up live recording',
+    setupIntro: 'Select Network+ before visiting a site to capture its very first request.',
     guideLanguage: 'Guide language',
     stepDevTools: 'Open DevTools in this tab',
     stepPanel: 'Select the Network+ tab',
@@ -15,12 +18,15 @@ const copy = {
   },
   ja: {
     saved: 'HAR・SAZを開く',
+    savedDescription: '保存済みの通信を調べる',
     live: 'ライブ記録を始める',
+    liveDescription: 'サイトを開く前に記録を準備する',
     setupTitle: 'ライブ記録の準備',
+    setupIntro: 'サイトを開く前に Network+ を選ぶと、最初のリクエストから記録できます。',
     guideLanguage: '案内の表示言語',
     stepDevTools: 'このタブで開発者ツール（DevTools）を開く',
     stepPanel: 'Network+ タブを選ぶ',
-    stepPanelHelp: '見つからないときは、開発者ツールの「»」または「＋」から探せます。',
+    stepPanelHelp: '見えないときは、開発者ツールの「»」か「＋」を開きます。',
     stepNavigate: 'このタブでブックマークを開く',
     stepNavigateHelp: '開発者ツールを開いたまま、お気に入りやブックマークから記録したいサイトに移動します。',
     cannotOpen: 'Network+の画面を開けませんでした。もう一度お試しください。',
@@ -65,6 +71,7 @@ function renderLanguage() {
 
 document.getElementById('launcher-actions').hidden = liveSetup;
 document.getElementById('live-setup').hidden = !liveSetup;
+document.getElementById('guide-languages').hidden = !liveSetup;
 if (liveSetup) document.body.dataset.view = 'live';
 renderLanguage();
 
