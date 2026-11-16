@@ -1,6 +1,6 @@
 # Chrome Web Store submission dossier (en-US)
 
-Last reviewed: 2026-11-15
+Last reviewed: 2026-11-17
 
 ## Submission status and evidence boundary
 
@@ -8,20 +8,19 @@ This dossier is a repository-local recommendation for a future Chrome Web Store 
 
 ### Upload artifact
 
-- **Release candidate** — `v1.17.0` (cut 2026-11-15)
-- **ZIP** — `network-plus-extension-1.17.0.zip`
-- **Size** — `317717 bytes`
-- **SHA-256** — `d2647cc24f747ba1cf70f9a8bdd930136488939947f1332ad42c6b5dd21681ac`
-- **Download after publication** — https://github.com/himiyosh/network-plus-extension/releases/download/v1.17.0/network-plus-extension-1.17.0.zip
+- **Release candidate** — `v1.18.0` (cut 2026-11-17)
+- **ZIP** — `network-plus-extension-1.18.0.zip`
+- **Size** — `378288 bytes`
+- **SHA-256** — `2d890273aaec06ec8b6fd7df2df57e5410f6ea4f8305b5016c034a100249299b`
+- **Download after publication** — https://github.com/himiyosh/network-plus-extension/releases/download/v1.18.0/network-plus-extension-1.18.0.zip
 
-Two `TZ=UTC npm run extension:package` builds from the reviewed source produced identical bytes. The v1.17.0 candidate contains the merged Network+ improvements through `7494d2c` and the version update. Verify the downloaded GitHub asset against this archive after publication. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature. Only upload after obtaining the ZIP from the trusted release route and comparing the complete digest.
+Two `TZ=UTC npm run extension:package` builds produced identical bytes. The archive was built from reviewed commit `12afe4b14b9dba8795127b39f01178821fa4cc34` with the version update applied. Public observation of the release is a post-merge step and is not claimed here. Verify the downloaded GitHub asset against this archive after publication. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature. Only upload after obtaining the ZIP from the trusted release route and comparing the complete digest.
 
 ### Observed repository facts
 
-- The working-tree `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.17.0`, with one required permission (`storage`), optional permissions for user-initiated resend, packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
-- The package guard allows only the eleven audited runtime files and rejects remote resources, inline scripts, unexpected privileged manifest surfaces, and permission drift. The one audited background service worker opens the fixed local offline workspace from the toolbar action and minimizes undocked DevTools when the pop-out opens. These operations require no additional permission, read no current-tab URLs or page data, and do not override New Tab.
+- The `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.18.0`, with one required permission (`storage`), optional scripting and per-origin access for user-initiated resend, packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
+- The package guard allows only the fifteen audited runtime files and rejects remote resources, inline scripts, unexpected privileged manifest surfaces, and permission drift. The browser action opens a packaged launcher for the local offline workspace or live recording setup. The background service worker minimizes undocked DevTools when the pop-out opens. These operations require no additional permission, read no current-tab URLs or page data, and do not override New Tab.
 - The same runtime uses Chromium extension APIs without an Edge-only code path. Historical pre-v1.16.0 verification used Chrome 151: it loaded the manifest without extension errors, all 98 real-browser regression scenarios passed, and the Network+ DevTools panel was confirmed manually. This is not a new manual verification of the candidate release.
-- The pinned v1.17.0 ZIP was built before the optional resend permissions in the working tree. The recorded size and digest apply to that ZIP. Review and pin a new archive before submitting these source changes.
 
 ## Developer account prerequisites
 
@@ -65,7 +64,13 @@ Clipboard copy and HAR export are user-initiated. Sanitized output is the defaul
 
 An empty panel offers three deterministic, local-only sample requests under reserved `.test` domains. The sample sends no network traffic, pauses live capture to avoid mixing evidence, and includes a prompt-first guide for identifying a 503 request, its dominant Wait (TTFB) phase, a Retry-After header, and the limits of browser-observed timing. No account or test credentials are required.
 
-Network+ supports System, Dark, and Light themes, keyboard navigation, visible focus, screen-reader status announcements, responsive panel layouts, and reduced-motion preferences. A Settings dialog gathers language, theme, and capture retention; explanations and every dialog, including the item names in them, are available in Japanese, while toolbar buttons and column headers stay in English so written instructions still match the UI. It runs from packaged extension code without remote code, telemetry, analytics, advertising, or an external service. Network+ reports browser-observed HTTP timing; it does not prove packet loss, cabling or radio-frequency faults, or a definitive server root cause. Every feature is free. Optional GitHub Sponsors and Gumroad Coffee links open in ordinary browser tabs; the extension embeds no checkout and receives no payment or account data.
+Network+ supports System, Dark, and Light themes, keyboard navigation, visible focus, screen-reader status announcements, responsive panel layouts, and reduced-motion preferences. A Settings dialog gathers language, theme, and capture retention; explanations and every dialog, including the item names in them, are available in Japanese, while toolbar buttons and column headers stay in English so written instructions still match the UI. The browser toolbar menu opens saved HAR and SAZ captures or guides you through starting live capture. Its Japanese and English language setting is shared with the panel.
+
+Captured traffic stays on your device. The extension runs from packaged code without telemetry, analytics, or advertising. Browser-observed HTTP timing helps investigate slow requests and requires other evidence to establish their root cause.
+
+Choose Report a problem in the toolbar menu to open Google Forms. The link includes the selected display language and fills in the available Network+ version, browser and major version, and OS family. Describe what happened in one field and review the optional system details before sending. Captured traffic stays outside the report link.
+
+Every feature is free. Optional GitHub Sponsors and Gumroad Coffee links open in ordinary browser tabs. The destination site handles any payment.
 <!-- chrome-store-description:end -->
 
 Do not add unrelated search phrases to the description. Chrome Web Store metadata must describe the extension naturally and comply with the keyword-spam policy.
@@ -137,7 +142,7 @@ The owner must make the final external distribution decision. Private, unlisted,
 
 ## Test instructions
 
-For this release, use the reviewed ZIP to open large HARs in DevTools and the pop-out. Confirm the expected request count, row order, and final response content. While a live response is held, check that the pending request appears and updates in place on completion. From the browser’s New Tab, the extension toolbar action opens a separate offline workspace for saved captures.
+For this release, use the reviewed ZIP to open large HARs in DevTools and the pop-out. Confirm the expected request count, row order, and final response content. While a live response is held, check that the pending request appears and updates in place on completion. From the browser’s New Tab, choose `Open HAR or SAZ` from the Network+ toolbar menu to open the separate workspace for saved captures.
 
 No account, credentials, subscription, remote service, or live customer traffic is required.
 
@@ -149,14 +154,15 @@ No account, credentials, subscription, remote service, or live customer traffic 
 6. Select the export action, then select `Export sanitized HAR`. Verify that `network-plus-sanitized.har` is downloaded only after the user action and that the HAR records the sanitization policy. Do not select full output for routine review evidence.
 7. Select `Clear`. Verify that the sample rows and details disappear, recording returns to its prior state, and `Undo clear` is offered for 10 seconds. Select `Undo clear` once to restore the bounded snapshot, then select `Clear` again to exit sample mode.
 8. Select the Network+ brand button in the toolbar (the mark with the pixel otter and coffee cup). Verify that the Support dialog opens, lists the GitHub Sponsors and Gumroad Coffee links, states that Network+ sends them no data, contains no payment form, and issues no network request when opened. Verify that each option exposes one user-activated action that opens its page in a browser tab, that no clipboard write occurs, and that `Esc` or `Close` returns focus to the brand button.
+9. Open the browser toolbar menu and switch between English and Japanese. Choose `Report a problem` and verify that Google Forms opens with the available extension, browser, and OS details and one required description field. This optional check requires access to Google Forms. Leave the form unsubmitted.
 
 ## Updating an already-listed item
 
 The sections above describe a first submission. When a Chrome Web Store item already exists for this extension, the work is a package update against that item: the account prerequisites are already satisfied and no new item is created.
 
-- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.17.0 is higher than v1.16.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
-- After publication, upload `network-plus-extension-1.17.0.zip` obtained from the trusted release route as a new package on the existing item, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
-- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the dashboard, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for v1.16.0 and are reused for v1.17.0 to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- chrome` compares each listing image with `docs/store-assets/`, replaces only the ones that differ, and saves a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
+- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.18.0 is higher than v1.17.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
+- After publication, upload `network-plus-extension-1.18.0.zip` obtained from the trusted release route as a new package on the existing item, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
+- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the dashboard, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for v1.16.0 and are reused for v1.18.0 to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- chrome` compares each listing image with `docs/store-assets/`, replaces only the ones that differ, and saves a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
 - An update is a fresh review. Distribution and visibility settings carry over from the existing item unless the operator changes them, and the previously reviewed package stays live until the new one is approved.
 - Field labels and the navigation path for package updates must be confirmed in the live dashboard, which can change independently of this repository.
 
