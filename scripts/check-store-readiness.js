@@ -12,7 +12,7 @@ const ASSET_DIRECTORY = 'docs/store-assets';
 // Keep the dates separate so a privacy-text change does not imply the PNG
 // inventory was re-reviewed on the same day.
 const ASSET_REVIEW_DATE = '2026-10-12';
-const PRIVACY_REVIEW_DATE = '2026-11-16';
+const PRIVACY_REVIEW_DATE = '2026-11-17';
 const MIN_DESCRIPTION_CHARACTERS = 250;
 const MAX_DESCRIPTION_CHARACTERS = 10000;
 const MAX_SEARCH_TERMS = 7;
@@ -100,7 +100,9 @@ const REQUIRED_PRIVACY_TEXT = Object.freeze([
   `Last updated: ${PRIVACY_REVIEW_DATE}`,
   'Microsoft Edge and Google Chrome DevTools extension',
   'URLs, query values, request and response headers, cookies, request bodies, response bodies',
-  'Network+ does not send captured traffic, usage data, or diagnostics to the developer or to third parties.',
+  'Network+ keeps captured traffic on your device.',
+  "The toolbar's `Report a problem` link opens Google Forms in a new tab when selected.",
+  'Google receives these values when you open the link.',
   'It does not use this data for advertising, profiling, creditworthiness, or any unrelated purpose.',
   'Network+ does not sell or transfer inspected traffic to the developer or to third parties',
   'Network+ stores only UI preferences locally:',
