@@ -3875,7 +3875,7 @@ browserTest(
                 brandPaddingLeft: brandStyle.paddingLeft,
                 brandPaddingRight: brandStyle.paddingRight,
                 brandSubtitleDisplay: getComputedStyle(
-                  document.querySelector('.brand-sub-text'),
+                  document.querySelector('.brand-sub'),
                 ).display,
               };
             })()`,
@@ -3918,8 +3918,7 @@ browserTest(
       const compactBoundaryMeasurement = measurementsByWidth.get(1254);
       expect(compactBoundaryMeasurement.brandSubtitleDisplay).toBe('none');
       expect(compactBoundaryMeasurement.brandWidth).toBeLessThan(150);
-      // Compact mode drops only the sub-label words; the otter keeps a fixed
-      // 22px perch between the wordmark and the cup, inside symmetric paddings.
+      // Compact mode keeps the wordmark and the support icon inside symmetric paddings.
       expect(compactBoundaryMeasurement.brandPaddingLeft).toBe('8px');
       expect(compactBoundaryMeasurement.brandPaddingRight).toBe('8px');
 

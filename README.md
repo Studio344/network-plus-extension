@@ -245,7 +245,7 @@ Edge / Chrome DevTools
 - **Pop-out mirror tab.** The same `panel.html` opened with `?view=window`; the DevTools panel connects a `chrome.runtime` port to it, streams serialized rows, reconciles differences through a one-second sync heartbeat, and serves response bodies on demand. No additional permissions.
 - **Navigation handling.** `chrome.devtools.network.onNavigated` never clears the table; it only marks not-yet-retrieved bodies as unavailable, because the browser stops serving the previous document's bodies once a navigation commits.
 - **No ES modules.** DevTools panel pages do not support `<script type="module">`, so all logic lives in one IIFE file. This is a platform constraint, not a style choice.
-- **Buildless.** No bundler, no transpiler. `npm run extension:package` copies an explicit allowlist of 10 runtime files into a ZIP without transforming any code.
+- **Buildless.** No bundler, no transpiler. `npm run extension:package` copies an explicit allowlist of runtime files into a ZIP without transforming any code.
 
 | Limit | Value |
 |---|---|
