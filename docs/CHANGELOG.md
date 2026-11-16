@@ -2,7 +2,7 @@
 
 All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/himiyosh/network-plus-extension/releases).
 
-## Unreleased
+## v1.18.0 - 2026-11-17
 
 - ✨ **Bug reports** — open a form from the toolbar with Network+, browser, and OS details filled in, and describe the problem in one field.
 - 🔧 **Toolbar menu** — make both actions look clearly clickable, add a shared language selector, and refresh the Network+ icon.
