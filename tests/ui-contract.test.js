@@ -3064,7 +3064,7 @@ describe('shortcut help static contracts', () => {
     expect(supportButtonRule[1]).toContain('max-width:100%');
     expect(supportButtonRule[1]).toContain('white-space:nowrap');
     expect(css).toContain(
-      '@media (max-width:280px){\n  .shortcut-support-summary button{white-space:normal;text-align:center}\n  .support-option-cta{width:100%;justify-content:center}\n}',
+      '@media (max-width:280px){\n  .shortcut-support-summary button{white-space:normal;text-align:center}\n}',
     );
   });
 
@@ -3096,38 +3096,21 @@ describe('optional support dialog', () => {
     js.indexOf('// Tab switching for inspector panels'),
   );
 
-  test('the brand pill itself is the support trigger, with the cat and cup inline', () => {
-    // The brand and the support trigger are one control: the pill carries the
-    // dialog trigger role, the peeking otter, the steaming cup, and a hover-only
-    // hint — no separate ☕ button that would spend toolbar width.
-    const trigger = html.match(/<button id="supportBtn"[^>]*>/)[0];
+  test('the brand is one support trigger with one decorative inline mark', () => {
+    const brandBlock = html.match(/<button id="supportBtn"[^>]*>[\s\S]*?<\/button>/)[0];
+    const trigger = brandBlock.slice(0, brandBlock.indexOf('>') + 1);
     expect(trigger).toContain('class="brand support-btn"');
     expect(trigger).toContain('aria-haspopup="dialog"');
     expect(trigger).toContain('aria-controls="supportDialog"');
     expect(trigger).toContain('aria-label="Network+ for DevTools — support development, optional"');
-    // A modal dialog trigger must not advertise an expandable region.
     expect(trigger).not.toContain('aria-expanded');
-    const brandBlock = html.slice(html.indexOf('<button id="supportBtn"'), html.indexOf('</button>', html.indexOf('<button id="supportBtn"')));
-    for (const part of [
-      'brand-otter-window',
-      'brand-otter-motion',
-      'brand-otter',
-      'brand-otter-sleep',
-      'brand-otter-wake',
-      'brand-otter-lid',
-      'brand-otter-glint',
-      'brand-heart-px',
-      'brand-cup',
-      'brand-steam',
-      'brand-support-hint',
-      'brand-sub',
-    ]) {
-      expect(brandBlock).toContain(part);
+
+    expect(brandBlock.match(/<svg\b/g)).toHaveLength(1);
+    expect(brandBlock).toMatch(/<svg class="brand-support-mark"[^>]*aria-hidden="true" focusable="false">/);
+    for (const part of ['brand-support-cup', 'brand-support-steam', 'brand-support-otter', 'brand-support-paws']) {
+      expect(brandBlock).toContain('class="' + part);
     }
-    // Decorative art stays out of the accessibility tree and inline (CSP).
-    expect(brandBlock).toMatch(/<span class="brand-otter-window" aria-hidden="true">/);
     expect(brandBlock).not.toMatch(/<img\b|<use\b|href=|url\(/);
-    // Exactly one toolbar support trigger remains.
     expect(html.match(/id="supportBtn"/g)).toHaveLength(1);
   });
 
@@ -3177,7 +3160,10 @@ describe('optional support dialog', () => {
   test('support dialog keeps modal focus discipline and restores the trigger', () => {
     expect(supportBlock).toContain('if (supportDialog.open) return;');
     expect(supportBlock).toContain("const otherModal = Array.from(document.querySelectorAll('dialog[open]'))");
-    expect(supportBlock).toContain('if (supportDialog.open && closeButton) closeButton.focus();');
+    expect(html).toMatch(/<h2 id="supportDialogTitle" tabindex="-1"/);
+    expect(supportBlock).toContain('supportDialog.scrollHeight > supportDialog.clientHeight');
+    expect(supportBlock).toContain('focusTarget.focus({ preventScroll: true });');
+    expect(supportBlock).toContain('supportDialog.scrollTop = 0;');
     expect(supportBlock).toContain('if (trigger && trigger.focus && trigger.isConnected !== false) trigger.focus();');
     expect(supportBlock).toMatch(/addEventListener\('cancel'.*supportDialog\.close\(\)/);
   });
@@ -3190,132 +3176,35 @@ describe('optional support dialog', () => {
     expect(rule).not.toContain('border:none');
     expect(css).toMatch(/\.topbar button:hover\{[^}]*border-color:var\(--accent\)/);
     expect(css).toMatch(/\.topbar button:focus-visible[^{]*\{[^}]*outline:2px solid var\(--accent\)/);
-    // The investigating otter sits above the low, bottom-aligned "for DevTools"
-    // sub-label — the roomiest spot in the pill — with a deliberate 2px air
-    // gap so no paw ever touches the letters. The art grazes at most ~4.5px
-    // above the pill (~5.5px with the 1px hover rise), inside the topbar's
-    // 6px clip budget, and compact widths keep a fixed 22px perch when the
-    // words are hidden.
-    expect(css).toContain('.brand-otter-window{position:absolute;bottom:calc(100% + 2px);');
-    expect(css).toMatch(/\.brand-sub\{position:relative;display:inline-flex/);
-    expect(css).toContain('.brand-sub-text{display:none}');
-    expect(css).toContain('.brand-sub{width:22px;height:11px}');
-    expect(css).toMatch(/\.brand-otter-window\{[^}]*overflow:hidden/);
-    // The cup is white porcelain with a brew-toned edge so it reads against
-    // both the light and dark pill fills (an unedged accent-colored cup sank
-    // into the background), and it carries three always-on steam wisps.
-    expect(css).toMatch(/\.brand-cup-body\{fill:var\(--cup\);stroke:var\(--brew\)/);
-    expect(css).toMatch(/\.brand-cup-handle\{fill:none;stroke:var\(--cup\)/);
-    expect(css).toContain('.brand-cup{width:20px;height:20px');
-    expect(html.match(/class="brand-steam[ "]/g) || []).toHaveLength(3);
-    // The toolbar mark is pixel art: a 22x15 sprite of whole-unit rects drawn
-    // at true 1x. crispEdges keeps device pixels square instead of letting the
-    // rasterizer feather 1-unit rects into mush, which is exactly the
-    // "unreadable vector at 15px" failure the sprite replaced.
-    expect(html).toMatch(
-      /<svg class="brand-otter" viewBox="0 0 22 15" shape-rendering="crispEdges" focusable="false">/,
-    );
-    // Two complete sprites live in the markup. The woken investigator
-    // (magnifying glass up) is the default — a network inspector's mascot is
-    // on duty — and hover or focus soothes it into the shut-eyed sleeping
-    // face while pixel hearts rise: the pointer reads as petting. CSS only
-    // toggles display, so the swap is a single-frame cut — tweening between
-    // sprites would blur.
-    const brandBlock = html.slice(
-      html.indexOf('<button id="supportBtn"'),
-      html.indexOf('</button>', html.indexOf('<button id="supportBtn"')),
-    );
-    expect(html.match(/<g class="brand-otter-sleep">/g) || []).toHaveLength(1);
-    expect(html.match(/<g class="brand-otter-wake">/g) || []).toHaveLength(1);
-    expect(css).toContain('.brand-otter-sleep{display:none}');
-    expect(css).toMatch(/:hover \.brand-otter-wake[^{]*\{display:none\}/);
-    expect(css).toMatch(/:hover \.brand-otter-sleep[^{]*\{display:inline\}/);
-    // Every sprite cell is an integer-aligned rect with an inline hex fill:
-    // fractional geometry would break the pixel grid, and the palette is baked
-    // per-cell (shading is the sprite's own, identical in both themes).
-    const spriteRects = brandBlock.match(/<rect [^>]*\/>/g) || [];
-    expect(spriteRects.length).toBeGreaterThan(150);
-    for (const rect of spriteRects) {
-      expect(rect).toMatch(/^<rect x="\d+" y="\d+" width="\d+" height="\d+" fill="#[0-9a-f]{6}"\/>$/);
-    }
-    // The idle beat is a two-frame bob: steps(1,end) holds each frame, and the
-    // 1px offset stays on the pixel grid. Hover cuts to the woken sprite and
-    // stops the bob entirely — a paused bob could freeze mid-bob 1px low.
-    expect(css).toMatch(/\.brand-otter-motion\{[^}]*animation:brand-otter-bob 2\.4s steps\(1,end\) infinite\}/);
-    expect(css).toMatch(/@keyframes brand-otter-bob\{\s*0%,100%\{transform:translateY\(0\)\}\s*50%\{transform:translateY\(1px\)\}\s*\}/);
-    expect(css).toMatch(/:hover \.brand-otter-motion[^{]*\{animation:none\}/);
-    // Idle beats on the working otter: a rare one-frame blink of the visible
-    // eye (the lid overlay repaints its two cells in fur) and a rarer one-cell
-    // glint in the lens. Both are steps() so no intermediate opacity ever
-    // renders a half-lit pixel, and both hide on hover with the woken sprite.
-    expect(html).toContain('<g class="brand-otter-lid"><rect x="5" y="7" width="2" height="1" fill="#a9744f"/></g>');
-    expect(html).toContain('<g class="brand-otter-glint"><rect x="15" y="8" width="1" height="1" fill="#ffffff"/></g>');
-    expect(css).toMatch(/\.brand-otter-lid\{opacity:0;animation:brand-otter-blink 5\.2s steps\(1,end\) infinite\}/);
-    expect(css).toMatch(/\.brand-otter-glint\{opacity:0;animation:brand-otter-glint 8\.8s steps\(1,end\) infinite/);
-    expect(css).toMatch(/:hover \.brand-otter-lid[^{]*\{display:none\}/);
-    // Petting hearts: two 5x4 pixel hearts, hidden at rest, rising on hover in
-    // whole-pixel steps(6) hops so they stay on the grid, the second delayed
-    // half a beat so the pair reads as a stream rather than a stamp.
-    expect(html.match(/class="brand-heart-px brand-heart-px--[ab]"/g) || []).toHaveLength(2);
-    expect(html).toMatch(/<span class="brand-heart-px brand-heart-px--a"[^>]*><svg viewBox="0 0 5 4" shape-rendering="crispEdges"/);
-    expect(css).toContain('.brand-heart-px{position:absolute;width:5px;height:4px;bottom:calc(100% + 1px);opacity:0;pointer-events:none}');
-    expect(css).toMatch(/:hover \.brand-heart-px--a[^{]*\{animation:brand-heart-rise 1\.6s steps\(6,end\) infinite\}/);
-    expect(css).toMatch(/:hover \.brand-heart-px--b[^{]*\{animation:brand-heart-rise 1\.6s steps\(6,end\) 0\.8s infinite\}/);
-    // The retired ambient beats stay retired: a drifting "z" contradicts an
-    // otter that is awake by default.
-    expect(html).not.toContain('brand-zzz');
-    expect(css).not.toContain('brand-zzz-drift');
-    expect(css).not.toContain('brand-heart-float');
-    // The floaters hang off .brand-sub, never inside the clipped sprite window:
-    // the motion wrapper closes, the window closes, and only then do they appear.
-    expect(html).toMatch(/<span class="brand-otter-window"[^>]*>\s*<span class="brand-otter-motion">/);
-    expect(html).toMatch(
-      /<\/span>\s*<\/span>\s*<span class="brand-heart-px brand-heart-px--a"/,
-    );
-    // The magnifying-glass lens tint belongs to the woken sprite alone, and the
-    // sleeping face keeps shut eyes (no pupil cells) — waking must change the
-    // face, or hover reads as nothing happening.
-    const sleepSprite = brandBlock.slice(
-      brandBlock.indexOf('<g class="brand-otter-sleep">'),
-      brandBlock.indexOf('<g class="brand-otter-wake">'),
-    );
-    const wakeSprite = brandBlock.slice(brandBlock.indexOf('<g class="brand-otter-wake">'));
-    expect(sleepSprite).not.toContain('#aee0f7');
-    expect(wakeSprite).toContain('#aee0f7');
-    expect(wakeSprite).toContain('#ffffff');
-    // Steam is legible without hovering; hovering only strengthens it.
-    expect(css).toContain('.brand-steam-group{opacity:.9;');
-    expect(css).toMatch(/\.topbar button\.brand:hover \.brand-steam-group[^{]*\{opacity:1\}/);
-    // Reduced motion freezes every brand animation.
-    const reducedMotion = css.slice(css.indexOf('@media (prefers-reduced-motion:reduce)'));
-    for (const part of ['.brand-otter', '.brand-otter-motion', '.brand-otter-lid', '.brand-otter-glint', '.brand-heart-px', '.brand-steam', '.brand-support-hint']) {
-      expect(reducedMotion).toContain(part);
-    }
+    expect(css).toMatch(/\.brand-support-mark\{[^}]*width:\d+px;height:\d+px;flex:none/);
+    expect(css).toContain('.brand-sub{display:none}');
+    expect(css).toMatch(/\.brand-support-otter,\.brand-support-paws\{opacity:0;/);
+    expect(css).toMatch(/\.topbar button\.brand:is\(:hover,:focus-visible\)[^{]*\{opacity:1;/);
   });
 
-  test('support illustration is inline, decorative, and free of remote assets', () => {
-    const heroStart = html.indexOf('<div class="support-hero">');
-    const hero = html.slice(heroStart, html.indexOf('</svg>', heroStart));
-    expect(hero).toContain('aria-hidden="true"');
-    expect(hero).toContain('focusable="false"');
-    // The MV3 CSP and the package check both forbid non-local assets, so the
-    // artwork has to stay inline markup rather than an image or sprite <use>.
-    expect(hero).not.toMatch(/<img\b|<use\b|href=|url\(/);
-    // The identifying parts of the drawing: the muzzle and ears are what make
-    // it an otter rather than a generic round animal, and the cup is the ask.
-    for (const part of [
-      'support-steam--a',
-      'support-cup',
-      'support-brew',
-      'support-sparkle--a',
-      'support-otter-pix',
-      'support-otter-body',
-      'support-otter-muzzle',
-      'support-otter-ear',
-      'support-otter-lid',
-    ]) {
-      expect(hero).toContain(part);
-    }
+  test('the support illustration is decorative and loads one packaged image', () => {
+    const hero = html.slice(html.indexOf('<div class="support-hero">'), html.indexOf('<h2 id="supportDialogTitle"'));
+    expect(hero).toContain('<div class="support-hero-art" aria-hidden="true">');
+    expect(hero.match(/<img\b/g)).toHaveLength(1);
+    expect(hero).toMatch(/<img class="support-otter-image" src="assets\/support-otter\.png"[^>]*alt=""\s*\/>/);
+    expect(hero).not.toMatch(/\bsrcset=|<use\b|href=|url\(/);
+  });
+
+  test('the support dialog separates the localized intro and payment disclosures', () => {
+    expect(html).toMatch(/<dialog id="supportDialog"[^>]*aria-describedby="supportDialogIntro"/);
+    const intro = html.match(/<p id="supportDialogIntro">([\s\S]*?)<\/p>/)[1];
+    expect(Array.from(intro.matchAll(/<span data-i18n="([^"]+)">/g), (match) => match[1])).toEqual([
+      'supportIntroProject',
+      'supportIntroCoffee',
+    ]);
+    const note = html.match(/<div class="support-note">([\s\S]*?)<\/div>/)[1];
+    expect(Array.from(note.matchAll(/<p data-i18n="([^"]+)">/g), (match) => match[1])).toEqual([
+      'supportNoteOptional',
+      'supportNotePayment',
+      'supportNotePrivacy',
+    ]);
+    expect(css).toMatch(/#supportDialogIntro\{[^}]*text-align:center/);
+    expect(css).toMatch(/\.support-note\{[^}]*text-align:left/);
   });
 
   test('each support option offers exactly one action so the ask is not diluted', () => {
@@ -3326,6 +3215,8 @@ describe('optional support dialog', () => {
       expect(anchor).toContain('class="support-option-cta"');
       // Screen-reader users must learn the destination opens a new tab.
       expect(anchor).toMatch(/aria-label="[^"]*opens a new browser tab"/);
+      expect(anchor).toMatch(/data-i18n-aria-label="[^"]+"/);
+      expect(anchor).toMatch(/data-i18n="[^"]+"/);
     }
     // One anchor per option and no competing secondary button in the row.
     expect(list.match(/<a\b/g)).toHaveLength(supportLinks.length);
@@ -3334,26 +3225,25 @@ describe('optional support dialog', () => {
     expect(html).toContain('the payment itself happens on that site, never inside DevTools');
   });
 
-  test('every support animation is disabled under reduced motion', () => {
-    // Slice the block itself, not the rest of the stylesheet: an open-ended
-    // slice would count any later rule as "covered" and hide a real gap.
-    const reducedStart = css.indexOf('@media (prefers-reduced-motion:reduce)');
-    const reduced = css.slice(reducedStart, css.indexOf('\n}', reducedStart) + 2);
-    expect(reduced).toContain('prefers-reduced-motion');
-    const animatedSelectors = Array.from(
-      css.matchAll(/^([^{@\n][^{\n]*)\{[^}]*animation:support-[^}]*\}/gm),
-      (match) => match[1].trim(),
-    );
-    expect(animatedSelectors.length).toBeGreaterThanOrEqual(5);
-    for (const selector of animatedSelectors) {
-      expect(reduced).toContain(selector.split(',')[0].trim());
+  test('support artwork animates only when reduced motion is off', () => {
+    const motionBlocks = /@media \(prefers-reduced-motion:no-preference\)\{\n([\s\S]*?)\n\}/g;
+    const animatedStyles = Array.from(css.matchAll(motionBlocks), (match) => match[1]).join('\n');
+    const otherStyles = css.replace(motionBlocks, '');
+    for (const motion of [
+      'animation:brand-support-lift',
+      'animation:brand-support-blink',
+      'animation:support-otter-settle',
+      'animation:support-steam-drift',
+      'animation:support-heart-lift',
+    ]) {
+      expect(animatedStyles).toContain(motion);
+      expect(otherStyles).not.toContain(motion);
     }
-    // Steam and sparkles animate up from opacity:0, so stopping the animation
-    // without restoring opacity would erase them instead of stilling them.
-    expect(reduced).toContain('.support-steam,.brand-steam{opacity:.55}');
-    expect(reduced).toContain('.support-sparkle{opacity:.7}');
-    // Same trap for the rising hearts.
-    expect(reduced).toContain('.support-heart{opacity:.9}');
+    expect(animatedStyles).toMatch(/\.brand-support-otter\{transition:/);
+    expect(otherStyles).not.toMatch(/\.brand-support-otter\{transition:/);
+    const reduced = css.match(/@media \(prefers-reduced-motion:reduce\)\{\n([\s\S]*?)\n\}/)[1];
+    expect(reduced).toContain('#supportDialog[open],#supportDialog[open]::backdrop{animation:none}');
+    expect(reduced).toContain('.support-option-cta:hover{transform:none;filter:none}');
   });
 
   test('support dialog CSS uses theme tokens and stays within the viewport', () => {
@@ -3366,7 +3256,7 @@ describe('optional support dialog', () => {
     // contrast is already asserted by the theme contract above.
     expect(css).toMatch(/\.support-option-cta\{[^}]*var\(--accent-fill\)[^}]*var\(--on-accent\)/);
     expect(css).toContain('.support-option-cta:focus-visible{');
-    expect(css).toMatch(/\.support-otter-body,[^{]*\{fill:var\(--otter\)\}/);
+    expect(css).toMatch(/@media \(max-width:440px\)\{[^@]*\.support-option-cta\{width:100%\}/);
   });
 });
 
@@ -3823,11 +3713,10 @@ describe('devtools-session mirror contracts', () => {
     expect(backgroundJs).toContain('devtoolsWindows.find((candidate) => candidate.focused === true)');
     expect(backgroundJs).toContain("(devtoolsWindows.length === 1 ? devtoolsWindows[0] : null)");
     expect(backgroundJs).toContain("chrome.windows.update(target.id, { state: 'minimized' }");
-    // Opening the fixed offline workspace is the worker's only Tabs API use;
-    // tab inspection, navigation, and capture still require a separate review.
-    expect(backgroundJs).not.toMatch(/chrome\.tabs\.(?!create\b)/);
+    expect(backgroundJs).not.toMatch(/chrome\.tabs\./);
     const manifestJson = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
     expect(manifestJson.background).toEqual({ service_worker: 'background.js' });
+    expect(manifestJson.action).toEqual({ default_title: 'Open Network+', default_popup: 'launcher.html' });
     expect(manifestJson.permissions).toEqual(['storage']);
     // The viewer never runs automatic body prefetch: bodies cross the port
     // only when a row asks, and a closed DevTools session must not turn the
@@ -4647,10 +4536,6 @@ describe('audit layout and contrast contracts', () => {
     const occurrences = css.split('.status-details[hidden]{display:none}').length - 1;
     expect(occurrences).toBe(2);
     expect(css.indexOf('.status-details[hidden]{display:none}')).toBeLessThan(css.indexOf('@media (max-width:800px)'));
-  });
-
-  test('the toolbar steam keeps a visible resting value under reduced motion', () => {
-    expect(css).toContain('.support-steam,.brand-steam{opacity:.55}');
   });
 
   test('the inspector halves collapse from their labels and remember the split', () => {

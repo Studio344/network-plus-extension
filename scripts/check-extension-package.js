@@ -44,12 +44,16 @@ const HTML_RESOURCE_ATTRIBUTES = Object.freeze({
   video: 'src',
 });
 const RUNTIME_FILES = Object.freeze([
+  'assets/support-otter.png',
   'background.js',
   'devtools.html',
   'devtools.js',
   'icons/icon128.png',
   'icons/icon16.png',
   'icons/icon48.png',
+  'launcher.css',
+  'launcher.html',
+  'launcher.js',
   'manifest.json',
   'panel.css',
   'panel.html',
@@ -312,7 +316,9 @@ const validateExtension = (root, archiveFiles = RUNTIME_FILES) => {
     }
   }
 
-  const javascript = ['background.js', 'devtools.js', 'panel.js'].map((file) => runtimeText.get(file) ?? '').join('\n');
+  const javascript = ['background.js', 'devtools.js', 'launcher.js', 'panel.js']
+    .map((file) => runtimeText.get(file) ?? '')
+    .join('\n');
   const permissions = [
     ...(Array.isArray(manifest.permissions) ? manifest.permissions : []),
     ...(Array.isArray(manifest.optional_permissions) ? manifest.optional_permissions : []),
@@ -333,14 +339,14 @@ const validateExtension = (root, archiveFiles = RUNTIME_FILES) => {
     errors.push(`manifest devtools_page is not in the archive allowlist: ${manifest.devtools_page}`);
   }
 
-  // Only the audited toolbar action may launch the local offline workspace.
-  // A popup, alternate icon, or other action field requires a separate review.
-  if (JSON.stringify(manifest.action) !== JSON.stringify({ default_title: 'Open Network+ (offline)' })) {
-    errors.push('manifest action must be exactly: { "default_title": "Open Network+ (offline)" }');
+  const expectedAction = { default_title: 'Open Network+', default_popup: 'launcher.html' };
+  if (JSON.stringify(manifest.action) !== JSON.stringify(expectedAction)) {
+    errors.push('manifest action must be exactly: ' + JSON.stringify(expectedAction));
+  } else if (!archiveFiles.includes(expectedAction.default_popup)) {
+    errors.push('manifest action popup is not in the archive allowlist: ' + expectedAction.default_popup);
   }
 
-  // The audited worker opens the offline workspace and minimizes undocked
-  // DevTools on pop-out. Neither operation needs additional permissions.
+  // The audited worker minimizes undocked DevTools on pop-out.
   if (JSON.stringify(manifest.background) !== JSON.stringify({ service_worker: 'background.js' })) {
     errors.push('manifest background must be exactly: { "service_worker": "background.js" }');
   } else if (!archiveFiles.includes(manifest.background.service_worker)) {
@@ -372,10 +378,22 @@ const validateExtension = (root, archiveFiles = RUNTIME_FILES) => {
   validateExactReferences(errors, 'panel.html scripts', panelHtml.scripts, ['vendor/fflate.js', 'panel.js']);
   validateExactReferences(errors, 'panel.html stylesheets', panelHtml.stylesheets, ['panel.css']);
 
-  const panelCss = inspectCss('panel.css', runtimeText.get('panel.css') ?? '');
-  errors.push(...panelCss.errors);
+  const launcherHtml = inspectHtml('launcher.html', runtimeText.get('launcher.html') ?? '');
+  errors.push(...launcherHtml.errors);
+  validateExactReferences(errors, 'launcher.html scripts', launcherHtml.scripts, ['launcher.js']);
+  validateExactReferences(errors, 'launcher.html stylesheets', launcherHtml.stylesheets, ['launcher.css']);
 
-  const staticResources = new Set([...devtoolsHtml.resources, ...panelHtml.resources, ...panelCss.resources]);
+  const panelCss = inspectCss('panel.css', runtimeText.get('panel.css') ?? '');
+  const launcherCss = inspectCss('launcher.css', runtimeText.get('launcher.css') ?? '');
+  errors.push(...panelCss.errors, ...launcherCss.errors);
+
+  const staticResources = new Set([
+    ...devtoolsHtml.resources,
+    ...panelHtml.resources,
+    ...launcherHtml.resources,
+    ...panelCss.resources,
+    ...launcherCss.resources,
+  ]);
   for (const reference of staticResources) {
     if (!archiveFiles.includes(reference)) {
       errors.push(`static resource is not in the archive allowlist: ${reference}`);

@@ -3875,7 +3875,7 @@ browserTest(
                 brandPaddingLeft: brandStyle.paddingLeft,
                 brandPaddingRight: brandStyle.paddingRight,
                 brandSubtitleDisplay: getComputedStyle(
-                  document.querySelector('.brand-sub-text'),
+                  document.querySelector('.brand-sub'),
                 ).display,
               };
             })()`,
@@ -3918,8 +3918,7 @@ browserTest(
       const compactBoundaryMeasurement = measurementsByWidth.get(1254);
       expect(compactBoundaryMeasurement.brandSubtitleDisplay).toBe('none');
       expect(compactBoundaryMeasurement.brandWidth).toBeLessThan(150);
-      // Compact mode drops only the sub-label words; the otter keeps a fixed
-      // 22px perch between the wordmark and the cup, inside symmetric paddings.
+      // Compact mode keeps the wordmark and the support icon inside symmetric paddings.
       expect(compactBoundaryMeasurement.brandPaddingLeft).toBe('8px');
       expect(compactBoundaryMeasurement.brandPaddingRight).toBe('8px');
 
@@ -7399,14 +7398,14 @@ browserTest(
       expect(observed.english).toMatchObject({
         view: 'offline', scope: 'Offline · no live capture', scopeVisible: true,
         title: 'Inspect a saved capture.', action: 'Import HAR or SAZ',
-        description: expect.stringContaining('For live capture, open Network+ in DevTools'),
+        description: 'Import HAR or SAZ to inspect saved requests.',
         pauseHidden: true, pauseDisabled: true, recording: false,
         streamHidden: true, popoutHidden: true, liveListener: 'undefined',
       });
       expect(observed.japanese).toMatchObject({
         scope: 'オフライン · ライブキャプチャなし', title: '保存済みキャプチャを調べます。',
         action: 'HAR または SAZ をインポート',
-        description: expect.stringContaining('調べたいページで DevTools の Network+'),
+        description: 'HAR または SAZ をインポートして保存済みリクエストを調べられます。',
       });
       expect(observed.pickerOpened).toBe(1);
       expect(observed.imported).toMatchObject({
