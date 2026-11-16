@@ -139,23 +139,41 @@ function runLauncher({
   search = '',
   uiLocale,
   languages = ['en-US'],
+  userAgent,
+  userAgentData,
+  version = '1.2.3',
   preferences = {},
   deferStorage = false,
+  deferSave = false,
+  saveError = false,
 } = {}) {
   const elements = new Map();
   const guideLanguageKey = 'networkPlus.liveGuideLang';
   let loadPreferences;
+  let onStorageChange;
+  let finishSave;
   const chrome = {
     i18n: { getUILanguage: () => uiLocale },
-    storage: { local: {
-      get(_keys, callback) {
-        loadPreferences = () => callback(preferences);
-        if (!deferStorage) loadPreferences();
+    storage: {
+      onChanged: { addListener(handler) { onStorageChange = handler; } },
+      local: {
+        get(_keys, callback) {
+          loadPreferences = () => callback(preferences);
+          if (!deferStorage) loadPreferences();
+        },
+        set: jest.fn((_values, callback) => {
+          finishSave = () => {
+            if (saveError) chrome.runtime.lastError = { message: 'storage failed' };
+            callback();
+            delete chrome.runtime.lastError;
+          };
+          if (!deferSave) finishSave();
+        }),
       },
-      set: jest.fn((_values, callback) => callback()),
-    } },
+    },
     runtime: {
       getURL: (file) => 'chrome-extension://network-plus-test/' + file,
+      getManifest: () => ({ version }),
     },
     tabs: { create: jest.fn(async () => ({})) },
   };
@@ -164,9 +182,14 @@ function runLauncher({
     documentElement: { style: {} },
     querySelectorAll(query) {
       if (query === '[data-copy]') {
-        const title = this.getElementById('setup-title');
-        title.dataset = { copy: 'setupTitle' };
-        return [title];
+        return [
+          ['setup-title', 'setupTitle'],
+          ['report-problem-label', 'reportProblem'],
+        ].map(([id, copy]) => {
+          const element = this.getElementById(id);
+          element.dataset = { copy };
+          return element;
+        });
       }
       return [];
     },
@@ -184,10 +207,13 @@ function runLauncher({
   const location = { search };
   const window = { close: jest.fn() };
   new Function('chrome', 'document', 'location', 'navigator', 'window', launcherSource)(
-    chrome, document, location, { language: languages[0], languages }, window,
+    chrome, document, location, { language: languages[0], languages, userAgent, userAgentData }, window,
   );
   const get = (id) => document.getElementById(id);
-  return { chrome, get, close: window.close, root: document.documentElement, loadPreferences, guideLanguageKey };
+  return {
+    chrome, get, close: window.close, root: document.documentElement, loadPreferences, guideLanguageKey,
+    onStorageChange, finishSave: () => finishSave(),
+  };
 }
 
 describe('extension icon launcher', () => {
@@ -199,6 +225,7 @@ describe('extension icon launcher', () => {
     expect(get('launcher-actions').hidden).toBe(false);
     expect(get('live-setup').hidden).toBe(true);
     expect(get('guide-languages').hidden).toBe(true);
+    expect(get('launcher-preferences').hidden).toBe(false);
     await get(id).handlers.click();
     expect(chrome.tabs.create).toHaveBeenCalledWith({ url: 'chrome-extension://network-plus-test/' + target });
     expect(close).toHaveBeenCalledTimes(1);
@@ -209,8 +236,56 @@ describe('extension icon launcher', () => {
     expect(get('live-setup').hidden).toBe(false);
     expect(get('launcher-actions').hidden).toBe(true);
     expect(get('guide-languages').hidden).toBe(false);
+    expect(get('launcher-preferences').hidden).toBe(true);
+    expect(get('report-problem').href).toBeUndefined();
     expect(chrome.tabs.create).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
+  });
+
+  test('prefills only the Network+ version, Edge major version, and OS family on the localized report link', () => {
+    const { chrome, get } = runLauncher({
+      preferences: { 'networkPlus.lang': 'ja' },
+      userAgent: 'Mozilla/5.0 secret-value Chrome/151.1.2.3 Edg/151.4.5.6',
+      userAgentData: {
+        brands: [{ brand: 'Google Chrome', version: '151' }, { brand: 'Microsoft Edge', version: '151.4.5.6' }],
+        platform: 'macOS',
+      },
+    });
+    const url = new URL(get('report-problem').href);
+    expect(url.origin + url.pathname).toBe('https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform');
+    expect([...url.searchParams]).toEqual([
+      ['hl', 'ja'],
+      ['usp', 'pp_url'],
+      ['entry.554959465', 'Network+: 1.2.3 | Browser: Microsoft Edge 151 | OS: macOS'],
+    ]);
+    expect(get('report-problem-label').textContent).toBe('不具合を報告');
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+
+    const select = get('launcher-language');
+    select.value = 'en';
+    select.handlers.change();
+    expect(new URL(get('report-problem').href).searchParams.get('hl')).toBe('en');
+    expect(get('report-problem-label').textContent).toBe('Report a problem');
+  });
+
+  test.each([
+    ['Mozilla/5.0 (Windows NT 10.0) Chrome/151.0.0.0', 'Google Chrome 151', 'Windows'],
+    ['Mozilla/5.0 (X11; Linux x86_64) Chrome/151.0.0.0 Edg/150.0.0.0', 'Microsoft Edge 150', 'Linux'],
+  ])('uses only recognizable facts from the browser fallback', (userAgent, browser, os) => {
+    const { get } = runLauncher({ userAgent });
+    const url = new URL(get('report-problem').href);
+    expect(url.searchParams.get('entry.554959465')).toBe(
+      `Network+: 1.2.3 | Browser: ${browser} | OS: ${os}`,
+    );
+  });
+
+  test('opens the form without a metadata field when environment values are unavailable or malformed', () => {
+    const { get } = runLauncher({
+      version: 'unknown-user',
+      userAgent: 'confidential browser string',
+      userAgentData: { brands: [null, { brand: 'unrecognized browser', version: '123' }], platform: 'secret' },
+    });
+    expect([...new URL(get('report-problem').href).searchParams]).toEqual([['hl', 'en']]);
   });
 
   test.each([
@@ -246,5 +321,53 @@ describe('extension icon launcher', () => {
   test('the guide language override does not change the popup language', () => {
     const { root } = runLauncher({ preferences: { 'networkPlus.lang': 'en', 'networkPlus.liveGuideLang': 'ja' } });
     expect(root.lang).toBe('en');
+  });
+
+  test('popup language changes save the shared preference and reset the old guide override together', async () => {
+    const { get, root, chrome, loadPreferences, finishSave } = runLauncher({
+      preferences: { 'networkPlus.lang': 'en', 'networkPlus.liveGuideLang': 'en' },
+      deferStorage: true,
+      deferSave: true,
+    });
+    const select = get('launcher-language');
+    select.value = 'ja';
+    select.handlers.change();
+    loadPreferences();
+    expect(root.lang).toBe('ja');
+    expect(select.value).toBe('ja');
+    expect(chrome.storage.local.set).toHaveBeenCalledWith(
+      { 'networkPlus.lang': 'ja', 'networkPlus.liveGuideLang': null },
+      expect.any(Function),
+    );
+    const opening = get('open-live').handlers.click();
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    finishSave();
+    await opening;
+    expect(chrome.tabs.create).toHaveBeenCalledTimes(1);
+  });
+
+  test('guide-only updates during popup startup do not swallow the shared preference', () => {
+    const { root, onStorageChange, loadPreferences } = runLauncher({
+      preferences: { 'networkPlus.lang': 'ja' },
+      deferStorage: true,
+    });
+    onStorageChange({ 'networkPlus.liveGuideLang': { newValue: 'en' } }, 'local');
+    loadPreferences();
+    expect(root.lang).toBe('ja');
+  });
+
+  test('the popup returns to the browser language and reports unsuccessful storage in that language', () => {
+    const { root, get, chrome } = runLauncher({
+      uiLocale: 'ja-JP', preferences: { 'networkPlus.lang': 'en' }, saveError: true,
+    });
+    const select = get('launcher-language');
+    select.value = 'system';
+    select.handlers.change();
+    expect(root.lang).toBe('ja');
+    expect(chrome.storage.local.set).toHaveBeenCalledWith(
+      { 'networkPlus.lang': 'system', 'networkPlus.liveGuideLang': null },
+      expect.any(Function),
+    );
+    expect(get('launcher-status').textContent).toBe('表示言語を保存できませんでした。もう一度お試しください。');
   });
 });

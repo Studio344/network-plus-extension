@@ -4,6 +4,8 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- ✨ **Bug reports** — open a form from the toolbar with Network+, browser, and OS details filled in, and describe the problem in one field.
+- 🔧 **Toolbar menu** — make both actions look clearly clickable, add a shared language selector, and refresh the Network+ icon.
 - 🔧 **Launcher design** — add the coffee otter to the icon menu, distinguish both actions by color, and illustrate the live guide's request flow.
 - 🔧 **Live recording guide** — enlarge the instructions and show DevTools shortcuts with a Japanese and English language switch.
 - ✨ **Network+ launcher** — open HAR/SAZ or prepare live recording from the same icon, then open the site to record in the same tab.
