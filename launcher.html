@@ -62,6 +62,29 @@
         </svg>
       </button>
     </div>
+    <div id="launcher-preferences" class="launcher-preferences" hidden>
+      <div class="launcher-language-field">
+        <label for="launcher-language">
+          <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+            <circle cx="10" cy="10" r="7.5" stroke="currentColor" stroke-width="1.35"/>
+            <ellipse cx="10" cy="10" rx="3.3" ry="7.5" stroke="currentColor" stroke-width="1.35"/>
+            <path d="M2.5 10h15" stroke="currentColor" stroke-width="1.35"/>
+          </svg>
+          <span data-copy="languageLabel">Language</span>
+        </label>
+        <select id="launcher-language">
+          <option value="system" data-copy="systemLanguage">Browser default</option>
+          <option value="ja" lang="ja">日本語</option>
+          <option value="en" lang="en">English</option>
+        </select>
+      </div>
+      <a id="report-problem" class="launcher-report-link" target="_blank" rel="noopener noreferrer">
+        <span id="report-problem-label" data-copy="reportProblem">Report a problem</span>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+          <path d="M7 3H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V9m-4-6h4v4M7 9l6-6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </a>
+    </div>
     <section id="live-setup" aria-labelledby="setup-title" hidden>
       <div class="setup-hero">
         <div class="setup-intro">
