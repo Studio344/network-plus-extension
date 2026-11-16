@@ -5,16 +5,24 @@ const copy = {
     saved: 'Open HAR or SAZ',
     live: 'Start live recording',
     setupTitle: 'Set up live recording',
-    stepDevTools: 'Open DevTools in this tab and select Network+.',
-    stepNavigate: 'Use a bookmark or the address bar to open the site you want to record in this same tab.',
+    guideLanguage: 'Guide language',
+    stepDevTools: 'Open DevTools in this tab',
+    stepPanel: 'Select the Network+ tab',
+    stepPanelHelp: 'If it is hidden, look under » or the + button (More tools) in DevTools.',
+    stepNavigate: 'Open a bookmark in this tab',
+    stepNavigateHelp: 'Keep DevTools open and go to the site you want to record from your bookmarks or favorites.',
     cannotOpen: 'The workspace could not open. Please try again.',
   },
   ja: {
     saved: 'HAR・SAZを開く',
     live: 'ライブ記録を始める',
     setupTitle: 'ライブ記録の準備',
-    stepDevTools: 'このタブで DevTools を開き、Network+ を選びます。',
-    stepNavigate: 'ブックマークなどから、記録したいサイトを同じタブで開きます。',
+    guideLanguage: '案内の表示言語',
+    stepDevTools: 'このタブで開発者ツール（DevTools）を開く',
+    stepPanel: 'Network+ タブを選ぶ',
+    stepPanelHelp: '見つからないときは、開発者ツールの「»」または「＋」から探せます。',
+    stepNavigate: 'このタブでブックマークを開く',
+    stepNavigateHelp: '開発者ツールを開いたまま、お気に入りやブックマークから記録したいサイトに移動します。',
     cannotOpen: 'Network+の画面を開けませんでした。もう一度お試しください。',
   },
 };
@@ -22,9 +30,17 @@ const copy = {
 const root = document.documentElement;
 const liveSetup = new URLSearchParams(location.search).get('view') === 'live';
 const statusMessage = document.getElementById('launcher-status');
-const browserLanguage = navigator.language.toLowerCase().startsWith('ja') ? 'ja' : 'en';
+const guideLangKey = 'networkPlus.liveGuideLang';
+const preferredLocale = (navigator.languages || []).find((locale) => /^(ja|en)(?:[-_]|$)/i.test(locale));
+const browserLanguage = [chrome.i18n?.getUILanguage(), preferredLocale || navigator.language]
+  .some((locale) => /^ja(?:[-_]|$)/i.test(locale)) ? 'ja' : 'en';
 let language = browserLanguage;
 let statusKey = '';
+let guideLanguagePicked = false;
+const guideLanguages = {
+  ja: document.getElementById('guide-ja'),
+  en: document.getElementById('guide-en'),
+};
 
 function setStatus(key) {
   statusKey = key;
@@ -36,6 +52,14 @@ function renderLanguage() {
   document.querySelectorAll('[data-copy]').forEach((element) => {
     element.textContent = copy[language][element.dataset.copy];
   });
+  document.querySelectorAll('[data-label]').forEach((element) => {
+    element.setAttribute('aria-label', copy[language][element.dataset.label]);
+  });
+  if (liveSetup) {
+    for (const [locale, button] of Object.entries(guideLanguages)) {
+      button.setAttribute('aria-pressed', String(locale === language));
+    }
+  }
   setStatus(statusKey);
 }
 
@@ -44,18 +68,34 @@ document.getElementById('live-setup').hidden = !liveSetup;
 if (liveSetup) document.body.dataset.view = 'live';
 renderLanguage();
 
-chrome.storage.local.get(['networkPlus.lang', 'networkPlus.theme'], (preferences) => {
+chrome.storage.local.get(['networkPlus.lang', 'networkPlus.theme', guideLangKey], (preferences) => {
   if (chrome.runtime.lastError) return;
-  const preferredLanguage = preferences['networkPlus.lang'];
-  if (preferredLanguage === 'en' || preferredLanguage === 'ja') {
-    language = preferredLanguage;
+  if (!guideLanguagePicked) {
+    const guideLanguage = preferences[guideLangKey];
+    const panelLanguage = preferences['networkPlus.lang'];
+    if (liveSetup && (guideLanguage === 'en' || guideLanguage === 'ja')) {
+      language = guideLanguage;
+    } else if (panelLanguage === 'en' || panelLanguage === 'ja') {
+      language = panelLanguage;
+    }
     renderLanguage();
   }
   const theme = preferences['networkPlus.theme'];
   if (theme === 'light' || theme === 'dark') root.style.colorScheme = theme;
 });
 
-if (!liveSetup) {
+if (liveSetup) {
+  for (const [locale, button] of Object.entries(guideLanguages)) {
+    button.addEventListener('click', () => {
+      guideLanguagePicked = true;
+      language = locale;
+      renderLanguage();
+      chrome.storage.local.set({ [guideLangKey]: locale }, () => {
+        if (chrome.runtime.lastError) console.warn('Network+ could not save the guide language.');
+      });
+    });
+  }
+} else {
   const saved = document.getElementById('open-saved');
   const live = document.getElementById('open-live');
   const open = async (target) => {
