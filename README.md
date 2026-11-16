@@ -72,7 +72,9 @@ The DevTools panel and its pop-out can show a request as **Pending** while it wa
 
 ### Open Network+ from the browser icon
 
-Click **Network+** in the browser’s Extensions menu or on the toolbar. Choose **Open HAR or SAZ** to inspect a saved capture. For a live recording, choose **Start live recording**. The guide shows the keyboard shortcut for opening DevTools. Select **Network+** in DevTools, then open the site you want to record in the same tab. Use **日本語** or **English** to switch the guide language.
+Click **Network+** in the browser’s Extensions menu or on the toolbar. Choose **Open HAR or SAZ** to inspect a saved capture. For a live recording, choose **Start live recording**. The guide shows the keyboard shortcut for opening DevTools. Select **Network+** in DevTools, then open the site you want to record in the same tab.
+
+The toolbar menu’s **Language** selector shares the extension’s language setting and applies it to the live guide. The guide’s **日本語** and **English** buttons also let you switch that page on its own.
 
 ### Install from the release ZIP
 
@@ -358,7 +360,9 @@ Repository conventions, the panel's section layout, XSS rules, and the review to
 
 ## 💬 Support
 
-Questions and bug reports go to [GitHub Issues](https://github.com/himiyosh/network-plus-extension/issues/new/choose). Issues are public: remove credentials, customer data, and real traffic before posting, and review the output of `Copy safe support summary` before pasting it.
+For a bug report, choose **Report a problem** in the Network+ toolbar menu. The [Google Form](https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform) asks you to describe what happened in one required field. The toolbar link fills in your Network+ version, browser major version, and OS family when available. You can review or clear those details before submitting.
+
+[GitHub Issues](https://github.com/himiyosh/network-plus-extension/issues/new/choose) is available for questions and public bug reports. Remove credentials, customer data, and real traffic before sharing, and review the output of `Copy safe support summary` before pasting it into an issue.
 
 ## 💖 Sponsor
 
