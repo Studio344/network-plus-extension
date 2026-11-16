@@ -44,6 +44,7 @@ const HTML_RESOURCE_ATTRIBUTES = Object.freeze({
   video: 'src',
 });
 const RUNTIME_FILES = Object.freeze([
+  'assets/support-otter.png',
   'background.js',
   'devtools.html',
   'devtools.js',
