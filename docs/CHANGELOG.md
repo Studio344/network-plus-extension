@@ -4,6 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🔧 **Support** — refresh the dialog and localized actions, and animate a coffee-cup otter in the toolbar.
 - 🐛 **DevTools redraw** — resume capture repainting when a minimized window becomes visible, even if its queued animation frame is delayed.
 - 🔧 **Optional support** — link to Gumroad Coffee for one-time contributions.
 - 🔒 **Safer sharing and replay** — fix URL and header redaction, quote PowerShell literals safely, and isolate same-origin resend from page scripts.

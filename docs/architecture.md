@@ -17,7 +17,7 @@ background.js              toolbar action opens panel.html?view=offline; also
 
 - **DevTools panel extension.** Requests are captured through `chrome.devtools.network.onRequestFinished` (the `chrome.*` namespace of the Edge extension API).
 - **No ES modules.** DevTools panel pages do not support `<script type="module">`, so the panel uses a single-file IIFE. This is a platform constraint; `import` / `export` cannot be introduced without a bundler, and the project deliberately has none.
-- **Buildless.** Files are loaded into Edge exactly as they are checked in. `npm run extension:package` archives an explicit allowlist of 11 runtime files without transforming code.
+- **Buildless.** Files are loaded into Edge exactly as they are checked in. `npm run extension:package` archives an explicit allowlist of runtime files without transforming code.
 
 ## Rendering pipeline
 
