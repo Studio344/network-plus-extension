@@ -4,6 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🔧 **Launcher design** — distinguish saved captures and live recording by color and illustrate the live guide's request flow.
 - 🔧 **Live recording guide** — enlarge the instructions and show DevTools shortcuts with a Japanese and English language switch.
 - ✨ **Network+ launcher** — open HAR/SAZ or prepare live recording from the same icon, then follow a bookmark in the recording tab.
 - 🔧 **Support** — refresh the dialog and localized actions, and animate a coffee-cup otter in the toolbar.

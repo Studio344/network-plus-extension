@@ -198,6 +198,7 @@ describe('extension icon launcher', () => {
     const { get, chrome, close } = runLauncher();
     expect(get('launcher-actions').hidden).toBe(false);
     expect(get('live-setup').hidden).toBe(true);
+    expect(get('guide-languages').hidden).toBe(true);
     await get(id).handlers.click();
     expect(chrome.tabs.create).toHaveBeenCalledWith({ url: 'chrome-extension://network-plus-test/' + target });
     expect(close).toHaveBeenCalledTimes(1);
@@ -207,6 +208,7 @@ describe('extension icon launcher', () => {
     const { chrome, get, close } = runLauncher({ search: '?view=live' });
     expect(get('live-setup').hidden).toBe(false);
     expect(get('launcher-actions').hidden).toBe(true);
+    expect(get('guide-languages').hidden).toBe(false);
     expect(chrome.tabs.create).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
   });
