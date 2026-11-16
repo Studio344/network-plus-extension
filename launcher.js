@@ -12,8 +12,8 @@ const copy = {
     stepDevTools: 'Open DevTools in this tab',
     stepPanel: 'Select the Network+ tab',
     stepPanelHelp: 'If it is hidden, look under » or the + button (More tools) in DevTools.',
-    stepNavigate: 'Open a bookmark in this tab',
-    stepNavigateHelp: 'Keep DevTools open while you go to the site you want to record.',
+    stepNavigate: 'Open the site in this tab',
+    stepNavigateHelp: 'Keep DevTools open and navigate to the site you want to record, for example from a bookmark.',
     cannotOpen: 'The workspace could not open. Please try again.',
   },
   ja: {
@@ -27,8 +27,8 @@ const copy = {
     stepDevTools: 'このタブで開発者ツール（DevTools）を開く',
     stepPanel: 'Network+ タブを選ぶ',
     stepPanelHelp: '見えないときは、開発者ツールの「»」か「＋」を開きます。',
-    stepNavigate: 'このタブでブックマークを開く',
-    stepNavigateHelp: '開発者ツールを開いたまま、記録したいサイトへ移動します。',
+    stepNavigate: 'このタブで記録したいサイトを開く',
+    stepNavigateHelp: '開発者ツールを開いたまま、ブックマークなど普段の方法で移動します。',
     cannotOpen: 'Network+の画面を開けませんでした。もう一度お試しください。',
   },
 };
