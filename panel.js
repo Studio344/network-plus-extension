@@ -6832,9 +6832,13 @@ const _NetworkPlus = (function () {
       en: 'Copies only the packaged version, Edge major, coarse OS family, theme, retention, recording and sample state, and display and motion preferences. Captured traffic is excluded. Review the summary before posting.',
       ja: 'コピーされるのはパッケージ版のバージョン、Edge のメジャーバージョン、大まかな OS 種別、テーマ、保持設定、記録とサンプルの状態、表示とモーションの設定だけです。キャプチャしたトラフィックは含まれません。投稿前に内容を確認してください。',
     },
-    supportIntro: {
-      en: 'A solo, MIT-licensed project. If it saved you a debugging session, a coffee keeps it going.',
-      ja: '個人開発の MIT ライセンスプロジェクトです。助かったと感じたら、コーヒー 1 杯が開発を支えます。',
+    supportIntroProject: {
+      en: 'Network+ is an independent, MIT-licensed project.',
+      ja: 'Network+ は MIT ライセンスの個人開発プロジェクトです。',
+    },
+    supportIntroCoffee: {
+      en: 'If it made debugging a little easier, a coffee helps keep it going.',
+      ja: 'デバッグに役立ったら、コーヒー1杯で応援してもらえるとうれしいです。',
     },
     supportFactFree: {
       en: 'Every feature, free',
@@ -6848,13 +6852,29 @@ const _NetworkPlus = (function () {
       en: 'Optional, no perks',
       ja: '支援は任意・特典なし',
     },
-    supportNote: {
-      en: 'Contributing is optional and never unlocks, limits, or changes any feature. The buttons open the payment page in a browser tab; the payment itself happens on that site, never inside DevTools. Network+ sends them no captured traffic and no usage data, and cannot tell whether you contributed.',
-      ja: '支援は任意で、機能の解放・制限・変更は一切ありません。ボタンは支払いページをブラウザのタブで開き、決済はそのサイト上で行われ、DevTools 内では行われません。Network+ はこれらのサイトへキャプチャも利用データも送らず、支援の有無を知ることもできません。',
+    supportNoteOptional: {
+      en: 'Contributing is optional and never unlocks, limits, or changes any feature.',
+      ja: '支援は任意で、機能の解放・制限・変更は一切ありません。',
+    },
+    supportNotePayment: {
+      en: 'The buttons open the payment page in a browser tab; the payment itself happens on that site, never inside DevTools.',
+      ja: 'ボタンは支払いページをブラウザのタブで開き、決済はそのサイト上で行われ、DevTools 内では行われません。',
+    },
+    supportNotePrivacy: {
+      en: 'Network+ sends them no captured traffic and no usage data, and cannot tell whether you contributed.',
+      ja: 'Network+ はこれらのサイトへキャプチャも利用データも送らず、支援の有無を知ることもできません。',
     },
     supportSponsorsHint: {
       en: 'github.com/sponsors/himiyosh · one-time or monthly · no platform fee',
       ja: 'github.com/sponsors/himiyosh · 単発または月額 · プラットフォーム手数料なし',
+    },
+    supportSponsorsAction: {
+      en: 'Sponsor',
+      ja: 'スポンサーになる',
+    },
+    ariaSupportSponsorsLink: {
+      en: 'Sponsor on GitHub Sponsors, opens a new browser tab',
+      ja: 'スポンサーになる(GitHub Sponsors、新しいタブで開く)',
     },
     supportGumroadHint: {
       en: 'himiyosh.gumroad.com/coffee · one-time support',
@@ -19336,8 +19356,13 @@ const _NetworkPlus = (function () {
       supportDialog._networkPlusTrigger = trigger || null;
       supportDialog.showModal();
       setTimeout(() => {
-        const closeButton = $('#supportCloseBtn');
-        if (supportDialog.open && closeButton) closeButton.focus();
+        if (!supportDialog.open) return;
+        // Keep the start of the dialog visible when Close is below the fold.
+        const focusTarget = supportDialog.scrollHeight > supportDialog.clientHeight
+          ? $('#supportDialogTitle')
+          : $('#supportCloseBtn');
+        focusTarget.focus({ preventScroll: true });
+        supportDialog.scrollTop = 0;
       }, 0);
     };
     if (supportDialog) {

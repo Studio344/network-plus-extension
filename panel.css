@@ -118,53 +118,33 @@ html[data-theme="light"]{
 .brand{position:relative;display:inline-flex;align-items:center;gap:6px;padding:3px 14px;white-space:nowrap;border-radius:8px;background:var(--accent-dim);min-height:32px;overflow:visible;cursor:pointer}
 .topbar button.brand{border-color:transparent;background:transparent;padding:3px 14px;font-size:14px}
 .topbar button.brand:hover{background:var(--hover);color:var(--fg)}
-.brand-otter-window{position:absolute;bottom:calc(100% + 2px);left:50%;margin-left:-11px;width:22px;height:15px;overflow:hidden;pointer-events:none}
-.brand-otter-motion{display:block;width:22px;height:15px;animation:brand-otter-bob 2.4s steps(1,end) infinite}
-.brand-otter{display:block;width:22px;height:15px}
-.topbar button.brand:hover .brand-otter-motion,.topbar button.brand:focus-visible .brand-otter-motion{animation:none}
-.brand-otter-sleep{display:none}
-.topbar button.brand:hover .brand-otter-wake,.topbar button.brand:focus-visible .brand-otter-wake,.topbar button.brand:hover .brand-otter-lid,.topbar button.brand:focus-visible .brand-otter-lid,.topbar button.brand:hover .brand-otter-glint,.topbar button.brand:focus-visible .brand-otter-glint{display:none}
-.topbar button.brand:hover .brand-otter-sleep,.topbar button.brand:focus-visible .brand-otter-sleep{display:inline}
-.brand-otter-lid{opacity:0;animation:brand-otter-blink 5.2s steps(1,end) infinite}
-.brand-otter-glint{opacity:0;animation:brand-otter-glint 8.8s steps(1,end) infinite;animation-delay:3s}
-.brand-heart-px{position:absolute;width:5px;height:4px;bottom:calc(100% + 1px);opacity:0;pointer-events:none}
-.brand-heart-px svg{display:block;width:5px;height:4px}
-.brand-heart-px--a{left:calc(50% + 12px)}
-.brand-heart-px--b{left:calc(50% - 16px)}
-.topbar button.brand:hover .brand-heart-px--a,.topbar button.brand:focus-visible .brand-heart-px--a{animation:brand-heart-rise 1.6s steps(6,end) infinite}
-.topbar button.brand:hover .brand-heart-px--b,.topbar button.brand:focus-visible .brand-heart-px--b{animation:brand-heart-rise 1.6s steps(6,end) 0.8s infinite}
-@keyframes brand-otter-bob{
-  0%,100%{transform:translateY(0)}
-  50%{transform:translateY(1px)}
+.brand-support-mark{display:block;width:30px;height:24px;flex:none;color:var(--text-accent)}
+.brand-support-saucer{stroke:currentColor;stroke-width:1.3;opacity:.65}
+.brand-support-cup,.brand-support-cup-handle{fill:color-mix(in srgb,var(--text-accent) 19%,var(--surface));stroke:currentColor}
+.brand-support-coffee{fill:var(--brew);stroke:currentColor}
+.brand-support-coffee-shine{stroke:var(--otter-light);stroke-width:.7}
+.brand-support-glaze{stroke:currentColor;stroke-width:.8;opacity:.76}
+.brand-otter-fur{fill:var(--otter-light);stroke:var(--brew)}
+.brand-otter-muzzle{fill:var(--otter-muzzle)}
+.brand-otter-eyes,.brand-otter-nose{fill:var(--brew)}
+.brand-otter-eyes{transform-box:fill-box;transform-origin:center}
+.brand-otter-smile{stroke:var(--brew);stroke-width:.68}
+.brand-support-steam{opacity:.85;transform:translateY(0)}
+.brand-support-otter,.brand-support-paws{opacity:0;transform:translateY(4px)}
+.brand-support-drink{transform-origin:51% 80%}
+.topbar button.brand:is(:hover,:focus-visible) :is(.brand-support-otter,.brand-support-paws){opacity:1;transform:translateY(0)}
+.topbar button.brand:is(:hover,:focus-visible) .brand-support-otter{transform:translateY(-1.25px)}
+.topbar button.brand:is(:hover,:focus-visible) .brand-support-steam{opacity:0;transform:translateY(-3px)}
+@media (prefers-reduced-motion:no-preference){
+  .brand-support-steam{transition:transform .32s ease-out,opacity .22s ease}
+  .brand-support-otter{transition:transform .46s cubic-bezier(.18,.75,.32,1),opacity .32s ease}
+  .brand-support-paws{transition:transform .34s cubic-bezier(.18,.75,.32,1),opacity .24s ease}
+  .topbar button.brand:is(:hover,:focus-visible) .brand-support-paws{transition-delay:.1s}
+  .topbar button.brand:is(:hover,:focus-visible) .brand-support-drink{animation:brand-support-lift .57s ease-in-out .12s}
+  .topbar button.brand:is(:hover,:focus-visible) .brand-otter-eyes{animation:brand-support-blink .23s ease-in-out .96s}
 }
-@keyframes brand-otter-blink{
-  0%,90%{opacity:0}
-  91%,96%{opacity:1}
-  97%,100%{opacity:0}
-}
-@keyframes brand-otter-glint{
-  0%,54%{opacity:0}
-  55%,57%{opacity:1}
-  58%,100%{opacity:0}
-}
-@keyframes brand-heart-rise{
-  0%{opacity:1;transform:translateY(0)}
-  90%{opacity:1;transform:translateY(-6px)}
-  91%,100%{opacity:0;transform:translateY(-6px)}
-}
-.brand-cup{width:20px;height:20px;overflow:visible;flex-shrink:0}
-.brand-cup-body{fill:var(--cup);stroke:var(--brew);stroke-width:1.1;stroke-opacity:.72;stroke-linejoin:round}
-.brand-cup-handle-back{fill:none;stroke:var(--brew);stroke-width:3.6;stroke-linecap:round;opacity:.72}
-.brand-cup-handle{fill:none;stroke:var(--cup);stroke-width:1.9;stroke-linecap:round}
-.brand-cup-brew{fill:var(--brew);opacity:1}
-.brand-steam-group{opacity:.9;transition:opacity .2s}
-.brand-steam{fill:none;stroke:var(--text-accent);stroke-width:2;stroke-linecap:round;opacity:0;transform-box:fill-box;transform-origin:50% 100%;animation:support-steam-rise 4.4s ease-in-out infinite}
-.brand-steam--b{animation-delay:.9s}
-.brand-steam--c{animation-delay:1.9s}
-.topbar button.brand:hover .brand-steam-group,.topbar button.brand:focus-visible .brand-steam-group{opacity:1}
-.topbar button.brand:hover .brand-steam,.topbar button.brand:focus-visible .brand-steam{animation-duration:2.4s}
-.brand-support-hint{display:inline-flex;align-items:center;max-width:0;opacity:0;overflow:hidden;color:var(--text-accent);font-size:11px;font-weight:700;letter-spacing:.02em;transition:max-width .28s cubic-bezier(.2,.8,.3,1),opacity .2s ease .06s}
-.topbar button.brand:hover .brand-support-hint,.topbar button.brand:focus-visible .brand-support-hint{max-width:80px;opacity:1}
+@keyframes brand-support-lift{0%,100%{transform:none}44%{transform:translateY(-1.35px) rotate(-6deg)}72%{transform:translateY(-.3px) rotate(2deg)}}
+@keyframes brand-support-blink{0%,100%{transform:scaleY(1)}48%,62%{transform:scaleY(.18)}}
 .brand-text{font-size:14px;font-weight:800;letter-spacing:-0.3px;color:var(--fg);line-height:1}
 .brand-plus{color:var(--text-accent);font-weight:900;font-size:16px}
 .brand-sub{position:relative;display:inline-flex;align-items:center;font-size:11px;color:var(--text-muted);font-weight:500;letter-spacing:normal;text-transform:none;align-self:flex-end;margin-bottom:2px;margin-left:2px}
@@ -183,8 +163,7 @@ html[data-theme="light"]{
 .topbar.recording #pauseBtn{color:var(--status-5xx-text)}
 @media (max-width:1254px){
   .topbar button.brand{padding:3px 8px}
-  .brand-sub-text{display:none}
-  .brand-sub{width:22px;height:11px}
+  .brand-sub{display:none}
 }
 
 /* === Unified Search Area === */
@@ -1004,47 +983,28 @@ kbd{display:inline-block;padding:1px 5px;background:var(--bg);border:1px solid v
 #supportDialog::backdrop{background:color-mix(in srgb,var(--fg) 35%,transparent)}
 .support-form{display:grid;gap:12px;padding:16px;min-width:0}
 .support-form h2{margin:0;font-size:15px;font-style:normal;text-align:center}
-/* balance evens the lines of a short block. Without it the intro left
-   「なります。」 alone on a five-character second line; measured, balance turns
-   55+5 into 29+31 and the note 49/57/27 into 43/49/41, while auto-phrase keeps
-   every break on a phrase boundary. */
+/* Balance each introductory sentence and wrap at Japanese phrase boundaries.
+   Each disclosure paragraph uses normal wrapping. */
 .support-form p{margin:0;color:var(--text-muted);font-size:11px;line-height:1.45;word-break:auto-phrase;overflow-wrap:break-word;text-wrap:balance}
-.support-hero{display:flex;align-items:center;justify-content:center;padding:8px 0 4px;border-radius:10px;background:radial-gradient(62% 82% at 50% 62%,var(--accent-dim) 0%,transparent 72%)}
-/* The hero is a 38x19 pixel grid drawn at an exact 6x, matching the toolbar
-   mark's language. A non-integer scale would blur the grid; crispEdges plus a
-   whole multiple keeps every cell square. */
-.support-hero-art{width:228px;height:114px;overflow:visible;image-rendering:pixelated}
-.support-otter-body,.support-otter-ear{fill:var(--otter)}
-.support-otter-brow{fill:var(--otter-light)}
-.support-otter-shade{fill:var(--otter-deep)}
-.support-otter-muzzle{fill:var(--otter-muzzle)}
-.support-otter-blush{fill:var(--cat-blush)}
-.support-otter-line{fill:var(--brew)}
-.support-cup{fill:var(--cup)}
-.support-brew{fill:var(--brew)}
-/* Blink by dropping a fur-coloured lid over the eye pixels, the way the
-   toolbar mark does — scaling a 2px eye would just make it jitter. */
-.support-otter-lid{fill:var(--otter);opacity:0;animation:support-otter-blink 5.2s step-end infinite}
-.support-otter-pix{transform-box:fill-box;transform-origin:50% 100%;animation:support-otter-bob 4.6s ease-in-out infinite}
-.support-steam-px{fill:var(--text-accent)}
-.support-steam{opacity:0;transform-box:fill-box;transform-origin:50% 100%;animation:support-steam-rise 3.4s ease-in-out infinite}
-.support-steam--b{animation-delay:.6s}
-.support-steam--c{animation-delay:1.2s}
-.support-heart-px{fill:var(--accent)}
-.support-heart{opacity:0;transform-box:fill-box;transform-origin:50% 100%;animation:support-heart-rise 7.2s ease-in-out infinite}
-.support-heart--b{animation-delay:3.6s}
-/* Hovering either call to action sends the hearts up early: the reward for
-   reaching toward the button arrives before the click, not after it. */
-.support-form:has(.support-option-cta:hover,.support-option-cta:focus-visible) .support-heart{animation-duration:1.6s}
-.support-sparkle{fill:var(--text-accent);opacity:0;transform-box:fill-box;transform-origin:50% 50%;animation:support-sparkle-pop 3.8s ease-in-out infinite}
-.support-sparkle--b{animation-delay:1.3s}
-.support-sparkle--c{animation-delay:2.4s}
-/* Whole-pixel steps only: fractional translation on a pixel grid smears it. */
-@keyframes support-steam-rise{0%{opacity:0;transform:translateY(2px)}30%{opacity:.85;transform:translateY(1px)}65%{opacity:.45;transform:translateY(-1px)}100%{opacity:0;transform:translateY(-3px)}}
-@keyframes support-otter-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-1px)}}
-@keyframes support-otter-blink{0%,92%{opacity:0}93%,96%{opacity:1}97%,100%{opacity:0}}
-@keyframes support-heart-rise{0%,58%{opacity:0;transform:translateY(0)}70%{opacity:.95;transform:translateY(-2px)}100%{opacity:0;transform:translateY(-5px)}}
-@keyframes support-sparkle-pop{0%,70%,100%{opacity:0;transform:scale(.4)}80%{opacity:.9;transform:scale(1)}90%{opacity:.35;transform:scale(.8)}}
+#supportDialogIntro{display:grid;gap:2px;max-inline-size:38em;margin-inline:auto;text-align:center;font-size:12px;line-height:1.55}
+.support-hero{display:flex;align-items:center;justify-content:center;padding:4px 0;border-radius:10px;background:radial-gradient(48% 82% at 50% 62%,var(--accent-dim) 0%,transparent 72%)}
+.support-hero-art{position:relative;width:82px;height:82px}
+.support-otter-shadow{position:absolute;inset-inline:11% 8%;bottom:5%;height:9%;border-radius:50%;background:var(--accent);opacity:.13;filter:blur(2px)}
+.support-otter-motion{position:absolute;inset:0;transform-origin:54% 87%}
+.support-otter-image{display:block;width:100%;height:100%}
+.support-steam{position:absolute;left:77%;top:25%;width:6px;height:10px;border-left:1px solid var(--text-accent);border-radius:52%;opacity:.6;transform:rotate(10deg)}
+.support-steam--b{left:83%;top:24%;height:9px;opacity:.45}
+.support-otter-heart{position:absolute;top:12%;right:-3%;color:var(--cat-blush);font-size:12px;line-height:1;opacity:0}
+#supportDialog[open] .support-form:has(.support-option-cta:is(:hover,:focus-visible)) .support-otter-heart{opacity:.85}
+@media (prefers-reduced-motion:no-preference){
+  #supportDialog[open] .support-otter-motion{animation:support-otter-settle 3.2s ease-in-out}
+  #supportDialog[open] .support-steam{animation:support-steam-drift 2.5s ease-in-out}
+  #supportDialog[open] .support-steam--b{animation-delay:.48s}
+  #supportDialog[open] .support-form:has(.support-option-cta:is(:hover,:focus-visible)) .support-otter-heart{animation:support-heart-lift .95s ease-in-out}
+}
+@keyframes support-otter-settle{0%,100%{transform:none}38%{transform:translateY(-3px) rotate(-3deg)}76%{transform:translateY(.5px) rotate(.75deg)}}
+@keyframes support-steam-drift{0%,100%{opacity:.55;transform:translateY(0) rotate(10deg)}40%{opacity:.85;transform:translateY(-2px) rotate(8deg)}75%{opacity:.16;transform:translateY(-5px) rotate(16deg)}}
+@keyframes support-heart-lift{0%,100%{opacity:.85;transform:none}48%{opacity:1;transform:translateY(-3px) scale(1.13)}}
 #supportDialog[open]{animation:support-dialog-in .3s cubic-bezier(.2,.8,.3,1)}
 #supportDialog[open]::backdrop{animation:support-backdrop-in .3s ease}
 @keyframes support-dialog-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
@@ -1060,13 +1020,15 @@ kbd{display:inline-block;padding:1px 5px;background:var(--bg);border:1px solid v
 .support-option:focus-within{border-color:var(--accent)}
 .support-option-badge{flex:0 0 auto;font-size:20px;line-height:1;transition:transform .18s ease}
 .support-option:hover .support-option-badge{transform:scale(1.18) rotate(-6deg)}
-.support-option-body{display:grid;gap:2px;flex:1 1 170px;min-width:0}
+.support-option-body{display:grid;gap:2px;flex:1 1 140px;min-width:0}
 .support-option-name{color:var(--fg);font-size:12px;font-weight:600;white-space:nowrap}
-.support-option-cta{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:5px 14px;border:1px solid var(--accent-fill);border-radius:999px;background:var(--accent-fill);color:var(--on-accent);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:transform .18s ease,filter .18s ease}
+.support-option-cta{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:6px;width:144px;min-height:30px;padding:5px 14px;border:1px solid var(--accent-fill);border-radius:999px;background:var(--accent-fill);color:var(--on-accent);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap;transition:transform .18s ease,filter .18s ease}
 .support-option-cta::after{content:'→';font-weight:800}
 .support-option-cta:hover{transform:translateY(-1px) scale(1.04);filter:brightness(1.1)}
 .support-option-cta:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .support-option-hint{color:var(--text-muted);font-size:10px;line-height:1.35;word-break:auto-phrase;overflow-wrap:break-word}
+.support-note{display:grid;gap:4px;text-align:left}
+.support-form .support-note p{font-size:10px;line-height:1.5;text-wrap:wrap}
 .support-actions{display:flex;justify-content:flex-end}
 .support-form button{min-height:28px;padding:4px 14px;border:1px solid var(--control-border);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;cursor:pointer}
 .support-form button:hover{border-color:var(--accent);background:var(--accent-dim);color:var(--text-accent)}
@@ -1363,9 +1325,13 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
   .sample-guide-actions{flex-wrap:wrap}
   .sample-guide-actions button{flex:1 1 auto}
 }
+@media (max-width:440px){
+  .support-form{gap:10px;padding:12px}
+  .support-hero-art{width:70px;height:70px}
+  .support-option-cta{width:100%}
+}
 @media (max-width:280px){
   .shortcut-support-summary button{white-space:normal;text-align:center}
-  .support-option-cta{width:100%;justify-content:center}
 }
 
 /* === Reduced motion === */
@@ -1374,14 +1340,11 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
   .topbar button,.details-close-btn,.tab-btn,.resizer,.inspector-divider,.copy-btn,.empty-state-action{transition:none}
   .search-color-btn:hover,.search-color-swatch:hover,.hl-swatch:hover{transform:none}
   .copy-toast,.copy-toast.show{transform:translateX(-50%)}
-  .support-steam,.support-otter-pix,.support-otter-lid,.support-heart,.support-sparkle,.support-option,.support-option-badge,.support-option-cta,.brand-otter,.brand-otter-motion,.brand-otter-lid,.brand-otter-glint,.brand-heart-px,.brand-steam,.brand-steam-group,.brand-support-hint{animation:none;transition:none}
+  .support-option,.support-option-badge,.support-option-cta{animation:none;transition:none}
   .support-option-cta:hover{transform:none;filter:none}
   #supportDialog[open],#supportDialog[open]::backdrop{animation:none}
   .support-option:hover{transform:none}
   .support-option:hover .support-option-badge{transform:none}
-  .support-steam,.brand-steam{opacity:.55}
-  .support-sparkle{opacity:.7}
-  .support-heart{opacity:.9}
 }
 
 /* === Two-request Diff Comparison Panel === */
