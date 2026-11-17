@@ -14449,8 +14449,8 @@ const INSPECTOR_COLUMN_MEASURE = `(() => {
   };
 })()`;
 
-// The sticky caption is only a caption if it stays put, stays clickable, and
-// nothing pins itself over it. Scrolled to five positions rather than
+// While its section is visible, the sticky caption stays clickable without
+// another sticky control covering it. Scrolled to five positions rather than
 // spot-checked at one: when the half stops being a scrollport the pane
 // toolbar re-parents its stickiness to the column, and the collision it
 // caused appeared part of the way down, not at the top.
@@ -14464,15 +14464,23 @@ const INSPECTOR_COLUMN_SCROLL_MATRIX = `(() => {
     panels.scrollTop = Math.round(maximum * fraction);
     const panelsBox = panels.getBoundingClientRect();
     const labelBox = requestLabel.getBoundingClientRect();
-    const hit = document.elementFromPoint(
-      Math.round(labelBox.left + labelBox.width / 2),
-      Math.round(labelBox.top + labelBox.height / 2),
-    );
+    const halfBox = requestLabel.closest('.inspector-half').getBoundingClientRect();
+    const expectedTop = Math.min(panelsBox.top, halfBox.bottom - labelBox.height);
+    const expectedVisible = Math.min(expectedTop + labelBox.height, panelsBox.bottom) -
+      Math.max(expectedTop, panelsBox.top) >= 1;
+    const visibleTop = Math.max(panelsBox.top, labelBox.top);
+    const visibleBottom = Math.min(panelsBox.bottom, labelBox.bottom);
+    const labelVisible = visibleBottom - visibleTop >= 1;
+    const hit = labelVisible ? document.elementFromPoint(
+      labelBox.left + labelBox.width / 2,
+      (visibleTop + visibleBottom) / 2,
+    ) : null;
     positions.push({
       fraction,
       labelTopOffset: Math.round(labelBox.top - panelsBox.top),
-      expectedLabelTopOffset: Math.min(0, Math.round(requestLabel.closest('.inspector-half').getBoundingClientRect().bottom - labelBox.height - panelsBox.top)),
-      labelVisible: labelBox.bottom > panelsBox.top && labelBox.top < panelsBox.bottom,
+      expectedLabelTopOffset: Math.round(expectedTop - panelsBox.top),
+      expectedVisible,
+      labelVisible,
       // The caption is the collapse toggle, so being on top is not cosmetic.
       labelHit: Boolean(hit) && (hit === requestLabel || requestLabel.contains(hit)),
       scrollTop: panels.scrollTop,
@@ -14599,12 +14607,17 @@ browserTest(
       const scrolled = await evaluate(cdp, INSPECTOR_COLUMN_SCROLL_MATRIX);
       expect(scrolled).toHaveLength(5);
       expect(Object.keys(scrolled[0].barOffsets)).toEqual(['req-raw']);
+      expect(scrolled[0]).toMatchObject({ labelVisible: true, labelHit: true });
       for (const position of scrolled) {
         expect({
           fraction: position.fraction,
           labelVisible: position.labelVisible,
           labelHit: position.labelHit,
-        }).toEqual({ fraction: position.fraction, labelVisible: true, labelHit: true });
+        }).toEqual({
+          fraction: position.fraction,
+          labelVisible: position.expectedVisible,
+          labelHit: position.expectedVisible,
+        });
         // At the very end a sticky caption can leave with its section while
         // the response remains reachable. Compare with its containing block.
         expect(Math.abs(position.labelTopOffset - position.expectedLabelTopOffset)).toBeLessThanOrEqual(1);

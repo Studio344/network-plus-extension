@@ -19,8 +19,8 @@ colors:
   canvas-dark: '#121110'
   surface-dark: '#24211e'
   content-dark: '#1a1816'
-  ink-dark: '#f5efe8'
-  muted-dark: '#a79b8d'
+  ink-dark: '#d8cdbf'
+  muted-dark: '#a59889'
   border-dark: '#413a33'
   control-border-dark: '#8d8276'
   separator-dark: '#776b5e'
@@ -157,6 +157,7 @@ Light uses cool neutral surfaces with a blue accent. Dark uses warm charcoal sur
 
 - Use `canvas` for the panel background, `surface` for controls and tabs, and `content` for request and response content.
 - Use `ink` for primary text and `muted` for supporting metadata.
+- In Dark, request paths use warm stone, routine metadata uses a quieter neutral, and selected paths and chart headings use higher-emphasis ink. Timeline volume uses bronze so amber selection and HTTP errors are easier to find.
 - Use `border` for table and panel dividers, `control-border` for control outlines, and `separator` for pane dividers.
 
 ### Tertiary
