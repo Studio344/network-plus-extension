@@ -9191,6 +9191,14 @@ const _NetworkPlus = (function () {
       en: 'Preview of the first {limit} characters.',
       ja: '最初の {limit} 文字をプレビューしています。',
     },
+    wsShowFullJson: {
+      en: 'Show full JSON',
+      ja: 'JSON全文を表示',
+    },
+    wsFullJsonPreviewOnly: {
+      en: 'Showing the formatted preview. Save the full message to inspect it locally.',
+      ja: '整形プレビューを表示しています。全文は保存して確認できます。',
+    },
     wsSaveFullMessage: {
       en: 'Save full message',
       ja: '全文を保存',
@@ -14842,16 +14850,68 @@ const _NetworkPlus = (function () {
       isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders));
   }
 
-  function formatWsMessageJson(text) {
-    if (!/^\s*[[{]/.test(text)) return null;
+  const WS_INLINE_JSON_LIMIT = 16 * 1024;
+  const WS_JSON_TOKEN_LIMIT = 2048;
+
+  function isWsJson(text) {
     try {
       JSON.parse(text);
+      return true;
     } catch (_error) {
-      return null;
+      return false;
     }
+  }
+
+  function planWsMessageJson(text, truncated = false) {
+    if (text.length > WS_INLINE_JSON_LIMIT) return null;
+    let payload = text.trimStart();
+    // Engine.IO's message marker plus Socket.IO event/acknowledgement,
+    // optionally followed by a namespace and acknowledgement ID.
+    const envelope = /^4[23](?:\/[^,\r\n]*,)?\d*(?=\[)/.exec(payload)?.[0] || '';
+    if (envelope) payload = payload.slice(envelope.length);
+    if (!/^[[{]/.test(payload) || (!truncated && !isWsJson(payload))) return null;
+
+    // JSON strings exclude unescaped U+0000–U+001F, even in a partial token.
+    // eslint-disable-next-line no-control-regex
+    const scanner = /[ \t\r\n]+|"(?:\\(?:["\\/bfnrt]|u[\da-fA-F]{4})|[^"\\\u0000-\u001f])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\d.eE+-])|true|false|null|[[\]{},:]/y;
+    // eslint-disable-next-line no-control-regex
+    const unfinishedString = /^"(?:\\(?:["\\/bfnrt]|u[\da-fA-F]{4})|[^"\\\u0000-\u001f])*(?:\\(?:u[\da-fA-F]{0,3})?)?$/;
+    const unfinishedNumber = /^(?:-|-?(?:0|[1-9]\d*)(?:\.|(?:\.\d+)?[eE][+-]?))$/;
+    const closers = [];
+    const tokens = [];
+    let tail = '';
+    let placeholder = '';
+    let offset = 0;
+    while (offset < payload.length) {
+      scanner.lastIndex = offset;
+      const match = scanner.exec(payload);
+      if (!match) {
+        if (!truncated) return null;
+        tail = payload.slice(offset);
+        if (unfinishedString.test(tail)) placeholder = '""';
+        else if (unfinishedNumber.test(tail) || ['true', 'false', 'null'].some((literal) => literal.startsWith(tail))) {
+          placeholder = 'null';
+        } else return null;
+        break;
+      }
+      offset = scanner.lastIndex;
+      const token = match[0];
+      if (/^[ \t\r\n]/.test(token)) continue;
+      if (token === '{' || token === '[') closers.push(token === '{' ? '}' : ']');
+      if (closers.length > 32 || tokens.length >= WS_JSON_TOKEN_LIMIT ||
+          ((token === '}' || token === ']') && closers.pop() !== token)) return null;
+      tokens.push(token);
+    }
+    if (truncated) {
+      // Complete the prefix only for syntax validation. The placeholders and
+      // closers are never rendered or included in a saved message.
+      const captured = payload.slice(0, offset) + placeholder;
+      const closing = closers.reverse().join('');
+      if (!['', 'null', ':null', '"":null'].some((suffix) => isWsJson(captured + suffix + closing))) return null;
+    }
+
     // Validation may use JSON.parse; formatting preserves wire tokens such
     // as large numeric IDs, exponent notation and repeated property names.
-    const tokens = text.match(/"(?:\\.|[^"\\])*"|[[\]{},:]|[.\d+eE-]+|true|false|null/g);
     let depth = 0;
     let formatted = '';
     const line = () => '\n' + '  '.repeat(depth);
@@ -14870,14 +14930,23 @@ const _NetworkPlus = (function () {
       } else {
         formatted += token;
       }
-      if (formatted.length > 16 * 1024) return null;
+      if (envelope.length + formatted.length + tail.length > WS_INLINE_JSON_LIMIT) return null;
     }
-    return formatted;
+    return { envelope, formatted, tail };
+  }
+
+  function renderWsMessageJson(target, json) {
+    target.replaceChildren();
+    target.dataset.format = 'json';
+    if (json.envelope) target.append(document.createTextNode(json.envelope + '\n'));
+    appendJsonHighlight(target, json.formatted);
+    if (json.tail) target.append(document.createTextNode(json.tail));
   }
 
   let wsFullSavePending = false;
-  async function readWsFullMessage(row, frame) {
-    const isCurrent = () => state.selectedRow === row && !row._retentionDisposed;
+  let wsFullViewPending = false;
+  async function readWsFullMessage(row, frame, isOpen = () => true) {
+    const isCurrent = () => state.selectedRow === row && !row._retentionDisposed && isOpen();
     const deadline = Date.now() + WS_FULL_TEXT_READ_TIMEOUT_MS;
     if (Number.isInteger(frame.fullIndex)) {
       const readEntry = row._readWsHarEntry || row._readImportedHarEntry;
@@ -14908,7 +14977,7 @@ const _NetworkPlus = (function () {
   }
 
   function requestWsFullMessageSave(row, frame, trigger) {
-    if (wsFullSavePending) return;
+    if (wsFullSavePending || wsFullViewPending) return;
     requestFullOutboundAction({
       title: uiText('wsSaveFullMessageTitle'),
       detail: uiText('wsSaveFullMessageDetail'),
@@ -14966,11 +15035,13 @@ const _NetworkPlus = (function () {
 
     const showPayload = () => {
       if (!disclosure.open) return;
-      const formatted = frame.binary || frame.truncated ? null : formatWsMessageJson(frame.data);
+      const pane = $('#ws-timeline-scroll');
+      const wasAtEnd = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
+      const json = frame.binary ? null : planWsMessageJson(frame.data, frame.truncated);
       const pre = document.createElement('pre');
       pre.className = 'ws-message-payload';
-      pre.dataset.format = formatted ? 'json' : 'text';
-      if (formatted) appendJsonHighlight(pre, formatted);
+      pre.dataset.format = 'text';
+      if (json) renderWsMessageJson(pre, json);
       else pre.textContent = body;
       disclosure.appendChild(pre);
       if (frame.truncated) {
@@ -14979,6 +15050,7 @@ const _NetworkPlus = (function () {
             Number.isInteger(frame.fullIndex);
         const note = document.createElement('p');
         note.className = 'ws-message-note';
+        note.setAttribute('aria-live', 'polite');
         note.textContent = uiTextFormat(canReadFull ? 'wsMessagePreviewOnly' : 'wsMessageTruncated', {
           limit: WS_FRAME_PREVIEW_CHARS.toLocaleString(activeLanguage),
         });
@@ -14986,6 +15058,45 @@ const _NetworkPlus = (function () {
         if (canReadFull) {
           const actions = document.createElement('div');
           actions.className = 'ws-message-actions';
+          if (json && frame.fullLength <= WS_INLINE_JSON_LIMIT) {
+            const show = document.createElement('button');
+            show.type = 'button';
+            show.className = 'copy-btn ws-message-show-full';
+            show.textContent = uiText('wsShowFullJson');
+            show.addEventListener('click', async () => {
+              if (wsFullViewPending || wsFullSavePending) return;
+              wsFullViewPending = true;
+              show.setAttribute('aria-disabled', 'true');
+              const previewNotice = note.textContent;
+              const isOpen = () => disclosure.isConnected && disclosure.open && !disclosure.closest('[hidden]');
+              note.textContent = uiText('wsSavingFullMessage');
+              try {
+                const content = await readWsFullMessage(row, frame, isOpen);
+                const full = planWsMessageJson(content);
+                if (!isOpen()) {
+                  note.textContent = previewNotice;
+                  return;
+                }
+                if (!full) {
+                  note.textContent = uiText('wsFullJsonPreviewOnly');
+                  return;
+                }
+                renderWsMessageJson(pre, full);
+                note.hidden = true;
+                if (document.activeElement === show) {
+                  pre.tabIndex = 0;
+                  pre.focus({ preventScroll: true });
+                }
+                show.hidden = true;
+              } catch (_error) {
+                note.textContent = isOpen() ? uiText('wsFullMessageUnavailable') : previewNotice;
+              } finally {
+                wsFullViewPending = false;
+                show.removeAttribute('aria-disabled');
+              }
+            });
+            actions.appendChild(show);
+          }
           const save = document.createElement('button');
           save.type = 'button';
           save.className = 'copy-btn ws-message-save-full';
@@ -14994,6 +15105,15 @@ const _NetworkPlus = (function () {
           actions.appendChild(save);
           disclosure.appendChild(actions);
         }
+      }
+      if (wasAtEnd && !disclosure.closest('[hidden]')) {
+        // Keep an already visible reply in view when expanding its predecessor,
+        // up to the point where the expanded message's heading would disappear.
+        const header = $('#ws-timeline-header');
+        const visibleTop = pane.getBoundingClientRect().top + header.getBoundingClientRect().height;
+        const room = summary.getBoundingClientRect().top - visibleTop;
+        const remaining = pane.scrollHeight - pane.scrollTop - pane.clientHeight;
+        pane.scrollTop += Math.max(0, Math.min(room, remaining));
       }
       disclosure.removeEventListener('toggle', showPayload);
     };
@@ -25476,7 +25596,7 @@ const _NetworkPlus = (function () {
     buildSseWrapperSource,
     buildStreamDrainSource,
     formatWsFrameLine,
-    formatWsMessageJson,
+    planWsMessageJson,
     appendBoundedWsText,
     ingestWsEvents,
     escapeMarkdownTableCell,

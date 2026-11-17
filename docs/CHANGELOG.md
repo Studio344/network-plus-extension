@@ -4,7 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- ✨ **WebSocket Messages** — See sent and received messages in time order, expand JSON payloads, and see why a saved connection has no messages.
+- ✨ **WebSocket Messages** — See sent and received messages in time order, expand syntax-colored JSON previews, and open or save long captured messages.
 - 🐛 **Live WebSocket capture** — Show DevTools frames on the connection row, including startup traffic, and offer a reload to start recording an existing page.
 - ✨ **WebSocket filters** — Isolate WebSocket requests from the toolbar and search recorded messages by text and direction.
 - 🔧 **Theme colors** — Use charcoal and amber across the dark panel, toolbar menu, and live guide, and refine control and selection contrast in Light.
