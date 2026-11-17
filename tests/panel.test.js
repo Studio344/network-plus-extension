@@ -6585,6 +6585,7 @@ describe('details reopen status', () => {
       { key: 'statusImportFailed', slot: 'reason', values: ['importReasonHarEntriesMissing', 'importReasonSessionTimeout'] },
       { key: 'reasonResponseRetrievalFailed', slot: 'reason', values: ['importReasonSessionDisconnected', 'importReasonSessionDisconnectedBeforeResponse'], others: { id: 5 } },
       { key: 'importRetentionSummary', slot: 'action', values: ['importRetentionBodyOmitted'] },
+      { key: 'analysisRemove', slot: 'filter', values: ['analysisSearchOnly'] },
     ];
     for (const frame of COMPOSED_JAPANESE_FRAMES) {
       // A row names either the dictionary keys whose text can land in the slot

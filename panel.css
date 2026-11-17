@@ -234,7 +234,32 @@ html[data-theme="light"]{
 input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);outline-offset:-1px}
 
 /* === Layout === */
-#domainSummary{display:flex;flex-wrap:wrap;align-items:center;gap:4px;flex:0 0 auto;max-height:88px;overflow-y:auto;padding:4px 8px;border-bottom:1px solid var(--separator);background:var(--surface)}
+.analysis-bar{flex:0 0 auto;padding:5px 8px;background:var(--topbar-bg);border-bottom:1px solid var(--separator);min-width:0}
+.analysis-bar[hidden],.analysis-bar [hidden]{display:none}
+.analysis-actions,.analysis-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.analysis-status{display:inline-flex;max-width:100%;align-items:center;background:var(--bg);border:1px solid var(--control-border);border-radius:8px}
+.analysis-bar button{display:inline-flex;min-height:27px;align-items:center;gap:5px;white-space:nowrap;padding:3px 8px;font:inherit;font-size:12px;font-weight:650;cursor:pointer;color:var(--fg);background:var(--bg);border:1px solid var(--control-border);border-radius:7px}
+.analysis-status button{border:0;background:none}
+.analysis-status button+button{border-inline-start:1px solid var(--border)}
+.analysis-bar button:hover{background:var(--hover)}
+.analysis-bar button:focus-visible{outline:2px solid var(--accent);outline-offset:1px;z-index:1}
+.analysis-bar button:is([aria-pressed="true"],[aria-expanded="true"],.analysis-compare){background:var(--accent-dim);box-shadow:inset 0 0 0 1px var(--accent);color:var(--text-accent)}
+.analysis-count{min-width:1em;text-align:center;color:var(--text-muted);font-variant-numeric:tabular-nums;font-size:11px}
+[data-status-facet="4xx"] .analysis-count{color:var(--status-4xx-text)}
+[data-status-facet="5xx"] .analysis-count{color:var(--status-5xx-text)}
+.analysis-bar button:disabled{opacity:.62;cursor:default}
+.analysis-chips{margin-top:5px;max-height:68px;overflow-y:auto;padding:2px;scrollbar-width:thin}
+.analysis-chips button{max-width:100%;min-width:0;min-height:25px;border-radius:999px;font-weight:500}
+.analysis-chips button span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.analysis-chips .analysis-clear{font-weight:650;color:var(--text-accent)}
+.analysis-outside-view{padding:4px 9px;border-bottom:1px solid var(--border);background:var(--accent-dim);color:var(--text-accent);font-size:11px;line-height:1.35}
+.compact-request-host{display:block;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font-size:10px;line-height:1.3}
+@media(max-width:460px){
+  .analysis-bar{padding-inline:5px}
+  .analysis-actions,.analysis-chips{gap:4px}
+  .analysis-bar button{padding-inline:5px;gap:3px}
+}
+#domainSummary{display:flex;flex-wrap:wrap;align-items:center;gap:5px;flex:0 0 auto;max-height:106px;overflow-y:auto;padding:5px 8px;border-bottom:1px solid var(--separator);background:var(--surface)}
 #domainSummary[hidden]{display:none}
 .domain-summary-row{display:inline-flex;align-items:center;gap:6px;min-height:24px;padding:2px 8px;border:1px solid var(--control-border);border-radius:10px;background:var(--bg);color:var(--fg);font:inherit;font-size:11px;cursor:pointer;max-width:100%}
 .domain-summary-row:hover{background:var(--hover);border-color:var(--accent)}
@@ -1369,6 +1394,13 @@ button:disabled,input:disabled,select:disabled{opacity:.5;cursor:not-allowed}
   .content.capture-empty .resizer,.content.capture-empty .details{display:none}
 }
 /* === Compact status bar === */
+@media (max-width:460px){
+  .topbar{padding-inline:5px}
+  .topbar .left{gap:4px}
+  .topbar .left .separator{display:none}
+  .topbar button.brand,.topbar #searchToggleBtn,.topbar #filterBtn{padding-inline:5px}
+  .brand-support-mark{width:23px}
+}
 /* Status breakpoint (STATUS_DETAILS_MEDIA_QUERY in panel.js): side by side between 801 and 900px the full counter row no longer fits on one line, so the details go behind the toggle before the layout stacks. */
 @media (max-width:900px){
   /* Status text and counter share the row with the disclosure toggle; #statusText keeps the shared shrink/wrap rule above. */

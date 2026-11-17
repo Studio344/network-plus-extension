@@ -545,8 +545,8 @@ describe('guided sample capture static contracts', () => {
   test('renders one local-only action only for a truly empty capture', () => {
     expect(js).toContain('const mode = getEmptyStateMode(state.rows.length, visibleRowCount);');
     expect(js).toContain("if (mode === 'filtered')");
-    expect(js).toContain("action.textContent = uiText(state.webSocketOnly ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');");
-    expect(js).toContain("action.addEventListener('click', clearColumnFilters);");
+    expect(js).toContain("action.textContent = uiText(hasQuickFilter ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');");
+    expect(js).toContain("action.addEventListener('click', clearRequestAnalysisFilters);");
     expect(js).toContain("action.textContent = uiText('emptyCaptureAction');");
     expect(js).not.toContain("action.setAttribute('aria-label'");
     expect(js).toContain("action.setAttribute('aria-describedby', description.id);");
@@ -1689,7 +1689,7 @@ describe('settings and language contracts', () => {
     // The empty state re-renders in place on a language change: the render
     // key includes the active language and applyLanguage triggers a refresh.
     expect(js).toContain(
-      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + state.webSocketOnly;",
+      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter;",
     );
     expect(js).toContain('refreshEmptyStateLanguage();');
     expect(js).toContain('updateEmptyState(lastEmptyStateRowCount);');
@@ -3861,7 +3861,7 @@ describe('export scope contracts', () => {
     expect(css).toMatch(/\.context-menu-item\{[^}]*text-overflow:ellipsis/);
     // "Only" replaces earlier inclusions so two picks never intersect to
     // zero rows; exclusions accumulate.
-    expect(js).toContain("if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== 'contains');");
+    expect(js).toContain("if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== conditionOp);");
     expect(js).toContain("state.columnFilterRules[colId] = { mode: 'multiText', conditions };");
     // The context menu and the domain summary panel still delegate to one
     // writer, so both surfaces stay behaviorally identical.
@@ -3928,7 +3928,8 @@ describe('export scope contracts', () => {
     expect(js).toContain("contentElement.insertAdjacentElement('beforebegin', domainSummaryPanel);");
     expect(js).toContain("domainToggle.id = 'domainSummaryToggle';");
     expect(js).toContain('localStorage.removeItem(DOMAIN_SUMMARY_KEY);');
-    expect(html).not.toContain('domainSummary');
+    expect(html).not.toContain('id="domainSummary"');
+    expect(html).toMatch(/id="analysisDomainsBtn"[^>]*aria-controls="domainSummary"/);
     // The flex display rule must not defeat the hidden attribute (the
     // toolbar once shipped exactly that bug).
     expect(css).toContain('#domainSummary[hidden]{display:none}');
@@ -3948,13 +3949,13 @@ describe('export scope contracts', () => {
     const panelBlock = js.slice(panelStart, panelEnd);
     expect(panelBlock).not.toContain('innerHTML');
     expect(panelBlock).toContain('state.syncDomainSummary = renderDomainSummary;');
-    expect(panelBlock).toContain("applyDomainQuickFilterTo(entry.domain, 'contains');");
+    expect(panelBlock).toContain("state.requestHostFacet = active ? '' : entry.domain;");
     // The no-host bucket is informational only: an empty-value condition
     // would be silently skipped by the filter engine.
     expect(panelBlock).toContain("if (entry.domain === '')");
     // A click on a domain that already spans every filtered row changes no
     // aggregate, so the rebuild-skip signature carries the pressed state.
-    expect(panelBlock).toContain("activeDomains.has(entry.domain) ? 1 : 0,");
+    expect(panelBlock).toContain('JSON.stringify([activeLanguage, activeHost, state.sampleCaptureActive, summary]);');
   });
 
   test('the configurable header column rides the shared column pipeline', () => {

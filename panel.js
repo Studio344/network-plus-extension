@@ -375,6 +375,8 @@ const _NetworkPlus = (function () {
   // and absorbs the deficit of a narrow one down to this floor before any
   // column is auto-hidden, so a squeeze costs width before it costs columns.
   const ELASTIC_PATH_MIN_WIDTH = 120;
+  const COMPACT_REQUEST_COLUMNS_WIDTH = 440;
+  const COMPACT_PATH_MIN_WIDTH = 100;
   // The order the grid starts in. Named rather than inlined into the state
   // because planForcedVisibleColumnIds protects whatever column it points at:
   // out of the box that is ID, undroppable at every width, and changing this
@@ -1011,9 +1013,10 @@ const _NetworkPlus = (function () {
   // The width a column still needs once Path has given up everything it may.
   // The fit test runs on these, not on the stored widths, so a narrow wrap
   // squeezes Path first and only then starts dropping columns.
-  function minRenderedColumnWidth(column) {
+  function minRenderedColumnWidth(column, compactIdentity = false) {
     const width = clampColumnWidth(column ? column.width : DEFAULT_COL_WIDTH);
-    return column && column.id === 'path' ? Math.min(width, ELASTIC_PATH_MIN_WIDTH) : width;
+    const pathFloor = compactIdentity ? COMPACT_PATH_MIN_WIDTH : ELASTIC_PATH_MIN_WIDTH;
+    return column && column.id === 'path' ? Math.min(width, pathFloor) : width;
   }
 
   // Pure: which of the reader's visible columns have to step aside for the
@@ -1028,6 +1031,7 @@ const _NetworkPlus = (function () {
     const previousHiddenIds = toSet(opts.previousHiddenIds);
     const hysteresis = Number.isFinite(opts.hysteresis) ? opts.hysteresis : AUTO_HIDE_HYSTERESIS_PX;
     const visibleColumns = (Array.isArray(columns) ? columns : []).filter((column) => column && column.visible);
+    const compactIdentity = opts.compactIdentity === true && visibleColumns.some((column) => column.id === 'path');
     if (!Number.isFinite(wrapWidth) || wrapWidth <= 0) return [];
     // The reader's own pick and the two forced-visible sets are off limits;
     // everything else queues up in drop order.
@@ -1042,19 +1046,19 @@ const _NetworkPlus = (function () {
       .map((column, index) => ({ column, rank: dropRank(column, index) }))
       .filter(
         (entry) =>
-          columnAutoHidePriority(entry.column.id) > 1 &&
+          (columnAutoHidePriority(entry.column.id) > 1 || (compactIdentity && entry.column.id === 'domain')) &&
           !pinnedIds.has(entry.column.id) &&
           !keepIds.has(entry.column.id),
       )
       .sort((a, b) => a.rank - b.rank)
       .map((entry) => entry.column);
-    let remaining = visibleColumns.reduce((sum, column) => sum + minRenderedColumnWidth(column), 0);
+    let remaining = visibleColumns.reduce((sum, column) => sum + minRenderedColumnWidth(column, compactIdentity), 0);
     const hiddenIds = [];
     for (const column of candidates) {
       const budget = previousHiddenIds.has(column.id) ? wrapWidth - hysteresis : wrapWidth;
       if (remaining <= budget) continue;
       hiddenIds.push(column.id);
-      remaining -= minRenderedColumnWidth(column);
+      remaining -= minRenderedColumnWidth(column, compactIdentity);
     }
     return hiddenIds;
   }
@@ -3688,6 +3692,8 @@ const _NetworkPlus = (function () {
         snapshot && Number.isInteger(snapshot.originalCount) ? snapshot.originalCount : sourceRows.length,
       columnFilterRules: deserializeFilterState(serializeFilterState(context.columnFilterRules)),
       webSocketOnly: context.webSocketOnly === true,
+      requestStatusFacet: context.requestStatusFacet || 'all',
+      requestHostFacet: context.requestHostFacet || '',
       searchKeywords: Array.isArray(context.searchKeywords)
         ? context.searchKeywords.map((keyword) => ({
           query: String((keyword && keyword.query) || ''),
@@ -5381,6 +5387,9 @@ const _NetworkPlus = (function () {
     activeRows: new Set(),
     filteredRows: [], // [U5] cache for filtered rows
     webSocketOnly: false,
+    requestStatusFacet: 'all',
+    requestHostFacet: '',
+    requestScopeRows: null,
     pendingLiveRows: [],
     liveRowsAwaitingRender: [],
     retention: {
@@ -5941,6 +5950,7 @@ const _NetworkPlus = (function () {
       0,
     );
     state.filteredRows = state.filteredRows.filter((row) => !evictedSet.has(row));
+    if (state.requestScopeRows) state.requestScopeRows = state.requestScopeRows.filter((row) => !evictedSet.has(row));
     state.liveRowsAwaitingRender = state.liveRowsAwaitingRender.filter((row) => !evictedSet.has(row));
     state.visibleBytes = Math.max(0, state.visibleBytes - evictedVisibleBytes);
     state.selectedRows = new Set(plan.retainedSelectedRows);
@@ -6133,6 +6143,7 @@ const _NetworkPlus = (function () {
   function clearStoredRows() {
     removeRowsFromState(state.rows.slice(), false);
     state.filteredRows = [];
+    state.requestScopeRows = null;
     state.visibleBytes = 0;
   }
 
@@ -6158,6 +6169,8 @@ const _NetworkPlus = (function () {
       context: {
         columnFilterRules: deserializeFilterState(serializeFilterState(state.columnFilterRules)),
         webSocketOnly: state.webSocketOnly,
+        requestStatusFacet: state.requestStatusFacet,
+        requestHostFacet: state.requestHostFacet,
         searchKeywords: state.search.keywords.map((keyword) => ({
           query: String(keyword.query || ''),
           colorIdx: Number.isInteger(keyword.colorIdx) ? keyword.colorIdx : 0,
@@ -6191,6 +6204,7 @@ const _NetworkPlus = (function () {
     for (const row of state.rows) state.activeRows.delete(row);
     state.rows = [];
     state.filteredRows = [];
+    state.requestScopeRows = null;
     state.visibleBytes = 0;
     if (state.sampleCaptureActive) exitSampleCaptureMode();
   }
@@ -6442,6 +6456,94 @@ const _NetworkPlus = (function () {
   // Every entry carries both languages; the English text doubles as the
   // authored fallback in panel.html, so the two must stay in sync.
   const UI_TEXT = {
+    analysisAria: {
+      en: 'Request filters and actions',
+      ja: 'リクエストの絞り込みと操作',
+    },
+    analysisStatusAria: {
+      en: 'Filter by request status. Counts before text search.',
+      ja: '通信の状態で絞り込む。件数はテキスト検索前の値です。',
+    },
+    analysisAll: {
+      en: 'All',
+      ja: 'すべて',
+    },
+    analysisPending: {
+      en: 'Pending',
+      ja: '応答待ち',
+    },
+    analysisDomains: {
+      en: 'Hosts',
+      ja: 'ホスト',
+    },
+    analysisActive: {
+      en: 'Active filters',
+      ja: '適用中の絞り込み',
+    },
+    analysisClear: {
+      en: 'Clear filters',
+      ja: '絞り込みを解除',
+    },
+    analysisRemove: {
+      en: 'Remove filter: {filter}',
+      ja: '「{filter}」の絞り込みを解除',
+    },
+    analysisOutsideView: {
+      en: 'Selected request is outside the current filters',
+      ja: '選択中の通信は現在の絞り込みの対象外です',
+    },
+    analysisSearchOnly: {
+      en: 'Search matches only',
+      ja: '検索一致のみ',
+    },
+    analysisHost: {
+      en: 'Host: {host}',
+      ja: 'ホスト: {host}',
+    },
+    analysisHostsEmpty: {
+      en: 'No hosts in this view',
+      ja: '該当するホストはありません',
+    },
+    analysisHostOnly: {
+      en: 'Show only requests to {host}',
+      ja: '{host} 宛ての通信のみ表示',
+    },
+    analysisDomainMeta: {
+      en: '{count} · {bytes}',
+      ja: '{count}件 · {bytes}',
+    },
+    analysisDomainErrors: {
+      en: '{count} {error}',
+      ja: 'HTTPエラー {count}件',
+    },
+    analysisColumnFilters: {
+      en: 'Column Filters ({count} active)',
+      ja: '列フィルター（{count}件適用中）',
+    },
+    analysisColumnFilterActive: {
+      en: 'Active',
+      ja: '適用中',
+    },
+    analysisStatusSuccess: {
+      en: '2xx Success',
+      ja: '2xx 成功',
+    },
+    analysisStatusRedirect: {
+      en: '3xx Redirect',
+      ja: '3xx リダイレクト',
+    },
+    analysisStatusClientError: {
+      en: '4xx Client error',
+      ja: '4xx クライアントエラー',
+    },
+    analysisStatusServerError: {
+      en: '5xx Server error',
+      ja: '5xx サーバーエラー',
+    },
+    analysisStatusOther: {
+      en: 'Other',
+      ja: 'その他',
+    },
     undockHintTitle: {
       en: '🪟 Keep DevTools open',
       ja: '🪟 DevTools は閉じないでください',
@@ -9302,6 +9404,8 @@ const _NetworkPlus = (function () {
     if (refreshInspectorToggleTitles) refreshInspectorToggleTitles();
     if (refreshSearchColorLabels) refreshSearchColorLabels();
     if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();
+    if (state.syncDomainSummary) state.syncDomainSummary();
+    renderAnalysisBar();
     setStatus(uiTextFormat('statusLanguageApplied', { language: normalized }));
   }
 
@@ -9817,7 +9921,7 @@ const _NetworkPlus = (function () {
       const rule = getApplicableFilterRule(state.columnFilterRules[colId]);
       if (rule) filters.push({ colId, rule, isNumeric: NUMERIC_COLUMNS.indexOf(colId) > -1 });
     }
-    state.filteredRows = state.rows.filter((r) => {
+    const scopeRows = state.rows.filter((r) => {
       if (!matchesRequestTypeFilter(r)) return false;
       // Per-column advanced filters
       for (const filter of filters) {
@@ -9826,10 +9930,41 @@ const _NetworkPlus = (function () {
       }
       return true;
     });
+    state.requestScopeRows = hasRequestFacets() ? scopeRows : null;
+    state.filteredRows = state.requestScopeRows
+      ? scopeRows.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row))
+      : scopeRows;
+  }
+
+  function classifyRequestFacet(row) {
+    if (row._pendingRequest === true) return 'pending';
+    const statusClass = classifyStatusClass(row.status);
+    return statusClass === '4xx' || statusClass === '5xx' ? statusClass : 'all';
+  }
+
+  function hasRequestFacets() {
+    return !state.sampleCaptureActive && (state.requestStatusFacet !== 'all' || state.requestHostFacet !== '');
+  }
+
+  function matchesRequestHostFacet(row) {
+    return !state.requestHostFacet || row.domain === state.requestHostFacet;
+  }
+
+  function matchesRequestStatusFacet(row) {
+    return state.requestStatusFacet === 'all' || classifyRequestFacet(row) === state.requestStatusFacet;
+  }
+
+  function repaintRequestScope() {
+    renderBody();
+    syncSearchUIAfterRender();
   }
 
   function clearColumnFilters() {
-    if (!state.sampleCaptureActive) state.webSocketOnly = false;
+    if (!state.sampleCaptureActive) {
+      state.webSocketOnly = false;
+      state.requestStatusFacet = 'all';
+      state.requestHostFacet = '';
+    }
     state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
     renderBody();
     syncSearchUIAfterRender();
@@ -13781,6 +13916,13 @@ const _NetworkPlus = (function () {
         // truncated Domain/Type/Path can be read on hover; the method pill
         // never truncates.
         if (c.id !== 'method' && text) td.title = text;
+        if (c.id === 'path' && row.domain && state.autoHiddenColumnIds.has('domain')) {
+          const host = document.createElement('span');
+          host.className = 'compact-request-host';
+          host.textContent = row.domain;
+          td.appendChild(host);
+          td.title = row.domain + text;
+        }
       }
 
       tr.appendChild(td);
@@ -13995,14 +14137,20 @@ const _NetworkPlus = (function () {
     // --- Status column: checkbox set by category (horizontal) ---
     if (colId === 'status') {
       const STATUS_CATEGORIES = [
-        { label: '2xx Success', codes: [200, 201, 202, 204, 206] },
-        { label: '3xx Redirect', codes: [301, 302, 303, 304, 307, 308] },
-        { label: '4xx Client Error', codes: [400, 401, 403, 404, 405, 408, 409, 429] },
-        { label: '5xx Server Error', codes: [500, 502, 503, 504] },
+        { label: 'analysisStatusSuccess', family: 2, codes: [200, 201, 202, 204, 206] },
+        { label: 'analysisStatusRedirect', family: 3, codes: [301, 302, 303, 304, 307, 308] },
+        { label: 'analysisStatusClientError', family: 4, codes: [400, 401, 403, 404, 405, 408, 409, 429] },
+        { label: 'analysisStatusServerError', family: 5, codes: [500, 502, 503, 504] },
       ];
       const rule = state.columnFilterRules[colId];
       const isStatusSet = rule && rule.mode === 'statusSet';
       const include = isStatusSet ? Object.assign({}, rule.include) : {};
+      const observedCodes = new Set(Object.keys(include).map(Number));
+      for (const row of state.rows) {
+        if (Number.isInteger(row.status) && row.status >= 0 && row.status < 600) observedCodes.add(row.status);
+      }
+      const otherCodes = [...observedCodes].filter((code) => code >= 0 && code < 200).sort((a, b) => a - b);
+      if (otherCodes.length) STATUS_CATEGORIES.push({ label: 'analysisStatusOther', codes: otherCodes });
       // Default: all enabled (empty = show all)
 
       for (const cat of STATUS_CATEGORIES) {
@@ -14012,16 +14160,21 @@ const _NetworkPlus = (function () {
 
         const catLabel = document.createElement('div');
         catLabel.className = 'filter-status-category';
-        catLabel.textContent = cat.label;
+        catLabel.textContent = uiText(cat.label);
         row.appendChild(catLabel);
 
         const grid = document.createElement('div');
         grid.className = 'filter-checkbox-grid';
-        for (const code of cat.codes) {
+        const codes = new Set(cat.codes);
+        for (const code of observedCodes) {
+          if (Math.floor(code / 100) === cat.family) codes.add(code);
+        }
+        for (const code of [...codes].sort((a, b) => a - b)) {
           const codeStr = String(code);
           const checked = include[codeStr] !== false;
-          const cb = createCheckboxItem(codeStr, checked, () => {
-            include[codeStr] = !include[codeStr];
+          const cb = createCheckboxItem(codeStr, checked, (event) => {
+            if (event.currentTarget.checked) delete include[codeStr];
+            else include[codeStr] = false;
             state.columnFilterRules[colId] = { mode: 'statusSet', include: Object.assign({}, include) };
             onChange();
           });
@@ -14250,14 +14403,14 @@ const _NetworkPlus = (function () {
 
     const header = document.createElement('div');
     header.className = 'filter-popup-header';
-    header.textContent = `Column Filters (${getActiveFilterCount()} active)`;
+    header.textContent = uiTextFormat('analysisColumnFilters', { count: getActiveFilterCount() });
     root.appendChild(header);
 
     const list = document.createElement('div');
     list.className = 'filter-popup-list';
 
     const refreshHeader = () => {
-      header.textContent = `Column Filters (${getActiveFilterCount()} active)`;
+      header.textContent = uiTextFormat('analysisColumnFilters', { count: getActiveFilterCount() });
     };
     const debouncedOnChange = debounce(onChange, FILTER_DEBOUNCE_MS);
     for (const col of state.columns) {
@@ -14274,7 +14427,7 @@ const _NetworkPlus = (function () {
       caret.setAttribute('aria-hidden', 'true');
       const name = document.createElement('span');
       name.className = 'filter-section-name';
-      name.textContent = col.label;
+      name.textContent = menuColumnLabel(col.id, col.label);
       const activeBadge = document.createElement('span');
       activeBadge.className = 'filter-section-state';
       toggle.appendChild(caret);
@@ -14285,7 +14438,7 @@ const _NetworkPlus = (function () {
       body.className = 'filter-section-body';
 
       const refreshBadge = () => {
-        activeBadge.textContent = isRuleActive(state.columnFilterRules[col.id]) ? 'Active' : '';
+        activeBadge.textContent = isRuleActive(state.columnFilterRules[col.id]) ? uiText('analysisColumnFilterActive') : '';
       };
       refreshBadge();
 
@@ -14301,9 +14454,9 @@ const _NetworkPlus = (function () {
         toggle.setAttribute('aria-expanded', String(expanded));
         body.hidden = !expanded;
       };
-      // Every rule starts expanded and editable — collapsing is an opt-in way
-      // to shorten the list, never a hurdle in front of the controls.
-      setExpanded(true);
+      const currentRule = state.columnFilterRules[col.id];
+      const hasInvalidRegex = getFilterRegexError(currentRule) || currentRule?.conditions?.some(getFilterRegexError);
+      setExpanded(col.id === 'status' || isRuleActive(currentRule) || !!hasInvalidRegex);
       toggle.addEventListener('click', () => {
         setExpanded(body.hidden);
       });
@@ -15345,6 +15498,7 @@ const _NetworkPlus = (function () {
     const wrapWidth = Number.isFinite(tableWrap.clientWidth) ? tableWrap.clientWidth : 0;
     const previousHiddenIds = state.autoHiddenColumnIds;
     const hiddenIds = planAutoHiddenColumns(state.columns, wrapWidth, {
+      compactIdentity: wrapWidth <= COMPACT_REQUEST_COLUMNS_WIDTH,
       pinnedIds: state.pinnedColumnIds,
       // The search read-out, the column the rows are ordered by and the one
       // whose width is being stepped: none may be dropped while it is doing
@@ -15648,7 +15802,7 @@ const _NetworkPlus = (function () {
     const pathCol = visibleCols.find((c) => c.id === 'path');
     const deficit = pathCol && wrapWidth > 0 ? Math.max(0, totalWidth - wrapWidth) : 0;
     const shrink = pathCol
-      ? Math.min(deficit, clampColumnWidth(pathCol.width) - minRenderedColumnWidth(pathCol))
+      ? Math.min(deficit, clampColumnWidth(pathCol.width) - minRenderedColumnWidth(pathCol, wrapWidth <= COMPACT_REQUEST_COLUMNS_WIDTH))
       : 0;
     const gridWidth = (totalWidth + surplus - shrink) + 'px';
     if (grid.style.width !== gridWidth) grid.style.width = gridWidth;
@@ -15887,7 +16041,8 @@ const _NetworkPlus = (function () {
       emptyState.className = 'empty-state';
       tableWrap.appendChild(emptyState);
     }
-    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + state.webSocketOnly;
+    const hasQuickFilter = state.webSocketOnly || hasRequestFacets();
+    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter;
     if (emptyState.dataset.renderKey !== renderKey) {
       emptyState.textContent = '';
       emptyState.dataset.renderKey = renderKey;
@@ -15928,9 +16083,9 @@ const _NetworkPlus = (function () {
         const action = document.createElement('button');
         action.type = 'button';
         action.className = 'empty-state-action';
-        action.textContent = uiText(state.webSocketOnly ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');
+        action.textContent = uiText(hasQuickFilter ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');
         action.setAttribute('aria-describedby', description.id);
-        action.addEventListener('click', clearColumnFilters);
+        action.addEventListener('click', clearRequestAnalysisFilters);
         emptyState.appendChild(action);
       }
       if (mode === 'capture' && !getMirrorViewParams(window.location ? window.location.search : '').viewerMode) {
@@ -16012,6 +16167,134 @@ const _NetworkPlus = (function () {
 
   function countVisibleRows() {
     return getVisibleRows().length;
+  }
+
+  function setSearchMatchesOnly(enabled) {
+    state.search.matchesOnly = enabled;
+    saveSearchPrefs(currentSearchPrefs());
+  }
+
+  function clearRequestAnalysisFilters() {
+    if (state.search.matchesOnly) setSearchMatchesOnly(false);
+    clearColumnFilters();
+  }
+
+  function describeAnalysisRule(rule) {
+    const describeCondition = ({ op, value }) => {
+      if (!isValuelessFilterOperator(op) && !String(value ?? '').trim()) return '';
+      const operator = [...FILTER_OPERATORS_STRING, ...FILTER_OPERATORS_NUMERIC].find((candidate) => candidate.value === op);
+      return [operator?.label || op, value].filter(Boolean).join(' ');
+    };
+    if (rule.conditions) return rule.conditions.map(describeCondition).filter(Boolean).join(' · ');
+    if (rule.include) {
+      const excluded = Object.keys(rule.include).filter((key) => rule.include[key] === false);
+      return excluded.length ? '≠ ' + excluded.join(', ') : '';
+    }
+    if (rule.mode === 'urlAdvanced') {
+      return [rule.includeAny, rule.includeAll, rule.excludeAny && '≠ ' + rule.excludeAny].filter(Boolean).join(' · ');
+    }
+    if (rule.mode === 'timeRange') return [rule.start || '…', rule.end || '…'].join(' – ');
+    return describeCondition(rule);
+  }
+
+  function renderAnalysisBar() {
+    const bar = $('#analysisBar');
+    if (!bar) return;
+    bar.hidden = state.rows.length === 0;
+    if (bar.hidden) return;
+
+    const hasSample = state.sampleCaptureActive;
+    const hasSearchRestriction = state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options);
+    const counts = { all: 0, '4xx': 0, '5xx': 0, pending: 0 };
+    for (const row of state.requestScopeRows || state.filteredRows) {
+      if (!hasSample && !matchesRequestHostFacet(row)) continue;
+      counts.all += 1;
+      const facet = classifyRequestFacet(row);
+      if (facet !== 'all') counts[facet] += 1;
+    }
+    for (const button of bar.querySelectorAll('[data-status-facet]')) {
+      const facet = button.dataset.statusFacet;
+      button.disabled = hasSample;
+      button.setAttribute('aria-pressed', String(facet === (hasSample ? 'all' : state.requestStatusFacet)));
+      const count = button.querySelector('.analysis-count');
+      if (count.textContent !== String(counts[facet])) count.textContent = counts[facet];
+    }
+
+    const compare = $('#analysisCompareBtn');
+    const isVisible = (row) => state.filteredRows.includes(row) && (!hasSearchRestriction || state.search.rowColors.has(row));
+    compare.hidden = state.selectedRows.size !== 2 || ![...state.selectedRows].every((row) =>
+      isVisible(row),
+    );
+    const outsideView = $('#analysisOutsideView');
+    outsideView.hidden = !state.selectedRow || !!state.comparedRows || isVisible(state.selectedRow);
+
+    const filters = [];
+    if (!hasSample && state.requestHostFacet) {
+      filters.push(['host', uiTextFormat('analysisHost', { host: state.requestHostFacet }), () => {
+        state.requestHostFacet = '';
+        repaintRequestScope();
+      }]);
+    }
+    if (!hasSample && state.webSocketOnly) {
+      filters.push(['websocket', 'WebSocket', () => {
+        state.webSocketOnly = false;
+        repaintRequestScope();
+      }]);
+    }
+    if (hasSearchRestriction) {
+      filters.push(['search', uiText('analysisSearchOnly'), () => {
+        setSearchMatchesOnly(false);
+        repaintRequestScope();
+      }]);
+    }
+    for (const column of state.columns) {
+      const rule = getApplicableFilterRule(state.columnFilterRules[column.id]);
+      if (isVisualOnlyColumn(column.id) || !isRuleActive(rule)) continue;
+      const name = menuColumnLabel(column.id, column.label);
+      const condition = describeAnalysisRule(rule);
+      const label = condition ? name + ' · ' + shortenMenuValue(condition) : name;
+      filters.push([column.id, label, () => {
+        state.columnFilterRules[column.id] = DEFAULT_COLUMN_FILTER_RULES()[column.id];
+        repaintRequestScope();
+      }]);
+    }
+
+    const chips = $('#analysisChips');
+    const focused = chips.contains(document.activeElement);
+    const previousKey = focused ? document.activeElement.dataset.filterKey : '';
+    chips.hidden = !filters.length && (hasSample || state.requestStatusFacet === 'all');
+    const signature = JSON.stringify([activeLanguage, chips.hidden, ...filters.map(([key, label]) => [key, label])]);
+    if (chips.dataset.signature === signature) return;
+    chips.dataset.signature = signature;
+    chips.setAttribute('aria-label', uiText('analysisActive'));
+    const controls = new Map();
+    chips.replaceChildren();
+    for (const [key, label, remove] of filters) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.filterKey = key;
+      button.setAttribute('aria-label', uiTextFormat('analysisRemove', { filter: label }));
+      const text = document.createElement('span');
+      text.textContent = label;
+      const cross = document.createElement('span');
+      cross.textContent = '×';
+      cross.setAttribute('aria-hidden', 'true');
+      button.append(text, cross);
+      button.addEventListener('click', remove);
+      chips.appendChild(button);
+      controls.set(key, button);
+    }
+    if (!chips.hidden) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.dataset.filterKey = 'clear';
+      clear.className = 'analysis-clear';
+      clear.textContent = uiText('analysisClear');
+      clear.addEventListener('click', clearRequestAnalysisFilters);
+      chips.appendChild(clear);
+      controls.set('clear', clear);
+    }
+    if (focused) (controls.get(previousKey) || $('#filterBtn')).focus({ preventScroll: true });
   }
 
   function updateTableSummary(visibleRowCount, visibleBytes) {
@@ -16097,6 +16380,7 @@ const _NetworkPlus = (function () {
     // Every render and streaming path funnels through here, so the domain
     // summary panel refreshes without touching the incremental fast path.
     if (state.syncDomainSummary) state.syncDomainSummary();
+    renderAnalysisBar();
   }
 
   function appendIncrementalRows(liveRows) {
@@ -16131,7 +16415,17 @@ const _NetworkPlus = (function () {
     for (let element = tbody.firstElementChild; element; element = element.nextElementSibling) {
       if (element.dataset && element.dataset.rowId != null) renderedRowIds.push(element.dataset.rowId);
     }
-    const rowsToAppend = getIncrementalAppendBatch(liveRows, renderedRowIds).filter(matchesRequestTypeFilter);
+    const scopeBatch = getIncrementalAppendBatch(liveRows, renderedRowIds).filter(matchesRequestTypeFilter);
+    let rowsToAppend = scopeBatch;
+    if (state.requestScopeRows) {
+      const scopeSet = new Set(state.requestScopeRows);
+      for (const row of scopeBatch) {
+        if (scopeSet.has(row)) continue;
+        state.requestScopeRows.push(row);
+        scopeSet.add(row);
+      }
+      rowsToAppend = scopeBatch.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row));
+    }
     refreshSearchMatches();
     if (rowsToAppend.length === 0) {
       updateEmptyState(state.filteredRows.length);
@@ -16427,6 +16721,8 @@ const _NetworkPlus = (function () {
   // button, the summary strip. The comparison writers set their own title
   // text and call this so no stale request identity survives next to it.
   function resetDetailsHeader() {
+    const outsideView = $('#analysisOutsideView');
+    if (outsideView) outsideView.hidden = true;
     detailsTitlePath = '';
     const title = $('#detailsTitle');
     if (title && typeof title.removeAttribute === 'function') title.removeAttribute('title');
@@ -18987,6 +19283,7 @@ const _NetworkPlus = (function () {
    * Uses only data already in the row objects — never triggers a new body fetch.
    */
   function renderComparisonPanel(rowA, rowB) {
+    setDetailsTitleText(uiText('detailsComparingTwo'));
     const panel = $('#comparePanel');
     if (!panel) return;
     updateWsDetailTabs(null);
@@ -19018,7 +19315,7 @@ const _NetworkPlus = (function () {
       state.comparedRows = null;
       state.comparisonInvokingRowId = null;
       hideComparisonPanel();
-      focusRowOrGridFallback(invokingRowId);
+      restoreRequestComparisonFocus(invokingRowId);
     });
     headerRow.appendChild(closeBtn);
     panel.appendChild(headerRow);
@@ -19148,6 +19445,21 @@ const _NetworkPlus = (function () {
     bodyWrap.appendChild(createBodyComparisonBlock(describeBodyForComparison(rowB), 'B — ' + labelB));
     bodySection.appendChild(bodyWrap);
     panel.appendChild(bodySection);
+  }
+
+  function openRequestComparison(rows, invokingRowId) {
+    if (rows.length !== 2 || state.selectedRows.size !== 2 ||
+        !rows.every((row) => state.selectedRows.has(row) && state.activeRows.has(row))) return;
+    state.comparedRows = rows;
+    state.comparisonInvokingRowId = invokingRowId;
+    renderComparisonPanel(rows[0], rows[1]);
+    showComparisonPanel();
+  }
+
+  function restoreRequestComparisonFocus(invokingRowId) {
+    const button = $('#analysisCompareBtn');
+    if (invokingRowId === null && button && !button.hidden) button.focus({ preventScroll: true });
+    else focusRowOrGridFallback(invokingRowId);
   }
 
   function showComparisonPanel() {
@@ -19741,6 +20053,8 @@ const _NetworkPlus = (function () {
       }
       state.columnFilterRules = restorePlan.columnFilterRules;
       state.webSocketOnly = restorePlan.webSocketOnly;
+      state.requestStatusFacet = restorePlan.requestStatusFacet;
+      state.requestHostFacet = restorePlan.requestHostFacet;
       state.sort = restorePlan.sort;
       state.paused = restorePlan.paused;
       state.autoScroll = restorePlan.autoScroll;
@@ -19820,6 +20134,8 @@ const _NetworkPlus = (function () {
       detachStoredRowsForClearUndo();
       state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
       state.webSocketOnly = false;
+      state.requestStatusFacet = 'all';
+      state.requestHostFacet = '';
       state.selectedRow = null;
       state.focusedRow = null;
       state.pendingRowFocusId = null;
@@ -20182,13 +20498,8 @@ const _NetworkPlus = (function () {
       };
       updateDomainToggle();
       domainToggle.addEventListener('click', () => {
-        state.domainSummaryVisible = !state.domainSummaryVisible;
-        saveDomainSummaryPref(state.domainSummaryVisible);
+        toggleDomainSummary();
         updateDomainToggle();
-        if (state.syncDomainSummary) state.syncDomainSummary();
-        setStatus(
-          uiText(state.domainSummaryVisible ? 'columnsDomainSummaryShownStatus' : 'columnsDomainSummaryHiddenStatus'),
-        );
       });
       domainSection.appendChild(domainToggle);
       columnsContextMenu.appendChild(domainSection);
@@ -20505,12 +20816,36 @@ const _NetworkPlus = (function () {
     domainSummaryPanel.hidden = true;
     const contentElement = $('#content');
     contentElement.insertAdjacentElement('beforebegin', domainSummaryPanel);
+    const analysisDomainsButton = $('#analysisDomainsBtn');
+    const toggleDomainSummary = () => {
+      state.domainSummaryVisible = !state.domainSummaryVisible;
+      saveDomainSummaryPref(state.domainSummaryVisible);
+      renderDomainSummary();
+      setStatus(uiText(state.domainSummaryVisible ? 'columnsDomainSummaryShownStatus' : 'columnsDomainSummaryHiddenStatus'));
+    };
+    analysisDomainsButton.addEventListener('click', toggleDomainSummary);
+    for (const button of document.querySelectorAll('[data-status-facet]')) {
+      button.addEventListener('click', () => {
+        const facet = button.dataset.statusFacet;
+        state.requestStatusFacet = state.requestStatusFacet === facet ? 'all' : facet;
+        repaintRequestScope();
+      });
+    }
+    $('#analysisCompareBtn').addEventListener('click', () => {
+      openRequestComparison([...state.selectedRows], null);
+    });
 
     // Shared with the row context menu: both feed the same multiText rules
     // the Filters popup edits, so applied filters show, count, and clear
     // there. "Only" replaces any previous inclusion so two quick picks never
     // intersect down to zero rows; exclusions accumulate.
     const applyColumnQuickFilterTo = (colId, value, op) => {
+      if (colId === 'domain' && op === 'contains' && !state.sampleCaptureActive) {
+        state.requestHostFacet = value;
+        repaintRequestScope();
+        return;
+      }
+      const conditionOp = colId === 'domain' ? (op === 'contains' ? 'equals' : 'notequals') : op;
       const rule = state.columnFilterRules[colId];
       let conditions =
         rule && rule.mode === 'multiText' && Array.isArray(rule.conditions)
@@ -20518,9 +20853,9 @@ const _NetworkPlus = (function () {
           : [];
       // Two "only" rules on one column can never both hold, so an isolate
       // replaces the previous isolate; excludes accumulate.
-      if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== 'contains');
-      if (!conditions.some((cond) => cond.op === op && cond.value === value)) {
-        conditions.push({ op, value });
+      if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== conditionOp);
+      if (!conditions.some((cond) => cond.op === conditionOp && cond.value === value)) {
+        conditions.push({ op: conditionOp, value });
       }
       state.columnFilterRules[colId] = { mode: 'multiText', conditions };
       renderBody();
@@ -20536,57 +20871,25 @@ const _NetworkPlus = (function () {
 
     const applyDomainQuickFilterTo = (domain, op) => applyColumnQuickFilterTo('domain', domain, op);
 
-    const clearDomainQuickFilter = (domain) => {
-      const rule = state.columnFilterRules.domain;
-      const conditions =
-        rule && rule.mode === 'multiText' && Array.isArray(rule.conditions)
-          ? rule.conditions.filter(
-              (cond) => cond && !(cond.op === 'contains' && cond.value === domain),
-            )
-          : [];
-      state.columnFilterRules.domain = { mode: 'multiText', conditions };
-      renderBody();
-      syncSearchUIAfterRender();
-      setStatus(uiTextFormat('statusDomainFilterCleared', { domain }));
-    };
-
-    const getActiveDomainOnlyValues = () => {
-      const rule = state.columnFilterRules.domain;
-      const values = new Set();
-      if (rule && rule.mode === 'multiText' && Array.isArray(rule.conditions)) {
-        for (const cond of rule.conditions) {
-          if (cond && cond.op === 'contains' && String(cond.value || '').trim() !== '') {
-            values.add(cond.value);
-          }
-        }
-      }
-      return values;
-    };
-
     let domainSummarySignature = '';
     const renderDomainSummary = () => {
-      domainSummaryPanel.hidden = !state.domainSummaryVisible;
-      if (!state.domainSummaryVisible) {
+      domainSummaryPanel.hidden = !state.domainSummaryVisible || state.rows.length === 0;
+      analysisDomainsButton.disabled = state.sampleCaptureActive;
+      analysisDomainsButton.setAttribute('aria-expanded', String(!domainSummaryPanel.hidden));
+      domainSummaryPanel.setAttribute('aria-label', uiText('analysisDomains'));
+      if (domainSummaryPanel.hidden) {
         domainSummarySignature = '';
         return;
       }
-      const summary = computeDomainSummary(state.filteredRows);
-      const activeDomains = getActiveDomainOnlyValues();
+      const scopeRows = state.requestScopeRows || state.filteredRows;
+      const summary = computeDomainSummary(state.requestStatusFacet === 'all' || state.sampleCaptureActive
+        ? scopeRows : scopeRows.filter(matchesRequestStatusFacet));
+      const activeHost = state.sampleCaptureActive ? '' : state.requestHostFacet;
       // The signature includes the pressed state: clicking a domain that
       // already spans every filtered row changes no aggregate but must still
       // repaint its active marker. When nothing changed, the rebuild is
       // skipped so streaming appends never churn focus or scroll here.
-      const signature = summary
-        .map((entry) =>
-          [
-            entry.domain,
-            entry.count,
-            entry.totalBytes,
-            entry.errorCount,
-            activeDomains.has(entry.domain) ? 1 : 0,
-          ].join(':'),
-        )
-        .join('|');
+      const signature = JSON.stringify([activeLanguage, activeHost, state.sampleCaptureActive, summary]);
       if (signature === domainSummarySignature) return;
       domainSummarySignature = signature;
       const previousScrollTop = domainSummaryPanel.scrollTop;
@@ -20598,16 +20901,16 @@ const _NetworkPlus = (function () {
       if (summary.length === 0) {
         const empty = document.createElement('span');
         empty.className = 'domain-summary-empty';
-        empty.textContent = 'No captured domains yet';
+        empty.textContent = uiText('analysisHostsEmpty');
         domainSummaryPanel.appendChild(empty);
+        if (focusedDomain) analysisDomainsButton.focus({ preventScroll: true });
         return;
       }
       for (const entry of summary) {
-        const meta =
-          entry.count +
-          (entry.count === 1 ? ' request' : ' requests') +
-          ' · ' +
-          (fmtBytes(entry.totalBytes) || '0 B');
+        const meta = uiTextFormat('analysisDomainMeta', {
+          count: activeLanguage === 'ja' ? entry.count : formatRequestCount(entry.count),
+          bytes: fmtBytes(entry.totalBytes) || '0 B',
+        });
         const appendEntryContent = (target) => {
           const nameSpan = document.createElement('span');
           nameSpan.className = 'domain-summary-name';
@@ -20620,8 +20923,9 @@ const _NetworkPlus = (function () {
           if (entry.errorCount > 0) {
             const errorChip = document.createElement('span');
             errorChip.className = 'domain-summary-errors';
-            errorChip.textContent =
-              entry.errorCount + (entry.errorCount === 1 ? ' error' : ' errors');
+            errorChip.textContent = uiTextFormat('analysisDomainErrors', {
+              count: entry.errorCount, error: entry.errorCount === 1 ? 'error' : 'errors',
+            });
             target.appendChild(errorChip);
           }
         };
@@ -20634,30 +20938,29 @@ const _NetworkPlus = (function () {
           domainSummaryPanel.appendChild(info);
           continue;
         }
-        const active = activeDomains.has(entry.domain);
+        const active = activeHost === entry.domain;
         const entryButton = document.createElement('button');
         entryButton.type = 'button';
         entryButton.className = 'domain-summary-row' + (active ? ' active' : '');
         entryButton.setAttribute('data-domain', entry.domain);
         entryButton.setAttribute('aria-pressed', String(active));
-        entryButton.title = active
-          ? 'Clear the ' + entry.domain + ' filter'
-          : 'Show only requests from ' + entry.domain;
+        entryButton.disabled = state.sampleCaptureActive;
+        entryButton.title = uiTextFormat(active ? 'analysisRemove' : 'analysisHostOnly', {
+          filter: entry.domain, host: entry.domain,
+        });
         appendEntryContent(entryButton);
         entryButton.addEventListener('click', () => {
-          if (getActiveDomainOnlyValues().has(entry.domain)) clearDomainQuickFilter(entry.domain);
-          else applyDomainQuickFilterTo(entry.domain, 'contains');
+          state.requestHostFacet = active ? '' : entry.domain;
+          repaintRequestScope();
         });
         domainSummaryPanel.appendChild(entryButton);
       }
       domainSummaryPanel.scrollTop = previousScrollTop;
       if (focusedDomain) {
-        for (const candidate of domainSummaryPanel.querySelectorAll('button[data-domain]')) {
-          if (candidate.getAttribute('data-domain') === focusedDomain) {
-            candidate.focus();
-            break;
-          }
-        }
+        const candidate = [...domainSummaryPanel.querySelectorAll('button[data-domain]')].find((button) =>
+          button.dataset.domain === focusedDomain,
+        );
+        (candidate || analysisDomainsButton).focus({ preventScroll: true });
       }
     };
     state.syncDomainSummary = renderDomainSummary;
@@ -20906,13 +21209,9 @@ const _NetworkPlus = (function () {
           compareLabel.setAttribute('role', 'presentation');
           compareLabel.textContent = uiText('menuCompare');
           contextMenu.appendChild(compareLabel);
-          const [rowX, rowY] = [...state.selectedRows];
+          const selectedPair = [...state.selectedRows];
           contextMenu.appendChild(createRowMenuButton(uiText('menuCompareTwo'), () => {
-            state.comparedRows = [rowX, rowY];
-            state.comparisonInvokingRowId = contextMenuInvokerRowId;
-            setDetailsTitleText(uiText('detailsComparingTwo'));
-            renderComparisonPanel(rowX, rowY);
-            showComparisonPanel();
+            openRequestComparison(selectedPair, contextMenuInvokerRowId);
           }));
         }
         // Both destroy rows, so both arm the same bounded Undo the toolbar
@@ -22647,7 +22946,7 @@ const _NetworkPlus = (function () {
           state.comparedRows = null;
           state.comparisonInvokingRowId = null;
           hideComparisonPanel();
-          focusRowOrGridFallback(invokingRowId);
+          restoreRequestComparisonFocus(invokingRowId);
         }
       });
     }

@@ -406,7 +406,7 @@ const VIEWPORT_CONTRACTS = [
   },
   {
     constantName: 'GRID_FOCUS_VIEWPORT_WIDTHS',
-    expectedWidths: [375, 500, 800, 1280],
+    expectedWidths: [300, 375, 500, 800, 1280],
     journeyTitle: GRID_FOCUS_JOURNEY_TITLE,
   },
   {
@@ -541,7 +541,7 @@ test('locks toolbar focus coverage to narrow, stacked, and split layouts', () =>
 });
 
 test('locks request-grid focus coverage to narrow, stacked, and split layouts', () => {
-  assertExactViewportWidths(browserSuiteSource, 'GRID_FOCUS_VIEWPORT_WIDTHS', [375, 500, 800, 1280]);
+  assertExactViewportWidths(browserSuiteSource, 'GRID_FOCUS_VIEWPORT_WIDTHS', [300, 375, 500, 800, 1280]);
 });
 
 test('locks separator focus coverage to acceptance widths and both sides of the responsive boundary', () => {

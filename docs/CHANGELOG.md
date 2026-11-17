@@ -8,6 +8,9 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 - ✨ **WebSocket filters** — Isolate WebSocket requests from the toolbar and search recorded messages by text and direction.
 - 🔧 **Theme colors** — Use charcoal and amber across the dark panel, toolbar menu, and live guide, and refine control and selection contrast in Light.
 - ⚡ **Large payloads** — Limit large Body and Raw previews to 16 KiB and offer local saves for complete available HTTP bodies and WebSocket text.
+- ✨ **Request triage** — Filter by HTTP error family, pending requests, or exact host, remove active conditions, and open two-request comparison from the list.
+- 🐛 **Status filters** — Apply the first checkbox change immediately and include status codes observed in the capture.
+- 🔧 **Compact list** — Keep Search, Filters, and request paths reachable in narrow panes, and mark selected details outside the current filter.
 
 ## v1.18.0 - 2026-11-17
 

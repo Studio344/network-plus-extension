@@ -1037,8 +1037,13 @@ browserTest(
       expect(await waitForImportResult(page.cdp, "document.querySelector('#tbody tr[data-row-id=\"1\"] [data-col-id=status]')?.textContent === 'Pending'")).toBe(true);
       await evaluate(page.cdp, "document.querySelector('#tbody tr[data-row-id=\"1\"]').click(); true");
       expect(await evaluate(page.cdp, "window.__sentToHost.filter((m) => m.type === 'body-request').length")).toBe(0);
+      await evaluate(page.cdp, "document.querySelector('[data-status-facet=pending]').click(); true");
+      expect(await states()).toEqual([['1', 'Pending']]);
       await evaluate(page.cdp, `window.__send({ type: 'row', row: ${JSON.stringify(done(1, 201))} }); true`);
       expect(await waitForImportResult(page.cdp, "document.querySelector('.details-summary-status')?.textContent.includes('201')")).toBe(true);
+      expect(await states()).toEqual([]);
+      expect(await evaluate(page.cdp, "document.getElementById('analysisOutsideView').hidden")).toBe(false);
+      await evaluate(page.cdp, "document.querySelector('[data-status-facet=all]').click(); true");
       expect(await states()).toEqual([['1', '201'], ['2', '200']]);
       expect(await evaluate(page.cdp, "document.querySelector('#tbody tr[data-row-id=\"1\"]').getAttribute('aria-selected')")).toBe('true');
       // A delayed provisional push must never regress a finished row.
@@ -1994,17 +1999,16 @@ browserTest(
         await evaluate(page.cdp, "document.querySelectorAll('#domainSummary .domain-summary-row').length"),
       ).toBe(3);
 
-      // Click-to-filter feeds the same multiText rules the Filters popup
-      // edits; clicking the pressed entry clears it again.
+      // Host focus keeps the alternatives available and can be cleared
+      // directly from its chip or the pressed host button.
       await evaluate(
         page.cdp,
         `document.querySelector('#domainSummary button[data-domain="api.example.test"]').click(); true`,
       );
       await delay(200);
       expect(await evaluate(page.cdp, "document.querySelectorAll('#tbody tr[data-row-id]').length")).toBe(3);
-      expect(await evaluate(page.cdp, "document.getElementById('filterBtn').textContent")).toContain(
-        'Filters (1)',
-      );
+      expect(await evaluate(page.cdp, `document.querySelector('[data-filter-key="host"]').textContent`)).toContain('api.example.test');
+      expect(await evaluate(page.cdp, `document.querySelectorAll('#domainSummary button[data-domain]').length`)).toBe(3);
       expect(
         await evaluate(
           page.cdp,

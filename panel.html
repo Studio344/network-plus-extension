@@ -51,6 +51,7 @@
       </button>
       <div class="separator"></div>
       <button id="searchToggleBtn" title="Toggle search panel (Ctrl+F)" data-i18n-title="titleSearchToggle" aria-keyshortcuts="Control+F Meta+F" aria-controls="searchPanel" aria-expanded="false">🔍 Search</button>
+      <button id="filterBtn" aria-label="Column Filters, no active filters" aria-haspopup="dialog" aria-controls="columnFilterPopup" aria-expanded="false">⚙️ Filters</button>
       <span id="searchCount" class="search-count" aria-hidden="true"></span><span id="searchCountStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
       <div class="separator"></div>
       <button id="clearBtn" title="Clear all requests" data-i18n-title="titleClearBtn" aria-label="Clear all requests" data-i18n-aria-label="titleClearBtn" aria-keyshortcuts="Control+L Meta+K" class="icon-btn clear-btn-danger">🗑️</button>
@@ -61,7 +62,6 @@
     </div>
     <div class="right">
       <button id="webSocketOnlyBtn" type="button" aria-pressed="false" title="Show only WebSocket requests" data-i18n-title="titleWebSocketOnly" aria-label="Show only WebSocket requests" data-i18n-aria-label="titleWebSocketOnly">WebSocket</button>
-      <button id="filterBtn" aria-label="Column Filters, no active filters" aria-haspopup="dialog" aria-controls="columnFilterPopup" aria-expanded="false">⚙️ Filters</button>
       <button id="columnsBtn" aria-haspopup="menu" aria-controls="columnsMenu" aria-expanded="false">🗂️ Columns</button>
       <div class="separator"></div>
       <button id="settingsBtn" aria-haspopup="dialog" aria-controls="settingsDialog" aria-expanded="false">🎛️ Settings</button>
@@ -83,6 +83,19 @@
       <button id="searchScopeBtn" class="search-scope-btn" title="Search scope settings" data-i18n-title="titleSearchScope" aria-haspopup="dialog" aria-controls="searchScopePopup" aria-expanded="false">⚙️ Scope</button>
     </div>
   </div>
+  <section id="analysisBar" class="analysis-bar" aria-label="Request filters and actions" data-i18n-aria-label="analysisAria" hidden>
+    <div class="analysis-actions">
+      <div class="analysis-status" role="group" aria-label="Filter by request status" data-i18n-aria-label="analysisStatusAria">
+        <button type="button" data-status-facet="all" aria-pressed="true"><span data-i18n="analysisAll">All</span><span class="analysis-count"></span></button>
+        <button type="button" data-status-facet="4xx" aria-pressed="false"><span>4xx</span><span class="analysis-count"></span></button>
+        <button type="button" data-status-facet="5xx" aria-pressed="false"><span>5xx</span><span class="analysis-count"></span></button>
+        <button type="button" data-status-facet="pending" aria-pressed="false"><span data-i18n="analysisPending">Pending</span><span class="analysis-count"></span></button>
+      </div>
+      <button type="button" id="analysisDomainsBtn" aria-controls="domainSummary" aria-expanded="false" data-i18n="analysisDomains">Hosts</button>
+      <button type="button" id="analysisCompareBtn" class="analysis-compare" data-i18n="menuCompareTwo" aria-controls="comparePanel" hidden>Compare 2 requests</button>
+    </div>
+    <div id="analysisChips" class="analysis-chips" aria-label="Active filters" role="group" hidden></div>
+  </section>
   <main class="content" id="content">
     <section class="tableWrap" id="tableWrap" aria-label="Network requests">
       <table class="grid" id="grid" role="grid" aria-label="Network requests" aria-multiselectable="true">
@@ -98,6 +111,7 @@
         <button id="detailsCloseBtn" class="details-close-btn" type="button" title="Close request details" data-i18n-title="titleDetailsClose" aria-label="Close request details" data-i18n-aria-label="titleDetailsClose">✕</button>
       </div>
       <div id="detailsSummary" class="details-summary" hidden></div>
+      <div id="analysisOutsideView" class="analysis-outside-view" data-i18n="analysisOutsideView" hidden>Selected request is outside the current filters</div>
       <div id="comparePanel" class="compare-panel" hidden aria-label="Request comparison" data-i18n-aria-label="ariaComparePanel" aria-hidden="true"></div>
       <p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open</p>
       <div class="tab-bar ws-detail-tabs" id="ws-detail-tabs" role="tablist" aria-label="WebSocket connection" data-i18n-aria-label="wsConnectionTabs" hidden>
