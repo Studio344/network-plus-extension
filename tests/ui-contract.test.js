@@ -395,7 +395,7 @@ describe('accessible theme contract', () => {
 
   // Quiet GET and 2xx text sit directly on the row: the selected tint and the
   // zebra stripe composited over --bg are the grounds they must clear, and the
-  // light --selected composite (#e5e6fa) is where the old #047857 fell to 4.45.
+  // light --selected composite is a stronger tint than the plain row.
   const parseAlphaColor = (value) => {
     const match = value.match(/^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/);
     expect(match).not.toBeNull();
@@ -413,7 +413,7 @@ describe('accessible theme contract', () => {
   };
 
   test('keeps GET and 2xx text at WCAG AA on the selected and zebra row composites', () => {
-    expect(compositeOver(light.selected, light.bg)).toBe('#e5e6fa');
+    expect(compositeOver(light.selected, light.bg)).toBe('#cee1ed');
     for (const [themeName, theme] of [
       ['light', light],
       ['system dark', systemDark],
@@ -545,7 +545,7 @@ describe('guided sample capture static contracts', () => {
   test('renders one local-only action only for a truly empty capture', () => {
     expect(js).toContain('const mode = getEmptyStateMode(state.rows.length, visibleRowCount);');
     expect(js).toContain("if (mode === 'filtered')");
-    expect(js).toContain("action.textContent = uiText('emptyFilteredAction');");
+    expect(js).toContain("action.textContent = uiText(state.webSocketOnly ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');");
     expect(js).toContain("action.addEventListener('click', clearColumnFilters);");
     expect(js).toContain("action.textContent = uiText('emptyCaptureAction');");
     expect(js).not.toContain("action.setAttribute('aria-label'");
@@ -1689,7 +1689,7 @@ describe('settings and language contracts', () => {
     // The empty state re-renders in place on a language change: the render
     // key includes the active language and applyLanguage triggers a refresh.
     expect(js).toContain(
-      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage;",
+      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + state.webSocketOnly;",
     );
     expect(js).toContain('refreshEmptyStateLanguage();');
     expect(js).toContain('updateEmptyState(lastEmptyStateRowCount);');
@@ -3619,7 +3619,7 @@ describe('search options and preference persistence contracts', () => {
   });
 
   test('Ctrl+F prefers the focused Body/Raw pane or its selected tab', () => {
-    expect(js).toContain("focused.closest('.tab-pane')");
+    expect(js).toContain("focused.closest('.tab-pane, .ws-messages-panel')");
     expect(js).toContain("focused.matches('.tab-btn[aria-selected=\"true\"]')");
     expect(js).toContain("document.getElementById(selectedTab.getAttribute('aria-controls'))");
     expect(js).toContain("typeof activePane._paneSearchOpen === 'function'");

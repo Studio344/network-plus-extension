@@ -655,10 +655,16 @@ browserTest(
         entry.request.url = 'wss://synthetic.invalid/imported';
         entry.response.status = 101;
         entry.response.content = { mimeType: 'websocket', size: 0, text: '' };
+        const customPayloads = {
+          1: 'AP8=',
+          998: 'a'.repeat(180) + ' HiddenMarker[',
+          999: 'b'.repeat(180) + ' hiddenmarker[',
+          1000: messageJson,
+        };
         entry._webSocketMessages = Array.from({ length: 1002 }, (_, index) => ({
           type: index % 2 ? 'receive' : 'send', time: 1700000000 + index / 1000,
           opcode: index === 1 ? 2 : 1,
-          data: index === 1 ? 'AP8=' : index === 1000 ? messageJson : 'private-frame-' + index,
+          data: customPayloads[index] ?? 'private-frame-' + index,
         }));
         const files = new DataTransfer();
         files.items.add(new File([JSON.stringify(har)], 'websocket.har'));
@@ -750,6 +756,30 @@ browserTest(
       expect(await waitWithRelay(viewer, hasImportedHistory)).toBe(true);
       expect(await evaluate(viewer.cdp, `document.querySelector('#ws-timeline-header').hidden === false &&
         !document.querySelector('#ws-messages-panel details[open], #ws-messages-panel pre')`)).toBe(true);
+      const visibleMessages = '#ws-messages-panel .ws-message:not([hidden])';
+      await evaluate(viewer.cdp, "document.querySelector('#ws-message-search-toggle').click(); true");
+      const searchFor = (text) => evaluate(viewer.cdp, `(() => {
+        const input = document.querySelector('#ws-message-query');
+        input.value = ${JSON.stringify(text)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await searchFor('HIDDENMARKER[');
+      expect(await evaluate(viewer.cdp, `[...document.querySelectorAll('${visibleMessages}')].map((item) => [
+        item.dataset.direction, item.querySelector('details').open, item.textContent.includes('Marker['),
+      ])`)).toEqual([['send', false, false], ['receive', false, false]]);
+      await evaluate(viewer.cdp, 'document.querySelector(\'[data-ws-direction="receive"]\').click(); true');
+      expect(await evaluate(viewer.cdp, `[...document.querySelectorAll('${visibleMessages}')].map((item) => item.dataset.direction)`)).toEqual(['receive']);
+      await searchFor('not present in any message');
+      expect(await evaluate(viewer.cdp, "!document.querySelector('#ws-message-empty').hidden")).toBe(true);
+      await evaluate(viewer.cdp, "document.querySelector('#ws-message-reset').click(); true");
+      expect(await evaluate(viewer.cdp, `({
+        query: document.querySelector('#ws-message-query').value,
+        direction: document.querySelector('[data-ws-direction][aria-pressed="true"]').dataset.wsDirection,
+        visible: document.querySelectorAll('${visibleMessages}').length,
+        empty: document.querySelector('#ws-message-empty').hidden,
+      })`)).toEqual({ query: '', direction: 'all', visible: 100, empty: true });
+      await evaluate(viewer.cdp, "document.querySelector('#ws-message-search-toggle').click(); true");
       await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child summary').click(); true");
       expect(await waitWithRelay(viewer, `document.querySelector('#ws-messages-panel .ws-message:last-child details[open] pre')?.textContent === 'private-frame-1001'`)).toBe(true);
       expect(await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child pre').childElementCount")).toBe(0);

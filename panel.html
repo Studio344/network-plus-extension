@@ -60,6 +60,7 @@
       <input type="file" id="importFile" accept=".har,.saz" style="display:none" />
     </div>
     <div class="right">
+      <button id="webSocketOnlyBtn" type="button" aria-pressed="false" title="Show only WebSocket requests" data-i18n-title="titleWebSocketOnly" aria-label="Show only WebSocket requests" data-i18n-aria-label="titleWebSocketOnly">WebSocket</button>
       <button id="filterBtn" aria-label="Column Filters, no active filters" aria-haspopup="dialog" aria-controls="columnFilterPopup" aria-expanded="false">⚙️ Filters</button>
       <button id="columnsBtn" aria-haspopup="menu" aria-controls="columnsMenu" aria-expanded="false">🗂️ Columns</button>
       <div class="separator"></div>
@@ -103,14 +104,38 @@
         <button id="ws-tab-messages" class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="ws-messages-panel" data-i18n="wsMessagesTab">Messages</button>
         <button id="ws-tab-details" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="ws-details-panel" tabindex="-1" data-i18n="wsDetailsTab">Details</button>
       </div>
-      <section id="ws-messages-panel" class="ws-messages-panel" role="tabpanel" aria-labelledby="ws-tab-messages" tabindex="0" hidden>
-        <div id="ws-timeline-header" class="ws-timeline-header" hidden>
-          <span data-i18n="wsMessageTimeHeading">Time (UTC)</span>
-          <span data-i18n="wsMessageDirectionHeading">Direction</span>
-          <span data-i18n="wsMessagePreviewHeading">Message</span>
+      <section id="ws-messages-panel" class="ws-messages-panel" role="tabpanel" aria-labelledby="ws-tab-messages" tabindex="-1" hidden>
+        <div class="ws-message-tools">
+          <div class="ws-message-tool-row">
+            <button id="ws-message-search-toggle" type="button" aria-controls="ws-message-find-row" aria-expanded="false" aria-keyshortcuts="Control+F Meta+F" data-i18n="wsSearchMessages">Search messages</button>
+            <div class="ws-message-direction-filters" role="group" aria-label="Message direction" data-i18n-aria-label="wsFilterDirection">
+              <button type="button" data-ws-direction="all" aria-pressed="true" data-i18n="wsFilterAll">All</button>
+              <button type="button" data-ws-direction="send" aria-pressed="false" data-i18n="wsMessageSent">↑ Sent</button>
+              <button type="button" data-ws-direction="receive" aria-pressed="false" data-i18n="wsMessageReceived">↓ Received</button>
+            </div>
+          </div>
+          <div id="ws-message-find-row" class="ws-message-find-row" role="search" aria-label="Search messages" data-i18n-aria-label="wsSearchMessages" hidden>
+            <input id="ws-message-query" type="search" autocomplete="off" spellcheck="false" aria-label="Search captured message text" data-i18n-aria-label="wsSearchPayload" aria-controls="ws-timeline-scroll" />
+            <div class="ws-message-search-nav">
+              <span id="ws-message-results" role="status" aria-atomic="true"></span>
+              <button id="ws-message-prev" type="button" title="Previous matching message" data-i18n-title="wsSearchPrevious" aria-label="Previous matching message" data-i18n-aria-label="wsSearchPrevious" disabled>↑</button>
+              <button id="ws-message-next" type="button" title="Next matching message" data-i18n-title="wsSearchNext" aria-label="Next matching message" data-i18n-aria-label="wsSearchNext" disabled>↓</button>
+            </div>
+          </div>
         </div>
-        <p id="ws-messages-status" class="ws-messages-status" role="status" hidden></p>
-        <ol class="ws-message-list" role="list"></ol>
+        <div id="ws-timeline-scroll" class="ws-timeline-scroll" role="region" aria-label="Message timeline" data-i18n-aria-label="wsTimelineLabel" tabindex="0">
+          <div id="ws-timeline-header" class="ws-timeline-header" hidden>
+            <span data-i18n="wsMessageTimeHeading">Time (UTC)</span>
+            <span data-i18n="wsMessageDirectionHeading">Direction</span>
+            <span data-i18n="wsMessagePreviewHeading">Message</span>
+          </div>
+          <p id="ws-messages-status" class="ws-messages-status" role="status" hidden></p>
+          <div id="ws-message-empty" class="ws-message-empty" hidden>
+            <p role="status" data-i18n="wsSearchNoMatches">No matching messages</p>
+            <button id="ws-message-reset" type="button" data-i18n="wsClearSearchFilters">Clear search and filters</button>
+          </div>
+          <ol class="ws-message-list" role="list"></ol>
+        </div>
       </section>
       <div class="inspector-panels" id="ws-details-panel">
         <div class="inspector-half" id="inspector-request">

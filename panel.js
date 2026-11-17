@@ -3685,6 +3685,7 @@ const _NetworkPlus = (function () {
       originalCount:
         snapshot && Number.isInteger(snapshot.originalCount) ? snapshot.originalCount : sourceRows.length,
       columnFilterRules: deserializeFilterState(serializeFilterState(context.columnFilterRules)),
+      webSocketOnly: context.webSocketOnly === true,
       searchKeywords: Array.isArray(context.searchKeywords)
         ? context.searchKeywords.map((keyword) => ({
           query: String((keyword && keyword.query) || ''),
@@ -5328,6 +5329,7 @@ const _NetworkPlus = (function () {
     retainedRows: new Set(),
     activeRows: new Set(),
     filteredRows: [], // [U5] cache for filtered rows
+    webSocketOnly: false,
     pendingLiveRows: [],
     liveRowsAwaitingRender: [],
     retention: {
@@ -6101,6 +6103,7 @@ const _NetworkPlus = (function () {
       sampleCaptureActive: state.sampleCaptureActive,
       context: {
         columnFilterRules: deserializeFilterState(serializeFilterState(state.columnFilterRules)),
+        webSocketOnly: state.webSocketOnly,
         searchKeywords: state.search.keywords.map((keyword) => ({
           query: String(keyword.query || ''),
           colorIdx: Number.isInteger(keyword.colorIdx) ? keyword.colorIdx : 0,
@@ -6744,6 +6747,10 @@ const _NetworkPlus = (function () {
     emptyFilteredAction: {
       en: 'Clear column filters',
       ja: '列フィルターを解除',
+    },
+    emptyRequestFiltersAction: {
+      en: 'Clear request filters',
+      ja: 'リクエストの絞り込みを解除',
     },
     emptyCaptureAction: {
       en: 'Explore sample capture',
@@ -8637,6 +8644,54 @@ const _NetworkPlus = (function () {
       en: 'Details',
       ja: '詳細',
     },
+    titleWebSocketOnly: {
+      en: 'Show only WebSocket requests',
+      ja: 'WebSocket 通信だけを表示',
+    },
+    wsFilterDirection: {
+      en: 'Message direction',
+      ja: 'メッセージの送受信',
+    },
+    wsTimelineLabel: {
+      en: 'Message timeline',
+      ja: 'メッセージの時系列',
+    },
+    wsFilterAll: {
+      en: 'All',
+      ja: 'すべて',
+    },
+    wsSearchMessages: {
+      en: 'Search messages',
+      ja: '本文を検索',
+    },
+    wsSearchPayload: {
+      en: 'Search captured message text',
+      ja: '記録した本文を検索',
+    },
+    wsSearchPrevious: {
+      en: 'Previous matching message',
+      ja: '前の一致メッセージ',
+    },
+    wsSearchNext: {
+      en: 'Next matching message',
+      ja: '次の一致メッセージ',
+    },
+    wsSearchResultCount: {
+      en: 'Matches: {count}',
+      ja: '{count} 件一致',
+    },
+    wsSearchResultPosition: {
+      en: 'Match {position} of {count}',
+      ja: '{count} 件中 {position} 件目',
+    },
+    wsSearchNoMatches: {
+      en: 'No matching messages',
+      ja: '一致するメッセージはありません',
+    },
+    wsClearSearchFilters: {
+      en: 'Clear search and filters',
+      ja: '検索と絞り込みを解除',
+    },
     wsMessageTimeHeading: {
       en: 'Time (UTC)',
       ja: '時刻 (UTC)',
@@ -9633,6 +9688,7 @@ const _NetworkPlus = (function () {
       if (rule) filters.push({ colId, rule, isNumeric: NUMERIC_COLUMNS.indexOf(colId) > -1 });
     }
     state.filteredRows = state.rows.filter((r) => {
+      if (!matchesRequestTypeFilter(r)) return false;
       // Per-column advanced filters
       for (const filter of filters) {
         const rowValue = getRowFilterValue(r, filter.colId);
@@ -9643,6 +9699,7 @@ const _NetworkPlus = (function () {
   }
 
   function clearColumnFilters() {
+    if (!state.sampleCaptureActive) state.webSocketOnly = false;
     state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
     renderBody();
     syncSearchUIAfterRender();
@@ -10030,6 +10087,11 @@ const _NetworkPlus = (function () {
       (status === 101 && Array.isArray(responseHeaders) && responseHeaders.some((header) =>
         header && /^upgrade$/i.test(header.name) && /^websocket$/i.test(String(header.value).trim()),
       ));
+  }
+
+  function matchesRequestTypeFilter(row) {
+    return !state.webSocketOnly || state.sampleCaptureActive || hasWsMessages(row) ||
+      isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders);
   }
 
   function describeWebSocketExport(row) {
@@ -14167,38 +14229,73 @@ const _NetworkPlus = (function () {
 
   function resetWsMessagesView() {
     wsMessagesView = null;
-    const pane = $('#ws-messages-panel');
+    const pane = $('#ws-timeline-scroll');
     pane.querySelector('ol').replaceChildren();
     pane.scrollTop = 0;
+    $('#ws-message-query').value = '';
+    $('#ws-message-find-row').hidden = true;
+    $('#ws-message-search-toggle').setAttribute('aria-expanded', 'false');
+  }
+
+  function setCurrentWsMatch(view, item) {
+    if (view.currentMatch === item) return;
+    view.currentMatch?.classList.remove('is-current-match');
+    view.currentMatch?.removeAttribute('aria-current');
+    view.currentMatch = item;
+    item?.classList.add('is-current-match');
+    item?.setAttribute('aria-current', 'true');
+  }
+
+  function updateWsSearchResults(view) {
+    const count = view.matches.length;
+    const hasQuery = !!$('#ws-message-query').value.trim();
+    const currentIndex = view.matches.indexOf(view.currentMatch);
+    const results = $('#ws-message-results');
+    const text = !view.searchReady || !hasQuery ? ''
+      : currentIndex < 0 ? uiTextFormat('wsSearchResultCount', { count })
+      : uiTextFormat('wsSearchResultPosition', { position: currentIndex + 1, count });
+    if (results.textContent !== text) results.textContent = text;
+    $('#ws-message-prev').disabled = $('#ws-message-next').disabled = !view.searchReady || !hasQuery || count === 0;
   }
 
   function renderWsMessages(row) {
     if (wsMessagesView?.row !== row || wsMessagesView.language !== activeLanguage) {
       resetWsMessagesView();
-      wsMessagesView = { row, language: activeLanguage, items: new Map(), requestedRevision: -1 };
+      wsMessagesView = { row, language: activeLanguage, items: new Map(), requestedRevision: -1, direction: 'all' };
     }
     const view = wsMessagesView;
-    const pane = $('#ws-messages-panel');
+    const panel = $('#ws-messages-panel');
+    const pane = $('#ws-timeline-scroll');
     const list = pane.querySelector('ol');
     const status = $('#ws-messages-status');
-    const follow = !list.contains(document.activeElement) && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
+    const input = $('#ws-message-query');
+    input.placeholder = uiText('wsSearchPayload');
+    const query = input.value.trim().toLowerCase();
+    const hasFilters = !!query || view.direction !== 'all';
+    const follow = !hasFilters && !list.contains(document.activeElement) &&
+      pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
     const remote = !!row._mirrorFetchWsMessages;
     const frames = (remote ? view.snapshot?.frames : row._wsMessages) || [];
     const omitted = (remote ? view.snapshot?.omitted : row._wsMessagesOmitted) || 0;
+    view.searchReady = !remote || !!view.snapshot;
     const message = remote && view.unavailable ? uiText('wsMessagesUnavailable')
       : remote && !view.snapshot ? uiText('wsMessagesLoading')
       : omitted > 0 ? uiTextFormat('wsMessagesOmitted', { count: omitted.toLocaleString() })
-      : frames.length === 0 ? uiText('wsMessagesEmpty') : '';
-    $('#ws-timeline-header').hidden = frames.length === 0;
+      : frames.length === 0 && !hasFilters ? uiText('wsMessagesEmpty') : '';
     status.hidden = !message;
     if (status.textContent !== message) status.textContent = message;
+    const directions = $all('[data-ws-direction]', panel);
+    for (const button of directions) {
+      button.setAttribute('aria-pressed', String(button.dataset.wsDirection === view.direction));
+    }
     const ids = new Set(frames.map((frame) => frame.id));
     for (const [id, item] of view.items) {
       if (ids.has(id)) continue;
-      if (item.contains(document.activeElement)) pane.focus({ preventScroll: true });
+      if (item.contains(document.activeElement)) panel.focus({ preventScroll: true });
       item.remove();
       view.items.delete(id);
     }
+    view.matches = [];
     let next = list.firstElementChild;
     const ordered = frames.slice().sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity) || a.id - b.id);
     for (const frame of ordered) {
@@ -14207,11 +14304,105 @@ const _NetworkPlus = (function () {
         item = createWsMessage(frame);
         view.items.set(frame.id, item);
       }
+      const matches = (view.direction === 'all' || frame.type === view.direction) &&
+        (!query || (!frame.binary && frame.data.toLowerCase().includes(query)));
+      if (!matches && item.contains(document.activeElement)) panel.focus({ preventScroll: true });
+      item.hidden = !matches;
+      if (matches) view.matches.push(item);
       if (item === next) next = next.nextElementSibling;
       else list.insertBefore(item, next);
     }
+    if (!view.matches.includes(view.currentMatch)) setCurrentWsMatch(view, null);
+    $('#ws-timeline-header').hidden = view.matches.length === 0;
+    const empty = $('#ws-message-empty');
+    const restoreFocus = empty.contains(document.activeElement);
+    empty.hidden = !view.searchReady || !hasFilters || view.matches.length > 0;
+    if (empty.hidden && restoreFocus) {
+      const target = $('#ws-message-find-row').hidden ? directions.find((button) => button.dataset.wsDirection === view.direction) : input;
+      target?.focus({ preventScroll: true });
+    }
+    updateWsSearchResults(view);
     if (follow) pane.scrollTop = pane.scrollHeight;
     if (remote) requestWsMessagesForView(view);
+  }
+
+  function initializeWsMessageFilters() {
+    const panel = $('#ws-messages-panel');
+    const pane = $('#ws-timeline-scroll');
+    const toggle = $('#ws-message-search-toggle');
+    const search = $('#ws-message-find-row');
+    const input = $('#ws-message-query');
+    let searchTrigger = null;
+    const openSearch = (trigger) => {
+      if (search.hidden) searchTrigger = trigger;
+      search.hidden = false;
+      toggle.setAttribute('aria-expanded', 'true');
+      input.focus();
+      input.select();
+      if (wsMessagesView) updateWsSearchResults(wsMessagesView);
+    };
+    panel._paneSearchOpen = openSearch;
+
+    const refreshFilters = () => {
+      if (!wsMessagesView) return;
+      setCurrentWsMatch(wsMessagesView, null);
+      renderWsMessages(wsMessagesView.row);
+      pane.scrollTop = 0;
+    };
+    const closeSearch = (returnFocus) => {
+      input.value = '';
+      search.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      refreshFilters();
+      const target = returnFocus && searchTrigger?.isConnected && !searchTrigger.closest('[hidden]') ? searchTrigger : toggle;
+      target.focus({ preventScroll: true });
+      if (pane.contains(target)) target.scrollIntoView({ block: 'nearest' });
+    };
+    const navigate = (direction) => {
+      const view = wsMessagesView;
+      if (!view || !input.value.trim() || !view.matches.length) return;
+      const index = getWrappedMatchIndex(view.matches.length, view.matches.indexOf(view.currentMatch), direction);
+      const item = view.matches[index];
+      setCurrentWsMatch(view, item);
+      item.querySelector('details').open = true;
+      item.querySelector('summary').scrollIntoView({ block: 'nearest' });
+      updateWsSearchResults(view);
+    };
+    toggle.addEventListener('click', () => {
+      if (search.hidden) openSearch(toggle);
+      else closeSearch(false);
+    });
+    input.addEventListener('input', refreshFilters);
+    search.addEventListener('keydown', (event) => {
+      if (event.isComposing) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (input.value) {
+          input.value = '';
+          refreshFilters();
+          input.focus({ preventScroll: true });
+        } else closeSearch(true);
+      } else if (event.target === input && event.key === 'Enter') {
+        event.preventDefault();
+        navigate(event.shiftKey ? 'prev' : 'next');
+      }
+    });
+    $('#ws-message-prev').addEventListener('click', () => navigate('prev'));
+    $('#ws-message-next').addEventListener('click', () => navigate('next'));
+    for (const button of $all('[data-ws-direction]', panel)) {
+      button.addEventListener('click', () => {
+        if (!wsMessagesView || wsMessagesView.direction === button.dataset.wsDirection) return;
+        wsMessagesView.direction = button.dataset.wsDirection;
+        refreshFilters();
+      });
+    }
+    $('#ws-message-reset').addEventListener('click', () => {
+      if (!wsMessagesView) return;
+      input.value = '';
+      wsMessagesView.direction = 'all';
+      refreshFilters();
+    });
   }
 
   function requestWsMessagesForView(view) {
@@ -15390,7 +15581,7 @@ const _NetworkPlus = (function () {
       emptyState.className = 'empty-state';
       tableWrap.appendChild(emptyState);
     }
-    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage;
+    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + state.webSocketOnly;
     if (emptyState.dataset.renderKey !== renderKey) {
       emptyState.textContent = '';
       emptyState.dataset.renderKey = renderKey;
@@ -15431,7 +15622,7 @@ const _NetworkPlus = (function () {
         const action = document.createElement('button');
         action.type = 'button';
         action.className = 'empty-state-action';
-        action.textContent = uiText('emptyFilteredAction');
+        action.textContent = uiText(state.webSocketOnly ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');
         action.setAttribute('aria-describedby', description.id);
         action.addEventListener('click', clearColumnFilters);
         emptyState.appendChild(action);
@@ -15535,6 +15726,9 @@ const _NetworkPlus = (function () {
       counter.title = summary.accessibleText;
     }
     queueRequestCountAnnouncement(summary.accessibleText);
+    const webSocketOnlyButton = $('#webSocketOnlyBtn');
+    webSocketOnlyButton.disabled = state.sampleCaptureActive;
+    webSocketOnlyButton.setAttribute('aria-pressed', String(state.webSocketOnly && !state.sampleCaptureActive));
     const filterButton = $('#filterBtn');
     if (filterButton) {
       filterButton.textContent =
@@ -15631,7 +15825,7 @@ const _NetworkPlus = (function () {
     for (let element = tbody.firstElementChild; element; element = element.nextElementSibling) {
       if (element.dataset && element.dataset.rowId != null) renderedRowIds.push(element.dataset.rowId);
     }
-    const rowsToAppend = getIncrementalAppendBatch(liveRows, renderedRowIds);
+    const rowsToAppend = getIncrementalAppendBatch(liveRows, renderedRowIds).filter(matchesRequestTypeFilter);
     refreshSearchMatches();
     if (rowsToAppend.length === 0) {
       updateEmptyState(state.filteredRows.length);
@@ -19100,6 +19294,7 @@ const _NetworkPlus = (function () {
         state.automaticResponsePrefetchScheduler.resumeRows(restorePlan.rows);
       }
       state.columnFilterRules = restorePlan.columnFilterRules;
+      state.webSocketOnly = restorePlan.webSocketOnly;
       state.sort = restorePlan.sort;
       state.paused = restorePlan.paused;
       state.autoScroll = restorePlan.autoScroll;
@@ -19177,6 +19372,7 @@ const _NetworkPlus = (function () {
       resetPendingLiveRows();
       detachStoredRowsForClearUndo();
       state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
+      state.webSocketOnly = false;
       state.selectedRow = null;
       state.focusedRow = null;
       state.pendingRowFocusId = null;
@@ -19645,6 +19841,11 @@ const _NetworkPlus = (function () {
 
     const columnsBtn = $('#columnsBtn');
     const filterBtn = $('#filterBtn');
+    $('#webSocketOnlyBtn').addEventListener('click', () => {
+      state.webSocketOnly = !state.webSocketOnly;
+      renderBody();
+      syncSearchUIAfterRender();
+    });
     columnsBtn.addEventListener('click', (event) => {
       if (columnsContextMenu.classList.contains('show')) {
         closeAccessiblePopup(columnsContextMenu, true);
@@ -19804,6 +20005,7 @@ const _NetworkPlus = (function () {
     initializeInspectorTabBar('req-tab-bar');
     initializeInspectorTabBar('res-tab-bar');
     initializeWsDetailTabs();
+    initializeWsMessageFilters();
     // Nothing is selected at start: guidance line instead of empty tab strips.
     setInspectorEmptyState(!state.selectedRow);
 
@@ -21405,8 +21607,8 @@ const _NetworkPlus = (function () {
 
     searchToggleBtn.addEventListener('click', () => toggleSearchPanel());
 
-    // Ctrl+F opens request search unless focus is inside a Body/Raw pane or
-    // on its selected tab; those focus the pane's own search field.
+    // Ctrl+F opens request search unless focus is in an inspector search
+    // pane or on its selected tab.
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         if (document.querySelector('dialog[open]')) {
@@ -21415,7 +21617,7 @@ const _NetworkPlus = (function () {
           return;
         }
         const focused = document.activeElement;
-        const focusedPane = focused && focused.closest ? focused.closest('.tab-pane') : null;
+        const focusedPane = focused && focused.closest ? focused.closest('.tab-pane, .ws-messages-panel') : null;
         const selectedTab =
           focused && focused.matches && focused.matches('.tab-btn[aria-selected="true"]')
             ? focused
