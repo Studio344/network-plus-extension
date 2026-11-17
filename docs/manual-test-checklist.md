@@ -2,6 +2,8 @@
 
 DOM behavior, export contents, and theme switching are verified by loading the extension in Microsoft Edge DevTools. Run the relevant section before releasing a change that touches it. The general checklist in [.github/copilot-instructions.md](../.github/copilot-instructions.md#66-手動テストチェックリスト) applies in addition to the sections below.
 
+- [ ] Switch between Dark, Light, and System in Settings. In Dark and System with a dark browser preference, confirm charcoal and amber across the main panel, column filters, Settings, support dialog, toolbar menu, and live recording guide. Confirm the Light selection also updates the menu and guide.
+
 Automated coverage lives in [tests/](../tests); see the test table in the [README](../README.md#tests).
 
 ## Offline workspace from the browser toolbar
