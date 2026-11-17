@@ -651,12 +651,14 @@ browserTest(
       await evaluate(host.cdp, `(() => {
         const har = ${MINI_HAR};
         const entry = har.log.entries[0];
+        const messageJson = '{"id":9007199254740993,"id":-0,"param":"<img src=x>","ready":true,"cursor":null}';
         entry.request.url = 'wss://synthetic.invalid/imported';
         entry.response.status = 101;
         entry.response.content = { mimeType: 'websocket', size: 0, text: '' };
         entry._webSocketMessages = Array.from({ length: 1002 }, (_, index) => ({
           type: index % 2 ? 'receive' : 'send', time: 1700000000 + index / 1000,
-          opcode: index === 1 ? 2 : 1, data: index === 1 ? 'AP8=' : 'private-frame-' + index,
+          opcode: index === 1 ? 2 : 1,
+          data: index === 1 ? 'AP8=' : index === 1000 ? messageJson : 'private-frame-' + index,
         }));
         const files = new DataTransfer();
         files.items.add(new File([JSON.stringify(har)], 'websocket.har'));
@@ -750,6 +752,25 @@ browserTest(
         !document.querySelector('#ws-messages-panel details[open], #ws-messages-panel pre')`)).toBe(true);
       await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child summary').click(); true");
       expect(await waitWithRelay(viewer, `document.querySelector('#ws-messages-panel .ws-message:last-child details[open] pre')?.textContent === 'private-frame-1001'`)).toBe(true);
+      expect(await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child pre').childElementCount")).toBe(0);
+      const jsonMessage = '#ws-messages-panel .ws-message:nth-last-child(2)';
+      await evaluate(viewer.cdp, `document.querySelector('${jsonMessage} summary').click(); true`);
+      expect(await waitWithRelay(viewer, `(() => {
+        const pre = document.querySelector('${jsonMessage} pre[data-format="json"]');
+        return pre && {
+          text: pre.textContent,
+          markup: !!pre.querySelector('img'),
+          syntax: [...pre.children].map((span) => [span.className, span.textContent]),
+        };
+      })()`)).toEqual({
+        text: '{\n  "id": 9007199254740993,\n  "id": -0,\n  "param": "<img src=x>",\n  "ready": true,\n  "cursor": null\n}',
+        markup: false,
+        syntax: [
+          ['syn-key', '"id"'], ['syn-num', '9007199254740993'], ['syn-key', '"id"'], ['syn-num', '-0'],
+          ['syn-key', '"param"'], ['syn-str', '"<img src=x>"'], ['syn-key', '"ready"'], ['syn-bool', 'true'],
+          ['syn-key', '"cursor"'], ['syn-null', 'null'],
+        ],
+      });
       const firstMessagesRequest = traffic.find((message) => message.type === 'ws-messages-request');
       expect(firstMessagesRequest).toMatchObject({ minimumRevision: 0 });
       await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').click(); true");

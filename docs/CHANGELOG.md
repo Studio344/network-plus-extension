@@ -4,7 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- ✨ **WebSocket Messages** — Scan sent and received messages as one-line previews in time order and expand each row to view the captured payload and formatted JSON.
+- ✨ **WebSocket Messages** — Scan color-coded send and receive previews in time order and expand each row to view the captured payload with JSON syntax highlighting.
 
 ## v1.18.0 - 2026-11-17
 
