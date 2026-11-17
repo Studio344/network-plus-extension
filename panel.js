@@ -8637,6 +8637,18 @@ const _NetworkPlus = (function () {
       en: 'Details',
       ja: '詳細',
     },
+    wsMessageTimeHeading: {
+      en: 'Time (UTC)',
+      ja: '時刻 (UTC)',
+    },
+    wsMessageDirectionHeading: {
+      en: 'Direction',
+      ja: '送受信',
+    },
+    wsMessagePreviewHeading: {
+      en: 'Message',
+      ja: 'メッセージ',
+    },
     wsMessageSent: {
       en: '↑ Sent',
       ja: '↑ 送信',
@@ -8672,14 +8684,6 @@ const _NetworkPlus = (function () {
     wsMessagesOmitted: {
       en: '{count} messages omitted from this list.',
       ja: 'この一覧では {count} 件のメッセージが省略されています。',
-    },
-    wsMessageExpand: {
-      en: 'Show message',
-      ja: 'メッセージを表示',
-    },
-    wsMessageCollapse: {
-      en: 'Collapse message',
-      ja: 'メッセージを折りたたむ',
     },
     wsMessageTruncated: {
       en: 'Only the first {limit} characters were captured.',
@@ -14112,58 +14116,51 @@ const _NetworkPlus = (function () {
     const item = document.createElement('li');
     item.className = 'ws-message';
     item.dataset.direction = frame.type;
-    const header = document.createElement('div');
-    header.className = 'ws-message-header';
+    const disclosure = document.createElement('details');
+    disclosure.className = 'ws-message-disclosure';
+    const summary = document.createElement('summary');
+    summary.className = 'ws-message-summary';
     const direction = document.createElement('span');
     direction.className = 'ws-message-direction';
     direction.textContent = uiText(frame.type === 'send' ? 'wsMessageSent' : 'wsMessageReceived');
     const time = document.createElement('time');
+    time.className = 'ws-message-time';
     if (isStreamEpoch(frame.time)) {
       time.dateTime = new Date(frame.time).toISOString();
-      time.textContent = time.dateTime.slice(11, 23) + ' UTC';
+      time.textContent = time.dateTime.slice(11, 23);
+      time.title = time.dateTime;
     }
-    header.append(direction, time);
-    item.appendChild(header);
 
     const body = frame.binary
       ? frame.bytes == null ? uiText('wsMessageBinary') : uiTextFormat('wsMessageBinarySize', { size: fmtBytes(frame.bytes) })
       : frame.data || uiText('wsMessageEmpty');
-    const long = frame.truncated || body.length > 160 || body.split('\n', 8).length === 8;
-    const initiallyFormatted = !long && !frame.binary ? formatWsMessageJson(frame.data) : null;
-    const longJson = initiallyFormatted && initiallyFormatted.split('\n', 8).length === 8;
-    const appendPayload = (parent, formatted) => {
+    const preview = body.replace(/\s+/g, ' ').trim();
+    const excerpt = preview.match(/^.{0,120}/u)[0];
+    const snippet = document.createElement('span');
+    snippet.className = 'ws-message-snippet';
+    snippet.dir = 'auto';
+    snippet.textContent = excerpt + (frame.truncated || excerpt.length < preview.length ? '…' : '');
+    summary.append(time, direction, snippet);
+    disclosure.appendChild(summary);
+    item.appendChild(disclosure);
+
+    const showPayload = () => {
+      if (!disclosure.open) return;
+      const formatted = frame.binary || frame.truncated ? null : formatWsMessageJson(frame.data);
       const pre = document.createElement('pre');
       pre.className = 'ws-message-payload';
       pre.dataset.format = formatted ? 'json' : 'text';
       pre.textContent = formatted || body;
-      parent.appendChild(pre);
+      disclosure.appendChild(pre);
+      if (frame.truncated) {
+        const note = document.createElement('p');
+        note.className = 'ws-message-note';
+        note.textContent = uiTextFormat('wsMessageTruncated', { limit: WS_FRAME_PREVIEW_CHARS.toLocaleString() });
+        disclosure.appendChild(note);
+      }
+      disclosure.removeEventListener('toggle', showPayload);
     };
-    if (long || longJson) {
-      const disclosure = document.createElement('details');
-      disclosure.className = 'ws-message-disclosure';
-      const summary = document.createElement('summary');
-      const label = document.createElement('span');
-      label.textContent = uiText('wsMessageExpand');
-      const snippet = document.createElement('span');
-      snippet.className = 'ws-message-snippet';
-      snippet.textContent = body.slice(0, 72).replace(/\s+/g, ' ') + (body.length > 72 ? '…' : '');
-      summary.append(label, snippet);
-      disclosure.appendChild(summary);
-      disclosure.addEventListener('toggle', () => {
-        label.textContent = uiText(disclosure.open ? 'wsMessageCollapse' : 'wsMessageExpand');
-        if (!disclosure.open || disclosure.querySelector('pre')) return;
-        appendPayload(disclosure, frame.truncated ? null : initiallyFormatted || formatWsMessageJson(frame.data));
-      });
-      item.appendChild(disclosure);
-    } else {
-      appendPayload(item, initiallyFormatted);
-    }
-    if (frame.truncated) {
-      const note = document.createElement('p');
-      note.className = 'ws-message-note';
-      note.textContent = uiTextFormat('wsMessageTruncated', { limit: WS_FRAME_PREVIEW_CHARS.toLocaleString() });
-      item.appendChild(note);
-    }
+    disclosure.addEventListener('toggle', showPayload);
     return item;
   }
 
@@ -14183,6 +14180,7 @@ const _NetworkPlus = (function () {
     const pane = $('#ws-messages-panel');
     const list = pane.querySelector('ol');
     const status = $('#ws-messages-status');
+    const follow = !list.contains(document.activeElement) && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
     const remote = !!row._mirrorFetchWsMessages;
     const frames = (remote ? view.snapshot?.frames : row._wsMessages) || [];
     const omitted = (remote ? view.snapshot?.omitted : row._wsMessagesOmitted) || 0;
@@ -14190,9 +14188,9 @@ const _NetworkPlus = (function () {
       : remote && !view.snapshot ? uiText('wsMessagesLoading')
       : omitted > 0 ? uiTextFormat('wsMessagesOmitted', { count: omitted.toLocaleString() })
       : frames.length === 0 ? uiText('wsMessagesEmpty') : '';
+    $('#ws-timeline-header').hidden = frames.length === 0;
     status.hidden = !message;
     if (status.textContent !== message) status.textContent = message;
-    const follow = !list.contains(document.activeElement) && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
     const ids = new Set(frames.map((frame) => frame.id));
     for (const [id, item] of view.items) {
       if (ids.has(id)) continue;
