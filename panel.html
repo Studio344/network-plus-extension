@@ -92,9 +92,36 @@
         <button type="button" data-status-facet="pending" aria-pressed="false"><span data-i18n="analysisPending">Pending</span><span class="analysis-count"></span></button>
       </div>
       <button type="button" id="analysisDomainsBtn" aria-controls="domainSummary" aria-expanded="false" data-i18n="analysisDomains">Hosts</button>
+      <button type="button" id="overviewToggleBtn" aria-controls="trafficOverview" aria-expanded="false" data-i18n="overviewToggle">Timeline</button>
       <button type="button" id="analysisCompareBtn" class="analysis-compare" data-i18n="menuCompareTwo" aria-controls="comparePanel" hidden>Compare 2 requests</button>
     </div>
     <div id="analysisChips" class="analysis-chips" aria-label="Active filters" role="group" hidden></div>
+  </section>
+  <section id="trafficOverview" class="traffic-overview" aria-label="Traffic overview" data-i18n-aria-label="overviewAria" hidden>
+    <div class="overview-time">
+      <div class="overview-heading">
+        <h2 data-i18n="overviewStarts">Request starts</h2>
+        <div class="overview-legend" aria-hidden="true"><span data-i18n="overviewRequests">Requests</span><span class="overview-legend-errors" data-i18n="overviewErrors">HTTP 4xx/5xx</span></div>
+      </div>
+      <p id="overviewTimeEmpty" class="overview-muted" data-i18n="overviewNoStarts" hidden>No recorded start times in this scope.</p>
+      <div id="overviewTimeline" class="overview-timeline" role="group" data-i18n-aria-label="overviewBinGroup" aria-label="Request starts by time window" aria-describedby="overviewInstructions"></div>
+      <div id="overviewTimeBounds" class="overview-time-bounds" aria-hidden="true"><span></span><span></span></div>
+      <p id="overviewInstructions" class="overview-muted" data-i18n="overviewInstructions">Choose a bar. Shift+click to extend, or use the arrow keys with Shift.</p>
+      <p id="overviewTimeReadout" class="overview-readout"></p>
+      <p id="overviewTimeOmissions" class="overview-muted" hidden></p>
+      <button type="button" id="overviewPeakBtn" class="overview-action overview-peak" hidden></button>
+      <button type="button" id="overviewClearTime" class="overview-action" data-i18n="overviewClearTime" hidden>Clear time range</button>
+    </div>
+    <div class="overview-latency">
+      <div class="overview-heading">
+        <h2 data-i18n="overviewLatency">Latency of displayed requests</h2>
+        <span id="overviewLatencyCount" class="overview-muted"></span>
+      </div>
+      <div id="overviewLatency" class="overview-latency-bands"></div>
+      <p id="overviewLatencyEmpty" class="overview-muted" data-i18n="overviewNoLatency" hidden>No recorded durations for the displayed requests.</p>
+      <p id="overviewLatencyOmissions" class="overview-muted" hidden></p>
+      <button type="button" id="overviewSlowestBtn" class="overview-action" hidden></button>
+    </div>
   </section>
   <main class="content" id="content">
     <section class="tableWrap" id="tableWrap" aria-label="Network requests">

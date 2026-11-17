@@ -1689,7 +1689,7 @@ describe('settings and language contracts', () => {
     // The empty state re-renders in place on a language change: the render
     // key includes the active language and applyLanguage triggers a refresh.
     expect(js).toContain(
-      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter;",
+      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter + ':' + hasTimeFilter;",
     );
     expect(js).toContain('refreshEmptyStateLanguage();');
     expect(js).toContain('updateEmptyState(lastEmptyStateRowCount);');

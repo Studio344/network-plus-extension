@@ -11,6 +11,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 - ✨ **Request triage** — Filter by HTTP error family, pending requests, or exact host, remove active conditions, and open two-request comparison from the list.
 - 🐛 **Status filters** — Apply the first checkbox change immediately and include status codes observed in the capture.
 - 🔧 **Compact list** — Keep Search, Filters, and request paths reachable in narrow panes, and mark selected details outside the current filter.
+- ✨ **Traffic timeline** — Select time windows, locate HTTP error peaks, and open the slowest displayed request from the latency overview.
 
 ## v1.18.0 - 2026-11-17
 
