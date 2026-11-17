@@ -1194,7 +1194,7 @@ test('retains the local-only skip when no browser executable is discoverable', (
     },
     {
       skipped: true,
-      title: 'native WebSocket snapshots refresh the selected Messages tab without selecting the row again',
+      title: 'native WebSocket snapshots capture the first exchange and refresh the selected row across recording boundaries',
     },
     {
       skipped: true,

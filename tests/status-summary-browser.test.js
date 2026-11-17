@@ -7488,45 +7488,71 @@ browserTest(
 );
 
 browserTest(
-  'native WebSocket snapshots refresh the selected Messages tab without selecting the row again',
+  'native WebSocket snapshots capture the first exchange and refresh the selected row across recording boundaries',
   async () => {
     const page = await launchPanelPage({
       executable: browserExecutable,
       initScript: LIVE_CAPTURE_INIT_SCRIPT + `
         window.__harEntries = [];
         chrome.devtools.network.getHAR = (callback) => callback({ entries: window.__harEntries });
+        window.__wsNavigated = [];
+        chrome.devtools.network.onNavigated = { addListener: (listener) => window.__wsNavigated.push(listener) };
         chrome.devtools.inspectedWindow = { eval(_expression, callback) { callback('[]'); } };
       `,
     });
     try {
       const result = await evaluate(page.cdp, `(async () => {${WAIT_FOR_IN_PAGE}
-        document.querySelector('#wsCaptureBtn').click();
-        const now = Date.now() + 10;
-        const entry = {
-          startedDateTime: new Date(now).toISOString(), time: 0,
-          request: { method: 'GET', url: 'wss://example.test/messages',
-            headers: [{ name: 'Sec-WebSocket-Key', value: 'A'.repeat(22) + '==' }] },
-          response: { status: 101, headers: [], content: {} },
-          _webSocketMessages: [{ type: 'send', opcode: 1, time: now / 1000, data: 'first message' }],
+        const nextStamp = async () => {
+          const mark = Date.now();
+          if (!await waitFor(() => Date.now() > mark, 1000)) throw new Error('The clock did not advance');
+          return Date.now();
         };
-        window.__harEntries = [entry];
+        const frame = (type, data, stamp) => ({ type, opcode: 1, time: stamp / 1000, data });
+        const connection = (key, start, frames) => ({
+          startedDateTime: new Date(start).toISOString(), time: 0,
+          request: { method: 'GET', url: 'wss://example.test/messages/' + key,
+            headers: [{ name: 'Sec-WebSocket-Key', value: key.repeat(22) + '==' }] },
+          response: { status: 101, headers: [], content: {} },
+          _webSocketMessages: frames,
+        });
+        const earlier = await nextStamp();
+        const previous = connection('B', earlier, [frame('send', 'previous page', earlier)]);
+        await nextStamp();
+        window.__wsNavigated.forEach((listener) => listener('https://example.test'));
+        const startup = await nextStamp();
+        previous._webSocketMessages.push(frame('receive', 'old socket after navigation', startup));
+        const first = [frame('send', 'first message', startup), frame('receive', 'first reply', startup)];
+        const entry = connection('A', startup, first);
+        window.__harEntries = [previous, entry];
+        await nextStamp();
+        const capture = document.querySelector('#wsCaptureBtn');
+        capture.click();
         const rows = () => Array.from(document.querySelectorAll('#tbody tr[data-row-id]'));
         if (!await waitFor(() => rows().length === 1, 3000)) throw new Error('No native WebSocket connection');
         const id = rows()[0].dataset.rowId;
         rows()[0].click();
         const messages = () => Array.from(document.querySelectorAll('.ws-message-list .ws-message-snippet'),
           (element) => element.textContent);
-        if (!await waitFor(() => messages().includes('first message'), 2000)) throw new Error('No first message');
-        window.__harEntries = [{ ...entry, _webSocketMessages: [...entry._webSocketMessages,
-          { type: 'receive', opcode: 1, time: (now + 20) / 1000, data: 'later reply' }] }];
+        const initial = messages();
+        capture.click();
+        first.push(frame('send', 'while off', await nextStamp()));
+        await nextStamp();
+        capture.click();
+        const pause = document.querySelector('#pauseBtn');
+        pause.click();
+        first.push(frame('receive', 'while paused', await nextStamp()));
+        await nextStamp();
+        pause.click();
+        first.push(frame('receive', 'later reply', await nextStamp()));
         if (!await waitFor(() => messages().includes('later reply'), 3000)) throw new Error('Selected timeline did not refresh');
-        window.__networkPlusLiveListener({ ...window.__harEntries[0], time: 50 });
+        window.__networkPlusLiveListener({ ...entry, time: 50 });
         await waitFor(() => rows()[0].querySelector('[data-col-id="status"]').textContent === 'Closed', 2000);
-        return { id, messages: messages(), rows: rows().map((row) => ({
+        return { id, initial, messages: messages(), rows: rows().map((row) => ({
           id: row.dataset.rowId, status: row.querySelector('[data-col-id="status"]').textContent,
         })) };
       })()`, true);
-      expect(result.messages).toEqual(['first message', 'later reply']);
+      expect(result.initial).toEqual(['first message', 'first reply']);
+      expect(result.messages).toEqual(['first message', 'first reply', 'later reply']);
       expect(result.rows).toEqual([{ id: result.id, status: 'Closed' }]);
     } finally {
       await page.close();
