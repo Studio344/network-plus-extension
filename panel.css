@@ -305,7 +305,7 @@ input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);ou
 .details.is-ws-messages>.inspector-panels{display:none}
 .ws-messages-panel{flex:1;min-height:0;overflow:auto;overflow-anchor:auto;scroll-padding-block-start:26px;background:var(--content-bg)}
 .ws-messages-panel:focus-visible,.ws-message-summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.ws-timeline-header,.ws-message-summary{display:grid;grid-template-columns:10px 12ch 60px minmax(0,1fr);gap:8px;align-items:center;padding:0 10px;font-size:11px}
+.ws-timeline-header,.ws-message-summary{display:grid;grid-template-columns:10px 12ch 70px minmax(0,1fr);gap:8px;align-items:center;padding:0 10px;font-size:11px}
 .ws-timeline-header{position:sticky;top:0;z-index:1;min-height:26px;border-bottom:1px solid var(--border);background:var(--surface);color:var(--text-muted);font-weight:600;overflow-anchor:none}
 .ws-timeline-header[hidden]{display:none}
 .ws-timeline-header>:first-child{grid-column:2}
@@ -321,8 +321,8 @@ input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);ou
 .ws-message-disclosure[open]>.ws-message-summary{background:var(--selected)}
 .ws-message-disclosure[open]>.ws-message-summary::before{transform:rotate(45deg)}
 .ws-message-time{color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
-.ws-message-direction{font-weight:700;color:var(--text-accent)}
-.ws-message[data-direction="receive"] .ws-message-direction{color:var(--status-2xx-text)}
+.ws-message-direction{justify-self:start;min-width:44px;padding:2px 5px;border-radius:4px;color:var(--method-options-fg);background:var(--method-options-bg);font-weight:700;line-height:14px;text-align:center;white-space:nowrap}
+.ws-message[data-direction="receive"] .ws-message-direction{color:var(--method-get-fg);background:var(--method-get-bg)}
 .ws-message-snippet{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .ws-message-payload{margin:0;padding:8px 12px 8px 26px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .ws-message-note{margin:0;padding:0 12px 8px 26px;color:var(--text-muted);font-size:11px}

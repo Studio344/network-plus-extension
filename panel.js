@@ -14150,7 +14150,8 @@ const _NetworkPlus = (function () {
       const pre = document.createElement('pre');
       pre.className = 'ws-message-payload';
       pre.dataset.format = formatted ? 'json' : 'text';
-      pre.textContent = formatted || body;
+      if (formatted) appendJsonHighlight(pre, formatted);
+      else pre.textContent = body;
       disclosure.appendChild(pre);
       if (frame.truncated) {
         const note = document.createElement('p');
