@@ -10,6 +10,50 @@ const np = require('../panel.js');
 
 const PANEL_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
 
+describe('native WebSocket capture', () => {
+  const start = Date.UTC(2026, 10, 17);
+  const request = { method: 'GET', url: 'wss://example.test/socket' };
+  const entry = {
+    startedDateTime: new Date(start).toISOString(),
+    request,
+    _webSocketMessages: [],
+  };
+
+  test('identifies concurrent browser connections by their handshake nonce', () => {
+    const withKey = (prefix) => ({
+      ...entry,
+      request: { ...request, headers: [{ name: 'Sec-WebSocket-Key', value: prefix.repeat(22) + '==' }] },
+    });
+    expect(np.getNativeWebSocketKey(withKey('A'))).not.toEqual(np.getNativeWebSocketKey(withKey('B')));
+    expect(np.getNativeWebSocketKey(withKey('A'))).toEqual(np.getNativeWebSocketKey({
+      ...withKey('A'), _webSocketMessages: [{ type: 'receive', time: start / 1000, opcode: 1, data: 'observed' }],
+    }));
+    expect(np.getNativeWebSocketKey({ ...entry, _webSocketMessages: undefined })).toEqual('');
+    expect(np.getNativeWebSocketKey(entry)).toEqual('');
+    expect(np.getNativeWebSocketKey({ ...entry, request: { ...request, url: 'https://example.test/socket' } })).toEqual('');
+  });
+
+  test('advances the snapshot cursor and keeps only eligible bounded payloads', () => {
+    const source = {
+      ...entry,
+      _webSocketMessages: [
+        { type: 'receive', opcode: 1, time: start / 1000, data: 'before recording' },
+        { type: 'send', opcode: 1, time: (start + 1000) / 1000, data: 'a'.repeat(3000) },
+        { type: 'receive', opcode: 2, time: (start + 1100) / 1000, data: 'AQIDBA==' },
+        { type: 'send', opcode: 8, time: (start + 1200) / 1000, data: '' },
+      ],
+    };
+    const result = np.planNativeWebSocketFrames(source, 0, 9, start);
+    expect(result.events).toEqual([
+      { kind: 'ws-sent', socketId: 9, at: start + 1000, binary: false, preview: 'a'.repeat(2048),
+        truncated: true, fullIndex: 1, fullLength: 3000 },
+      { kind: 'ws-received', socketId: 9, at: start + 1100, binary: true, preview: '[binary 4 bytes]', truncated: false },
+    ]);
+    expect(np.planNativeWebSocketFrames(source, result.cursor, 9, start)).toEqual({ events: [], cursor: 4, skipped: 0 });
+    expect(np.planNativeWebSocketFrames(source, 5, 9, start)).toEqual({ events: [], cursor: 5, skipped: 0 });
+  });
+});
+
 describe('traffic overview', () => {
   test('groups absolute starts over midnight and keeps adjacent intervals half-open', () => {
     const base = Date.UTC(2026, 10, 17, 23, 59, 59, 994);

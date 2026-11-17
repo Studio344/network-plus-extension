@@ -4111,7 +4111,9 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
 
   test('capture is an explicit statusbar opt-in that names its own limits', () => {
     expect(html).toContain('id="wsCaptureBtn"');
-    expect(html).toContain('only connections created while capture is on are seen, and traffic is never altered');
+    expect(html).toContain('Record WebSocket and Server-Sent Events while stream capture is on');
+    expect(html).toMatch(/id="wsReloadBtn"[^>]*hidden/);
+    expect(html).toMatch(/id="wsMessagesReloadBtn"[^>]*hidden/);
     expect(html).toMatch(/id="wsCaptureBtn"[^>]*aria-pressed="false"[^>]*hidden/);
     expect(html).toContain('>Stream capture: Off</button>');
     expect(css).toContain('.ws-capture-btn[aria-pressed="true"]{');
@@ -4123,7 +4125,7 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain("      en: 'Stream capture: On',");
     expect(js).toContain("      en: 'Stream capture: Off',");
     expect(js).toContain('    if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();');
-    expect(js).toContain("setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' : 'statusStreamCaptureOn'));");
+    expect(js).toContain("nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'");
     expect(js).toContain("setStatus(uiText('statusStreamCaptureOff'));");
     expect(js).toContain(
       "      en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',",
@@ -4131,9 +4133,11 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain("      en: 'Stream capture off; recorded connections stay in the table.',");
   });
 
-  test('both wrappers inject through inspectedWindow.eval and survive navigation', () => {
+  test('uses the existing HAR poll and finish event, with the page wrapper as a fallback', () => {
     expect(js).toContain('chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)');
-    expect(js).toContain('inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});');
+    expect(js).toContain('if (!nativeWebSockets) inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});');
+    expect(js).toContain('readNativeWebSocketSnapshot(log?.entries);');
+    expect(js).toContain('if (finishNativeWebSocket(request)) return;');
     expect(js).toContain('inspectedEval(buildSseWrapperSource(), () => {});');
     expect(js).toContain("const wsDrain = buildStreamDrainSource('__networkPlusWS__');");
     expect(js).toContain("const sseDrain = buildStreamDrainSource('__networkPlusSSE__');");

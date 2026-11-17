@@ -428,6 +428,7 @@ input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);ou
 .ws-timeline-header>:first-child{grid-column:2}
 .ws-timeline-header>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-messages-status{margin:0;padding:10px 12px;color:var(--text-muted);font-size:12px}
+.ws-messages-reload{margin:0 12px 10px}
 .ws-message-list{list-style:none;margin:0;padding:0}
 .ws-message{min-width:0;border-bottom:1px solid var(--border)}
 .ws-message:nth-child(even){background:var(--bg)}
