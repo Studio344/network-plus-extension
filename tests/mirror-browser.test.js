@@ -402,7 +402,17 @@ browserTest(
         throw new Error('Combined stream/export fixture did not reach: ' + expression);
       };
       await relay();
-      await evaluate(host.cdp, "document.querySelector('#wsCaptureBtn').click(); true");
+      const capture = await evaluate(host.cdp, `(() => {
+        const filter = document.querySelector('#webSocketOnlyBtn');
+        const prompt = document.querySelector('#wsCapturePrompt');
+        const capture = document.querySelector('#wsCaptureBtn');
+        const initiallyHidden = prompt.hidden;
+        filter.click();
+        const canEnable = !prompt.hidden && capture.getAttribute('aria-pressed') === 'false';
+        document.querySelector('#wsCapturePromptBtn').click();
+        return { initiallyHidden, canEnable, enabled: capture.getAttribute('aria-pressed'), hiddenWhenEnabled: prompt.hidden };
+      })()`);
+      expect(capture).toEqual({ initiallyHidden: true, canEnable: true, enabled: 'true', hiddenWhenEnabled: true });
       const wrapper = await evaluate(host.cdp, "window.__evals.find((source) => source.startsWith('(function pageWebSocketWrapper('))");
       expect(typeof wrapper).toBe('string');
       // Execute the production page wrapper against a wholly synthetic socket.
@@ -1542,6 +1552,11 @@ browserTest(
       expect(
         await evaluate(page.cdp, "window.__evals.some((s) => s.startsWith('(function pageWebSocketWrapper('))"),
       ).toBe(true);
+
+      await drive({ type: 'command', commandId: 115, name: 'stream-toggle', args: { enabled: true } });
+      messages = await fromHost();
+      expect(messages.find((m) => m.type === 'command-result' && m.commandId === 115).ok).toBe(true);
+      expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').getAttribute('aria-pressed')")).toBe('true');
 
       await drive({
         type: 'command',

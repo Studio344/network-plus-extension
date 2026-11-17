@@ -4115,7 +4115,7 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain("      en: 'Stream capture: On',");
     expect(js).toContain("      en: 'Stream capture: Off',");
     expect(js).toContain('    if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();');
-    expect(js).toContain("setStatus(uiText('statusStreamCaptureOn'));");
+    expect(js).toContain("setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' : 'statusStreamCaptureOn'));");
     expect(js).toContain("setStatus(uiText('statusStreamCaptureOff'));");
     expect(js).toContain(
       "      en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',",

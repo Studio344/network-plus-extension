@@ -7406,14 +7406,25 @@ browserTest(
           response: { status: 200, headers: [], content: { size: 12, mimeType: 'text/plain', text: 'offline body' } },
           timings: { send: 0, wait: 1, receive: 0 },
         };
+        const handshake = {
+          ...entry,
+          request: { method: 'GET', url: 'https://offline.example.test/socket', headers: [] },
+          response: { status: 101, headers: [{ name: 'Upgrade', value: 'websocket' }], content: { size: 0 } },
+        };
+        const sanitized = {
+          ...entry,
+          request: { ...entry.request, url: 'https://offline.example.test/sanitized' },
+          _networkPlus: { webSocketFramesOmitted: 12 },
+        };
         const transfer = new DataTransfer();
-        transfer.items.add(new File([JSON.stringify({ log: { version: '1.2', entries: [entry] } })], 'offline.har'));
+        transfer.items.add(new File([JSON.stringify({ log: { version: '1.2', entries: [entry, handshake, sanitized] } })], 'offline.har'));
         fileInput.files = transfer.files;
         fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-        if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 1, 2000)) {
+        if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 3, 2000)) {
           throw new Error('Offline HAR import did not complete: ' + document.querySelector('#statusText').textContent);
         }
-        document.querySelector('#tbody tr[data-row-id]').click();
+        const [http, socket, redacted] = document.querySelectorAll('#tbody tr[data-row-id]');
+        http.click();
         document.querySelector('#res-tab-body').click();
         if (!await waitFor(() => document.querySelector('#res-body').textContent.includes('offline body'), 2000)) {
           throw new Error('The imported response body did not render offline.');
@@ -7425,8 +7436,20 @@ browserTest(
           scope: document.querySelector('#offlineViewStatus').textContent,
           pauseHidden: document.querySelector('#pauseBtn').hidden,
           recording: document.querySelector('.topbar').classList.contains('recording'),
+          httpTabsHidden: document.querySelector('#ws-detail-tabs').hidden,
         };
-        return { english, japanese, pickerOpened, imported };
+        document.querySelector('#dataSafetyDialog').close();
+        document.querySelector('#webSocketOnlyBtn').click();
+        const snapshotMessages = () => ({
+          tab: document.querySelector('#ws-tab-messages').textContent,
+          panelVisible: !document.querySelector('#ws-messages-panel').hidden,
+          status: document.querySelector('#ws-messages-status').textContent,
+        });
+        document.querySelector('#tbody tr[data-row-id="' + socket.dataset.rowId + '"]').click();
+        const absent = snapshotMessages();
+        document.querySelector('#tbody tr[data-row-id="' + redacted.dataset.rowId + '"]').click();
+        return { english, japanese, pickerOpened, imported, absent, sanitized: snapshotMessages(),
+          promptHidden: document.querySelector('#wsCapturePrompt').hidden };
       })()`, true);
       expect(observed.english).toMatchObject({
         view: 'offline', scope: 'Offline · no live capture', scopeVisible: true,
@@ -7442,8 +7465,13 @@ browserTest(
       });
       expect(observed.pickerOpened).toBe(1);
       expect(observed.imported).toMatchObject({
-        body: expect.stringContaining('offline body'), exportCount: '1',
-        scope: 'オフライン · ライブキャプチャなし', pauseHidden: true, recording: false,
+        body: expect.stringContaining('offline body'), exportCount: '3',
+        scope: 'オフライン · ライブキャプチャなし', pauseHidden: true, recording: false, httpTabsHidden: true,
+      });
+      expect(observed).toMatchObject({
+        absent: { tab: 'メッセージ', panelVisible: true, status: expect.stringContaining('含まれていません') },
+        sanitized: { tab: 'メッセージ', panelVisible: true, status: expect.stringContaining('12 件が省略') },
+        promptHidden: true,
       });
       await page.navigate('');
       await waitForLiveNetworkListener(page.cdp);

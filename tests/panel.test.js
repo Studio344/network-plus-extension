@@ -25,12 +25,42 @@ describe('traffic overview', () => {
     const model = np.computeTrafficTimeline(rows);
     expect(model.bins).toHaveLength(12);
     expect(model.bins.map((bin) => bin.count)).toEqual([1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1]);
-    expect(model).toMatchObject({ untimed: 2, maxCount: 3, peak: { start: base + 6, end: base + 7, errors: 2 } });
-    expect(rows.filter((row) => np.requestStartsInRange(row, { start: base, end: base + 6 }))).toEqual([rows[0]]);
-    expect(rows.filter((row) => np.requestStartsInRange(row, { start: base + 6, end: base + 12 }))).toEqual([
+    expect(model).toMatchObject({ untimed: 2, range: { start: base, end: base + 12 }, peak: { start: base + 6, end: base + 7, errors: 2 } });
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: base, end: base + 6 }))).toEqual([rows[0]]);
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: base + 6, end: base + 12 }))).toEqual([
       rows[1], rows[2], rows[3], rows[4],
     ]);
     expect(np.computeTrafficTimeline([{ clientStartEpoch: 0 }]).bins).toEqual([{ start: 0, end: 1, count: 1, errors: 0 }]);
+  });
+
+  test('uses completion times for waterfall geometry and includes requests active within the selected range', () => {
+    const rows = [
+      { clientStartEpoch: 0, duration: 100, status: 200 },
+      { clientStartEpoch: 25, duration: 75, status: 503 },
+      { clientStartEpoch: 21, duration: 500, status: 0, _pendingRequest: true },
+      { clientStartEpoch: 30, duration: 0 },
+      { clientStartEpoch: 30, duration: 900, _overviewUnknownDuration: true },
+      { clientStartEpoch: 31, duration: 0 },
+      { clientStartEpoch: 40, duration: 0 },
+    ];
+    const { range } = np.computeTrafficTimeline(rows);
+    expect(range).toEqual({ start: 0, end: 100 });
+    expect(np.planOverviewWaterfallPage(rows, range, 0)).toMatchObject({
+      total: 7,
+      lastPage: 1,
+      entries: [
+        { startsAt: 0, width: 1, duration: 100 },
+        { startsAt: 0.21, width: 0, duration: null },
+        { startsAt: 0.25, width: 0.75, error: true },
+        { startsAt: 0.3, width: 0, duration: 0 },
+        { startsAt: 0.3, width: 0, duration: null },
+        { startsAt: 0.31, width: 0 },
+      ],
+    });
+    expect(np.planOverviewWaterfallPage(rows, range, 3)).toMatchObject({ page: 1, offset: 6, entries: [{ row: rows[6] }] });
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 26, end: 30 }))).toEqual(rows.slice(0, 2));
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 100, end: 101 }))).toEqual([]);
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 30, end: 31 }))).toEqual([rows[0], rows[1], rows[3], rows[4]]);
   });
 
   test('keeps measured zero and band boundaries, and excludes pending and unknown durations', () => {
@@ -6767,6 +6797,24 @@ describe('WebSocket frame HAR export', () => {
       { type: 'send', time: 1.5, opcode: 1, data: 'one' },
       { type: 'receive', time: 2.5, opcode: 1, data: 'two' },
     ]);
+  });
+
+  test('preserves WebSocket omission metadata through the mirror and HAR re-export', () => {
+    const row = np.buildRowFromRequest({
+      startedDateTime: new Date(0).toISOString(),
+      time: 1,
+      request: { method: 'GET', url: 'https://a.test/ws' },
+      response: { status: 200 },
+      wsArchive: true,
+      wsArchiveOmitted: 7,
+    }, 1);
+    const wire = np.serializeRowForMirror(row);
+    expect(wire.webSocket).toBeUndefined();
+    const mirrored = np.buildRowFromRequest(np.buildMirrorEntryFromWire(wire), wire.id);
+    expect(mirrored).toMatchObject({ _wsArchive: true, _wsArchiveOmitted: 7 });
+    const exported = np.sanitizeHar(np.buildHarLogFromRows([mirrored])).log.entries[0];
+    expect(exported._networkPlus.webSocketFramesOmitted).toBe(7);
+    expect(exported._webSocketMessages).toBeUndefined();
   });
 
   test('sanitized export omits the frames and marks the omission per entry', () => {

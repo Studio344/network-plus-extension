@@ -61,7 +61,7 @@
       <input type="file" id="importFile" accept=".har,.saz" style="display:none" />
     </div>
     <div class="right">
-      <button id="webSocketOnlyBtn" type="button" aria-pressed="false" title="Show only WebSocket requests" data-i18n-title="titleWebSocketOnly" aria-label="Show only WebSocket requests" data-i18n-aria-label="titleWebSocketOnly">WebSocket</button>
+      <button id="webSocketOnlyBtn" type="button" aria-pressed="false" title="Show only WebSocket requests" data-i18n-title="titleWebSocketOnly" aria-label="Show only WebSocket requests" data-i18n-aria-label="titleWebSocketOnly" data-i18n="webSocketOnly">WebSocket only</button>
       <button id="columnsBtn" aria-haspopup="menu" aria-controls="columnsMenu" aria-expanded="false">🗂️ Columns</button>
       <div class="separator"></div>
       <button id="settingsBtn" aria-haspopup="dialog" aria-controls="settingsDialog" aria-expanded="false">🎛️ Settings</button>
@@ -69,6 +69,10 @@
       <button id="shortcutBtn" title="Keyboard shortcuts (?)" data-i18n-title="titleShortcutBtn" aria-label="Keyboard shortcuts" data-i18n-aria-label="ariaShortcutBtn" aria-keyshortcuts="?" aria-haspopup="dialog" aria-controls="shortcutDialog">⌨️ ?</button>
     </div>
   </header>
+  <div id="wsCapturePrompt" class="ws-capture-prompt" hidden>
+    <span id="wsCapturePromptHelp" data-i18n="wsCapturePromptHelp">Enable stream capture before opening a new WebSocket connection.</span>
+    <button id="wsCapturePromptBtn" class="ws-capture-btn" type="button" aria-describedby="wsCapturePromptHelp" data-i18n="wsCapturePromptBtn">Enable stream capture</button>
+  </div>
   <div class="search-panel" id="searchPanel" role="search" aria-label="Search requests" style="display:none">
     <div class="search-panel-rows" id="searchRows"></div>
     <div class="search-panel-footer">
@@ -100,17 +104,29 @@
   <section id="trafficOverview" class="traffic-overview" aria-label="Traffic overview" data-i18n-aria-label="overviewAria" hidden>
     <div class="overview-time">
       <div class="overview-heading">
-        <h2 data-i18n="overviewStarts">Request starts</h2>
-        <div class="overview-legend" aria-hidden="true"><span data-i18n="overviewRequests">Requests</span><span class="overview-legend-errors" data-i18n="overviewErrors">HTTP 4xx/5xx</span></div>
+        <h2 data-i18n="overviewWaterfall">Request waterfall</h2>
+        <div class="overview-heading-actions">
+          <button type="button" id="overviewClearTime" class="overview-action overview-clear-time" data-i18n="overviewClearTime" hidden>Clear time range</button>
+          <div class="overview-legend"><span class="overview-legend-errors" data-i18n="overviewErrors">HTTP 4xx/5xx</span></div>
+          <div id="overviewPager" class="overview-pager" hidden>
+            <span id="overviewPageCount" class="overview-muted" aria-live="polite"></span>
+            <button type="button" id="overviewPreviousPage" class="overview-action" data-i18n-aria-label="overviewPreviousPage" aria-label="Previous requests">‹</button>
+            <button type="button" id="overviewNextPage" class="overview-action" data-i18n-aria-label="overviewNextPage" aria-label="Next requests">›</button>
+          </div>
+        </div>
       </div>
       <p id="overviewTimeEmpty" class="overview-muted" data-i18n="overviewNoStarts" hidden>No recorded start times in this scope.</p>
-      <div id="overviewTimeline" class="overview-timeline" role="group" data-i18n-aria-label="overviewBinGroup" aria-label="Request starts by time window" aria-describedby="overviewInstructions"></div>
-      <div id="overviewTimeBounds" class="overview-time-bounds" aria-hidden="true"><span></span><span></span></div>
-      <p id="overviewInstructions" class="overview-muted" data-i18n="overviewInstructions">Choose a bar. Shift+click to extend, or use the arrow keys with Shift.</p>
+      <p id="overviewInstructions" class="overview-muted" data-i18n="overviewInstructions">Left edge = start. Bar length = duration. Drag the time ruler to filter.</p>
+      <div id="overviewWaterfall" class="overview-waterfall">
+        <div class="overview-ruler">
+          <div id="overviewTimeBounds" class="overview-time-bounds" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div id="overviewTimeline" class="overview-timeline" role="group" data-i18n-aria-label="overviewBinGroup" aria-label="Filter by time range" aria-describedby="overviewInstructions"></div>
+        </div>
+        <ul id="overviewRequests" class="overview-requests"></ul>
+        <p id="overviewNoDisplayed" class="overview-muted" data-i18n="overviewNoDisplayed" hidden>No displayed requests with a recorded start time.</p>
+      </div>
       <p id="overviewTimeReadout" class="overview-readout"></p>
       <p id="overviewTimeOmissions" class="overview-muted" hidden></p>
-      <button type="button" id="overviewPeakBtn" class="overview-action overview-peak" hidden></button>
-      <button type="button" id="overviewClearTime" class="overview-action" data-i18n="overviewClearTime" hidden>Clear time range</button>
     </div>
     <div class="overview-latency">
       <div class="overview-heading">
@@ -120,6 +136,7 @@
       <div id="overviewLatency" class="overview-latency-bands"></div>
       <p id="overviewLatencyEmpty" class="overview-muted" data-i18n="overviewNoLatency" hidden>No recorded durations for the displayed requests.</p>
       <p id="overviewLatencyOmissions" class="overview-muted" hidden></p>
+      <button type="button" id="overviewPeakBtn" class="overview-action overview-peak" hidden></button>
       <button type="button" id="overviewSlowestBtn" class="overview-action" hidden></button>
     </div>
   </section>
