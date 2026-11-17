@@ -434,6 +434,26 @@ describe('accessible theme contract', () => {
     expect(light['method-get-fg']).toBe('#065f46');
     expect(light['status-2xx-text']).toBe('#065f46');
   });
+
+  test('keeps distinct Dark reading roles legible on dense and highlighted surfaces', () => {
+    const dark = systemDark;
+    expect(forcedDark['text-strong']).toBe(dark['text-strong']);
+    expect(forcedDark['overview-volume']).toBe(dark['overview-volume']);
+    const backgrounds = [dark.bg, dark.surface, compositeOver(dark.selected, dark.bg), compositeOver(dark.stripe, dark.bg)];
+    for (const background of backgrounds) {
+      const supporting = contrastRatio(dark['text-muted'], background);
+      const regular = contrastRatio(dark.fg, background);
+      const strong = contrastRatio(dark['text-strong'], background);
+      expect(supporting).toBeGreaterThanOrEqual(4.5);
+      expect(regular).toBeGreaterThan(supporting);
+      expect(strong).toBeGreaterThan(regular);
+    }
+    const selected = compositeOver(dark.selected, dark.bg);
+    expect(contrastRatio(dark['overview-volume'], dark.bg)).toBeGreaterThanOrEqual(3);
+    const [red, green, blue] = hexToRgb(dark['search-yellow']);
+    const highlight = compositeOver('rgba(' + [red, green, blue, parseInt(dark['hl-primary-pct'], 10) / 100].join(',') + ')', selected);
+    expect(contrastRatio(dark['text-strong'], highlight)).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe('accessible workbench static contracts', () => {

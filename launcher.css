@@ -2,8 +2,8 @@
   color-scheme: light dark;
   --canvas: light-dark(#eff0fa, #121110);
   --surface: light-dark(#fff, #24211e);
-  --ink: light-dark(#221d3c, #f5efe8);
-  --muted: light-dark(#524d68, #c1b6a9);
+  --ink: light-dark(#221d3c, #d8cdbf);
+  --muted: light-dark(#524d68, #b4a697);
   --line: light-dark(#dcd7eb, #413a33);
   --accent: light-dark(#5032aa, #f3cc99);
   --accent-line: light-dark(#cbbff0, #765438);
@@ -192,7 +192,7 @@ body[data-view="live"] :is(.launcher-trace, .launcher-otter) { display: none; }
   border: 1px solid light-dark(#7061bd, #765438);
   border-radius: clamp(18px, 3vw, 25px);
   background: var(--hero);
-  color: light-dark(#fff, #f5efe8);
+  color: light-dark(#fff, #eee2d0);
   box-shadow: 0 10px 30px var(--shadow);
 }
 .setup-intro { min-width: 0; overflow-wrap: break-word; }
