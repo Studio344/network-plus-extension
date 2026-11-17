@@ -51,7 +51,7 @@ describe('traffic overview', () => {
       entries: [
         { startsAt: 0, width: 1, duration: 100 },
         { startsAt: 0.21, width: 0, duration: null },
-        { startsAt: 0.25, width: 0.75, error: true },
+        { startsAt: 0.25, width: 0.75, statusClass: '5xx' },
         { startsAt: 0.3, width: 0, duration: 0 },
         { startsAt: 0.3, width: 0, duration: null },
         { startsAt: 0.31, width: 0 },

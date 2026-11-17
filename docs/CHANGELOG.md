@@ -12,7 +12,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 - 🐛 **Status filters** — Apply the first checkbox change immediately and include status codes observed in the capture.
 - 🔧 **Compact list** — Keep Search, Filters, and request paths reachable in narrow panes, and mark selected details outside the current filter.
 - ✨ **Traffic timeline** — See overlapping requests as horizontal bars, drag the time ruler to filter traffic, and locate error peaks and slow requests.
-- 🔧 **Dark theme reading contrast** — Soften dense labels and routine traffic colors while keeping selected paths, HTTP errors, and keyboard focus distinct.
+- 🔧 **Dark theme reading contrast** — Use quiet supporting text and vivid, distinct colors for traffic status and timing.
 
 ## v1.18.0 - 2026-11-17
 

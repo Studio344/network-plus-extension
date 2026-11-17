@@ -5285,7 +5285,7 @@ const _NetworkPlus = (function () {
         startsAt: (start - range.start) / span,
         width: Math.min(duration ?? 0, range.end - start) / span,
         duration,
-        error: !row._pendingRequest && (classifyStatusClass(row.status) === '4xx' || classifyStatusClass(row.status) === '5xx'),
+        statusClass: row._pendingRequest ? 'pending' : classifyStatusClass(row.status),
       };
     });
     return { entries, total: timed.length, page, lastPage, offset };
@@ -6573,10 +6573,6 @@ const _NetworkPlus = (function () {
     overviewWaterfall: {
       en: 'Request waterfall',
       ja: 'リクエストのウォーターフォール',
-    },
-    overviewErrors: {
-      en: 'HTTP 4xx/5xx',
-      ja: 'HTTP 4xx・5xx',
     },
     overviewNoStarts: {
       en: 'No recorded start times in this scope.',
@@ -14073,7 +14069,7 @@ const _NetworkPlus = (function () {
     const methodClass = methodClassToken(row.method);
     if (methodClass) tr.classList.add(methodClass);
     // Status code row class
-    const statusClass = classifyStatusClass(row.status);
+    const statusClass = row._pendingRequest ? 'pending' : classifyStatusClass(row.status);
     if (statusClass !== 'other') tr.classList.add('status-' + statusClass);
 
     const visibleCols = getEffectiveVisibleColumns();
@@ -16551,6 +16547,12 @@ const _NetworkPlus = (function () {
       const bar = document.createElement('span');
       track.append(bar);
       const info = document.createElement('span');
+      info.className = 'overview-request-info';
+      const status = document.createElement('span');
+      status.className = 'overview-request-status';
+      const time = document.createElement('span');
+      time.className = 'overview-request-time';
+      info.append(status, time);
       button.append(name, track, info);
       item.append(button);
       requests.append(item);
@@ -16560,7 +16562,7 @@ const _NetworkPlus = (function () {
         selectRow(row, null, true);
         scrollToSelectedRow();
       });
-      return { item, button, name, bar, info };
+      return { item, button, name, bar, status, time };
     });
     const latencyBands = ['<100 ms', '100–300 ms', '300 ms–1 s', '1–3 s', '≥3 s'].map((label, index) => {
       const band = document.createElement('div');
@@ -16605,22 +16607,26 @@ const _NetworkPlus = (function () {
       });
       if ($('#overviewPageCount').textContent !== pageCount) $('#overviewPageCount').textContent = pageCount;
       for (let index = 0; index < lanes.length; index += 1) {
-        const { item, button, name, bar, info } = lanes[index];
+        const { item, button, name, bar, status, time } = lanes[index];
         const entry = visibleRequests[index];
         item.hidden = !entry;
         if (!entry) continue;
-        const { row, duration, error } = entry;
+        const { row, duration, statusClass } = entry;
         const measured = duration !== null;
         const timing = measured ? formatTimingDuration(duration) :
           uiText(row._pendingRequest ? 'analysisPending' : 'overviewUnknownDuration');
+        const statusCode = statusClass === 'pending' || statusClass === 'other' ? '' : String(row.status);
         name.textContent = row.path || row.url;
-        info.textContent = error ? row.status + ' · ' + timing : timing;
-        info.className = 'overview-request-info' + (error ? ' overview-request-info--error' : '');
+        status.textContent = statusCode;
+        status.hidden = !statusCode;
+        time.textContent = timing;
+        button.dataset.statusClass = statusClass;
         button.dataset.overviewRequest = row.id;
-        button.title = [row.method + ' ' + row.url, info.textContent, formatOverviewEpoch(getOverviewStart(row))].join(' · ');
+        button.title = [row.method + ' ' + row.url, statusCode, timing, formatOverviewEpoch(getOverviewStart(row))]
+          .filter(Boolean).join(' · ');
         button.setAttribute('aria-label', button.title);
         button.setAttribute('aria-current', String(row === state.selectedRow));
-        bar.className = 'overview-request-bar' + (error ? ' overview-request-bar--error' : '');
+        bar.className = 'overview-request-bar';
         if (!duration) bar.classList.add('overview-request-bar--' + (measured ? 'zero' : row._pendingRequest ? 'pending' : 'unknown'));
         bar.style.setProperty('--overview-start', (entry.startsAt * 100) + '%');
         bar.style.setProperty('--overview-width', (entry.width * 100) + '%');
@@ -17604,7 +17610,7 @@ const _NetworkPlus = (function () {
       strip.appendChild(item);
     };
     if (row._pendingRequest) {
-      addItem(uiText('statusPendingRequest'), 'details-summary-status details-summary-status--other');
+      addItem(uiText('statusPendingRequest'), 'details-summary-status details-summary-status--pending');
     } else if (isLiveStreamRow(row) || row._mirrorStreamRevision != null) {
       addItem(row.statusText, 'details-summary-status details-summary-status--other');
     } else if (plan.status) {

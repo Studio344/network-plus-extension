@@ -440,6 +440,14 @@ describe('accessible theme contract', () => {
     expect(forcedDark['text-strong']).toBe(dark['text-strong']);
     expect(forcedDark['overview-volume']).toBe(dark['overview-volume']);
     const backgrounds = [dark.bg, dark.surface, compositeOver(dark.selected, dark.bg), compositeOver(dark.stripe, dark.bg)];
+    const selectedOverview = compositeOver(dark.selected, dark.surface);
+    for (const status of ['2xx', '3xx', '4xx', '5xx']) {
+      const token = 'status-' + status + '-text';
+      expect(forcedDark[token]).toBe(dark[token]);
+      for (const background of [...backgrounds, selectedOverview]) {
+        expect(contrastRatio(dark[token], background)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
     for (const background of backgrounds) {
       const supporting = contrastRatio(dark['text-muted'], background);
       const regular = contrastRatio(dark.fg, background);
