@@ -5,6 +5,8 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 ## Unreleased
 
 - ✨ **WebSocket Messages** — Scan color-coded send and receive previews in time order and expand each row to view the captured payload with JSON syntax highlighting.
+- ✨ **WebSocket filters** — Isolate WebSocket requests from the toolbar and search recorded messages by text and direction.
+- 🔧 **Panel colors** — Refine the light and dark palettes to make controls, focus, and selected rows easier to distinguish.
 
 ## v1.18.0 - 2026-11-17
 

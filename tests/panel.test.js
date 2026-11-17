@@ -2340,6 +2340,7 @@ describe('capture retention helpers', () => {
       originalCount: 3,
       context: {
         columnFilterRules: filterRules,
+        webSocketOnly: true,
         searchKeywords: [{ query: 'failure', colorIdx: 2 }],
         searchScope: {
           url: false,
@@ -2380,6 +2381,7 @@ describe('capture retention helpers', () => {
     expect(plan.searchPerKeywordCurrentRows).toEqual([[0, retained]]);
     expect(plan.columnFilterRules).toEqual(filterRules);
     expect(plan.columnFilterRules).not.toBe(filterRules);
+    expect(plan.webSocketOnly).toBe(true);
     expect(plan.searchKeywords).toEqual([{ query: 'failure', colorIdx: 2 }]);
     expect(plan.searchKeywords[0]).not.toBe(snapshot.context.searchKeywords[0]);
     expect(plan.searchScope.url).toBe(false);

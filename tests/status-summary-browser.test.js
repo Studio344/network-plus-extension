@@ -3215,6 +3215,7 @@ browserTest(
             (button) => button.textContent.trim() === 'Explore sample capture',
           );
           if (!sampleButton) throw new Error('Sample capture action was not found.');
+          document.querySelector('#webSocketOnlyBtn').click();
           sampleButton.click();
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
@@ -3228,6 +3229,8 @@ browserTest(
           return {
             activeResponseTabId: document.querySelector('#res-tab-bar [aria-selected="true"]')?.id || null,
             pauseDisabled: document.querySelector('#pauseBtn').disabled,
+            webSocketFilterSuspended: document.querySelector('#webSocketOnlyBtn').disabled &&
+              document.querySelector('#webSocketOnlyBtn').getAttribute('aria-pressed') === 'false',
             pauseLabel: document.querySelector('#pauseBtn').getAttribute('aria-label'),
             requestCount: document.querySelector('#counter').textContent,
             requestCountAnnouncement: document.querySelector('#requestCountStatus').textContent,
@@ -3242,6 +3245,7 @@ browserTest(
       expect(initialState).toMatchObject({
         activeResponseTabId: 'res-tab-timing',
         pauseDisabled: true,
+        webSocketFilterSuspended: true,
         requestCount: '3 requests · 1 matching',
         requestCountAnnouncement: '3 requests, 1 matching the search',
         searchPanelDisplay: 'block',

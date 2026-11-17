@@ -2,24 +2,28 @@
 name: Network+ for DevTools
 description: A precise, high-density network forensics workbench for Microsoft Edge DevTools.
 colors:
-  signal-indigo: '#6366f1'
-  signal-indigo-soft: '#6366f11f'
-  canvas-light: '#fafbfc'
-  surface-light: '#f0f2f5'
+  accent-light: '#096b9c'
+  accent-ink-light: '#075980'
+  accent-tint-light: 'rgba(9,105,154,0.12)'
+  accent-dark: '#75c7f0'
+  accent-ink-dark: '#a0dafa'
+  accent-tint-dark: 'rgba(88,181,231,0.14)'
+  canvas-light: '#f3f6fa'
+  surface-light: '#e9eff6'
   content-light: '#ffffff'
-  ink-light: '#1a1a2e'
-  muted-light: '#606d7b'
-  border-light: '#dde1e6'
-  control-border-light: '#7c8794'
-  separator-light: '#7c8794'
-  canvas-dark: '#0f172a'
-  surface-dark: '#1e293b'
-  content-dark: '#162032'
-  ink-dark: '#e2e8f0'
-  muted-dark: '#94a3b8'
-  border-dark: '#334155'
-  control-border-dark: '#7c8794'
-  separator-dark: '#7c8794'
+  ink-light: '#172a40'
+  muted-light: '#52677d'
+  border-light: '#d0dce8'
+  control-border-light: '#748598'
+  separator-light: '#6d8196'
+  canvas-dark: '#111b28'
+  surface-dark: '#1c2b3d'
+  content-dark: '#172433'
+  ink-dark: '#eaf2fa'
+  muted-dark: '#9fb0c2'
+  border-dark: '#34465b'
+  control-border-dark: '#7a8fa6'
+  separator-dark: '#6c829a'
   success: '#059669'
   caution: '#d97706'
   error: '#dc2626'
@@ -88,8 +92,8 @@ components:
     padding: '5px 12px'
     height: '32px'
   toolbar-button-active:
-    backgroundColor: '{colors.signal-indigo-soft}'
-    textColor: '{colors.signal-indigo}'
+    backgroundColor: '{colors.accent-tint-light}'
+    textColor: '{colors.accent-ink-light}'
     typography: '{typography.body}'
     rounded: '{rounded.lg}'
     padding: '5px 12px'
@@ -101,8 +105,8 @@ components:
     rounded: '{rounded.md}'
     padding: '4px 8px'
   tab-active:
-    backgroundColor: '{colors.signal-indigo-soft}'
-    textColor: '{colors.signal-indigo}'
+    backgroundColor: '{colors.accent-tint-light}'
+    textColor: '{colors.accent-ink-light}'
     typography: '{typography.label}'
     rounded: '{rounded.xs}'
     padding: '5px 12px'
@@ -132,13 +136,12 @@ already diagnosing a live problem.
 
 ## Colors
 
-The palette is operational: cool neutral layers separate work areas while Signal Indigo identifies the current action or
-selection.
+Cool neutral layers separate work areas. A blue accent identifies active controls, selection, and keyboard focus.
 
 ### Primary
 
-- **Signal Indigo** (`#6366f1`): Primary actions, active tabs, focus rings, and current selection only.
-- **Signal Indigo Soft** (`#6366f11f`): Low-emphasis active and hover surfaces that preserve text contrast.
+- Focus uses blue (`#096b9c` in Light and `#75c7f0` in Dark).
+- Pressed toggles can use a solid blue fill. Tinted backgrounds with matching text identify lower-emphasis states.
 
 ### Secondary
 
@@ -151,14 +154,9 @@ selection.
 
 ### Neutral
 
-- **Inspection Canvas** (`#fafbfc` light / `#0f172a` dark): The full-panel working background.
-- **Workbench Surface** (`#f0f2f5` light / `#1e293b` dark): Toolbars, tabs, and secondary panels.
-- **Evidence Surface** (`#ffffff` light / `#162032` dark): Request and response content.
-- **Evidence Ink** (`#1a1a2e` light / `#e2e8f0` dark): Primary text and data.
-- **Operational Muted** (`#606d7b` light / `#94a3b8` dark): Labels and supporting metadata.
-- **Structural Border** (`#dde1e6` light / `#334155` dark): Subtle table and panel dividers that do not identify controls.
-- **Control Boundary** (`#7c8794`): Enabled button, input, select, checkbox, and swatch outlines; at least `3:1` against every workbench layer.
-- **Workbench Separator** (`#7c8794`): Main and inspector split boundaries; at least `3:1` against every workbench layer.
+- Use `canvas` for the panel background, `surface` for controls and tabs, and `content` for request and response content.
+- Use `ink` for primary text and `muted` for supporting metadata.
+- Use `border` for table and panel dividers, `control-border` for control outlines, and `separator` for pane dividers.
 
 ### Tertiary
 
@@ -166,8 +164,7 @@ selection.
 - **Caution Amber** (`#d97706`): Redirects, warnings, and medium-duration evidence.
 - **Error Red** (`#dc2626`): Failed requests, destructive affordances, and recording emphasis.
 
-**The Signal-Not-Decoration Rule.** Signal Indigo is reserved for action, focus, selection, or navigation state. It is
-never ambient decoration.
+Reserve accent colors for actions, focus, selection, and navigation.
 
 **The Four-Theme Parity Rule.** Every new semantic color must be defined for light default, system dark, forced dark, and
 forced light behavior before it ships.
