@@ -3211,11 +3211,11 @@ browserTest(
           if (document.readyState === 'loading') {
             await new Promise((resolve) => window.addEventListener('DOMContentLoaded', resolve, { once: true }));
           }
+          document.querySelector('#webSocketOnlyBtn').click();
           const sampleButton = Array.from(document.querySelectorAll('button')).find(
             (button) => button.textContent.trim() === 'Explore sample capture',
           );
           if (!sampleButton) throw new Error('Sample capture action was not found.');
-          document.querySelector('#webSocketOnlyBtn').click();
           sampleButton.click();
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
@@ -3861,6 +3861,7 @@ browserTest(
                 return {
                   id: button.id,
                   hidden: button.hidden === true,
+                  disabled: button.disabled === true,
                   width: rect.width,
                   fullyVisible: rect.left >= toolbarRect.left && rect.right <= toolbarRect.right,
                 };
@@ -3895,6 +3896,7 @@ browserTest(
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
+        'webSocketOnlyBtn',
         'filterBtn',
         'columnsBtn',
         'settingsBtn',
@@ -3904,8 +3906,9 @@ browserTest(
       for (const measurement of viewportMeasurements) {
         expect(measurement.documentOverflow).toBe(0);
         expect(measurement.toolbarOverflowX).toBe('auto');
-        expect(measurement.actions).toHaveLength(12);
         expect(measurement.actions.map((action) => action.id)).toEqual(expectedActionOrder);
+        const webSocketFilter = measurement.actions.find((action) => action.id === 'webSocketOnlyBtn');
+        expect(webSocketFilter.disabled).toBe(true);
         // The pop-out button exists only for a DevTools session; outside one
         // it must not just carry the hidden attribute but actually render at
         // zero width (the .topbar button[hidden] guard).
@@ -13241,7 +13244,7 @@ browserTest(
       // theme's --fg — so the frame's ground below is measured against it and
       // not against a light theme that happened to leak in.
       expect(measured.theme).toBe('dark');
-      expect(measured.paneColor).toBe('rgb(226, 232, 240)');
+      expect(measured.paneColor).toBe('rgb(234, 242, 250)');
       expect(measured.sandbox).toBe('');
       expect(measured.visible).toBe(true);
       expect(measured.sized).toBe(true);
