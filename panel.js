@@ -6088,6 +6088,7 @@ const _NetworkPlus = (function () {
       row._boundedResponsePayloadPromise = null;
       row._liveRawResponsePromise = null;
       row._readImportedHarEntry = null;
+      row._readWsHarEntry = null;
       row._retentionDisposed = true;
       state.retainedRows.delete(row);
       state.activeRows.delete(row);
@@ -7466,8 +7467,8 @@ const _NetworkPlus = (function () {
       ja: 'ローカルサンプル一式を削除し、以前の記録状態と列フィルターを復元',
     },
     titleWsCapture: {
-      en: "Capture WebSocket and Server-Sent-Event streams by wrapping this page's WebSocket and EventSource constructors; only connections created while capture is on are seen, and traffic is never altered",
-      ja: 'このページの WebSocket / EventSource コンストラクターをラップして WebSocket と Server-Sent-Events のストリームをキャプチャします。キャプチャ有効中に作成された接続だけが対象で、トラフィックは一切変更されません。',
+      en: 'Record WebSocket and Server-Sent Events while stream capture is on',
+      ja: 'ストリーム記録をオンにしている間のWebSocketとServer-Sent Eventsを記録します',
     },
     emptyFilteredTitle: {
       en: 'No requests match the current filters.',
@@ -9054,6 +9055,10 @@ const _NetworkPlus = (function () {
       en: 'Enable stream capture',
       ja: 'ストリーム記録をオンにする',
     },
+    wsReloadCapture: {
+      en: 'Reload and record',
+      ja: '再読み込みして記録',
+    },
     wsConnectionTabs: {
       en: 'WebSocket connection',
       ja: 'WebSocket 接続',
@@ -9163,8 +9168,8 @@ const _NetworkPlus = (function () {
       ja: 'HAR のサニタイズ時にメッセージ {count} 件が省略されました。',
     },
     wsMessagesHandshakeEmpty: {
-      en: 'Only the handshake was recorded. Enable stream capture and make sure recording is running before opening a new connection.',
-      ja: 'この接続はハンドシェイクのみ記録されています。新しい接続を開く前に、ストリーム記録とライブ記録をオンにしてください。',
+      en: 'There are no recorded messages for this connection. Reload the inspected page to record a new connection.',
+      ja: 'この接続のメッセージは記録されていません。ページを再読み込みして、新しい接続を記録できます。',
     },
     wsMessagesLoading: {
       en: 'Loading messages…',
@@ -9485,6 +9490,18 @@ const _NetworkPlus = (function () {
     statusStreamCaptureOnPaused: {
       en: 'Stream capture is on. Resume recording before opening a new WebSocket connection.',
       ja: 'ストリーム記録をオンにしました。新しい WebSocket 接続を開く前に、ライブ記録を再開してください。',
+    },
+    statusStreamCaptureNativeOn: {
+      en: 'Recording WebSocket and SSE. Use Reload and record if the page connected before DevTools opened.',
+      ja: 'WebSocketとSSEを記録中です。DevToolsを開く前に接続していた場合は「再読み込みして記録」を使ってください。',
+    },
+    statusStreamCaptureReload: {
+      en: 'Reloading the inspected page to record its connections.',
+      ja: '接続を記録するため、検査中のページを再読み込みします。',
+    },
+    statusStreamCaptureReloadFailed: {
+      en: 'Could not reload the inspected page.',
+      ja: '検査中のページを再読み込みできませんでした。',
     },
     statusStreamCaptureOff: {
       en: 'Stream capture off; recorded connections stay in the table.',
@@ -10578,14 +10595,8 @@ const _NetworkPlus = (function () {
   }
 
   // ---- WebSocket capture (opt-in, no extra permissions) ----
-  // chrome.devtools.network never surfaces WebSocket traffic to extensions,
-  // and the chrome.debugger alternative cannot even attach while DevTools is
-  // open on the tab. Capture therefore wraps the inspected page's WebSocket
-  // constructor through inspectedWindow.eval: the wrapper queues connection
-  // events and frame previews inside the page, and the panel drains the
-  // queue once a second. Honest limits: only sockets created while capture
-  // is on are seen, the wrapper lives in the page's JS environment (traffic
-  // itself is never altered), and a navigation wipes it until reinjection.
+  // Chromium's DevTools HAR contains native WebSocket frames. The page
+  // wrapper is used when a host has no DevTools HAR API.
   const WS_QUEUE_CAP = 5000;
   const WS_FRAME_PREVIEW_CHARS = 2048;
   // Full text stays in the inspected document until explicitly downloaded.
@@ -10619,6 +10630,47 @@ const _NetworkPlus = (function () {
 
   function matchesRequestTypeFilter(row) {
     return !state.webSocketOnly || state.sampleCaptureActive || isWebSocketRow(row);
+  }
+
+  function isNativeWebSocketEntry(entry) {
+    return Array.isArray(entry?._webSocketMessages) && typeof entry.request?.url === 'string' &&
+      entry.request.url.length <= STREAM_URL_LIMIT_CHARS && /^wss?:\/\//i.test(entry.request.url) &&
+      Number.isFinite(Date.parse(entry.startedDateTime));
+  }
+
+  function getNativeWebSocketKey(entry) {
+    if (!isNativeWebSocketEntry(entry)) return '';
+    const headers = entry.request.headers;
+    const key = Array.isArray(headers) && headers.find((header) =>
+      typeof header?.name === 'string' && header.name.toLowerCase() === 'sec-websocket-key')?.value;
+    return typeof key === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(key)
+      ? 'nonce:' + key
+      : '';
+  }
+
+  function planNativeWebSocketFrames(entry, cursor, socketId, minimumEpoch) {
+    const messages = entry._webSocketMessages;
+    const events = [];
+    const first = Math.max(cursor, messages.length - WS_QUEUE_CAP);
+    for (let index = first; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (!message || (message.type !== 'send' && message.type !== 'receive') ||
+          (message.opcode !== 1 && message.opcode !== 2) || typeof message.data !== 'string') continue;
+      const at = getHarWsTime(message);
+      if (at === null || at <= minimumEpoch) continue;
+      const binary = message.opcode === 2;
+      const data = message.data;
+      const truncated = !binary && data.length > WS_FRAME_PREVIEW_CHARS;
+      const padding = binary ? data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0 : 0;
+      const preview = binary ? '[binary ' + Math.max(0, Math.floor(data.length * 3 / 4) - padding) + ' bytes]' :
+        truncated ? data.slice(0, WS_FRAME_PREVIEW_CHARS).split('').join('') : data;
+      events.push({
+        kind: message.type === 'send' ? 'ws-sent' : 'ws-received',
+        socketId, at, binary, preview, truncated,
+        ...(truncated && data.length <= WS_FULL_TEXT_LIMIT_CHARS ? { fullIndex: index, fullLength: data.length } : {}),
+      });
+    }
+    return { events, cursor: Math.max(cursor, messages.length), skipped: Math.max(0, first - cursor) };
   }
 
   function describeWebSocketExport(row) {
@@ -11162,6 +11214,8 @@ const _NetworkPlus = (function () {
               /^[a-z0-9-]{1,64}$/.test(event.fullId) && Number.isSafeInteger(event.fullLength) &&
               event.fullLength > WS_FRAME_PREVIEW_CHARS && event.fullLength <= WS_FULL_TEXT_LIMIT_CHARS
               ? { fullId: event.fullId, fullLength: event.fullLength, fullGeneration: context.fullFrameGeneration } : {}),
+            ...(row._readWsHarEntry && Number.isSafeInteger(event.fullIndex)
+              ? { fullIndex: event.fullIndex, fullLength: event.fullLength, fullGeneration: context.fullFrameGeneration } : {}),
           });
         } else {
           row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + 1;
@@ -14779,6 +14833,7 @@ const _NetworkPlus = (function () {
   });
 
   let wsDetailsChoice = 'ws-tab-messages';
+  let wsReloadCaptureAvailable = false;
   let wsMessagesView = null;
   let wsMessagesRequest = null;
 
@@ -14825,7 +14880,8 @@ const _NetworkPlus = (function () {
     const isCurrent = () => state.selectedRow === row && !row._retentionDisposed;
     const deadline = Date.now() + WS_FULL_TEXT_READ_TIMEOUT_MS;
     if (Number.isInteger(frame.fullIndex)) {
-      const entry = await row._readImportedHarEntry(() => isCurrent() && Date.now() < deadline);
+      const readEntry = row._readWsHarEntry || row._readImportedHarEntry;
+      const entry = await readEntry(() => isCurrent() && Date.now() < deadline, frame);
       const message = entry._webSocketMessages?.[frame.fullIndex];
       const content = message?.data;
       if (!isCurrent() || message?.type !== frame.type || getHarWsTime(message) !== frame.time ||
@@ -14919,7 +14975,8 @@ const _NetworkPlus = (function () {
       disclosure.appendChild(pre);
       if (frame.truncated) {
         const canReadFull = typeof row._readWsFullFrame === 'function' && !!frame.fullId ||
-          typeof row._readImportedHarEntry === 'function' && Number.isInteger(frame.fullIndex);
+          (typeof row._readWsHarEntry === 'function' || typeof row._readImportedHarEntry === 'function') &&
+            Number.isInteger(frame.fullIndex);
         const note = document.createElement('p');
         note.className = 'ws-message-note';
         note.textContent = uiTextFormat(canReadFull ? 'wsMessagePreviewOnly' : 'wsMessageTruncated', {
@@ -15006,6 +15063,8 @@ const _NetworkPlus = (function () {
       : frames.length === 0 && !hasFilters ? emptyMessage : '';
     status.hidden = !message;
     if (status.textContent !== message) status.textContent = message;
+    $('#wsMessagesReloadBtn').hidden = !wsReloadCaptureAvailable || state.sampleCaptureActive ||
+      row._wsArchive || frames.length > 0 || hasFilters || !view.searchReady;
     const directions = $all('[data-ws-direction]', panel);
     for (const button of directions) {
       button.setAttribute('aria-pressed', String(button.dataset.wsDirection === view.direction));
@@ -15187,6 +15246,8 @@ const _NetworkPlus = (function () {
       capture.hidden || capture.getAttribute('aria-pressed') === 'true';
     if (hidden && prompt.contains(document.activeElement)) $('#webSocketOnlyBtn').focus({ preventScroll: true });
     prompt.hidden = hidden;
+    $('#wsReloadBtn').hidden = !wsReloadCaptureAvailable || capture.hidden ||
+      state.sampleCaptureActive || capture.getAttribute('aria-pressed') !== 'true';
   }
 
   function initializeWsDetailTabs() {
@@ -20555,6 +20616,8 @@ const _NetworkPlus = (function () {
     let pendingScrollToBottom = false;
     let pendingCaptureCutoff = 0;
     let pollPendingRequests = () => {};
+    let readNativeWebSocketSnapshot = () => {};
+    let finishNativeWebSocket = () => false;
     let pendingResponseSearchFrame = false;
     const resetPendingLiveRows = () => {
       pendingLiveRows.length = 0;
@@ -21301,9 +21364,15 @@ const _NetworkPlus = (function () {
     const columnsBtn = $('#columnsBtn');
     const filterBtn = $('#filterBtn');
     let enableWsCapture = () => $('#wsCaptureBtn').click();
+    let reloadWsCapture = () => {};
     $('#wsCapturePromptBtn').addEventListener('click', () => {
       if (!$('#wsCapturePrompt').hidden) enableWsCapture();
     });
+    for (const id of ['wsReloadBtn', 'wsMessagesReloadBtn']) {
+      $('#' + id).addEventListener('click', (event) => {
+        if (!event.currentTarget.hidden) reloadWsCapture();
+      });
+    }
     $('#webSocketOnlyBtn').addEventListener('click', () => {
       state.webSocketOnly = !state.webSocketOnly;
       renderBody();
@@ -23503,6 +23572,8 @@ const _NetworkPlus = (function () {
         const observed = new Map();
         for (const entry of log.entries) {
           if (!entry || !entry.request || !entry.response || !entry.startedDateTime) continue;
+          // WebSocket handshakes and frames have their own row identity.
+          if (isWebSocketRequest(entry.request.method, entry.request.url, entry.response.status, entry.response.headers)) continue;
           const key = requestKey(entry);
           if (finishedKeys.has(key) || recentCompletions.has(key)) continue;
           if (observed.has(key)) observed.set(key, null);
@@ -23549,7 +23620,10 @@ const _NetworkPlus = (function () {
               pollInFlight = false;
               finishedDuringPoll = null;
               if (chrome.runtime && chrome.runtime.lastError) return;
-              if (cutoff === pendingCaptureCutoff) samplePendingRequests(log, recentCompletions);
+              if (cutoff === pendingCaptureCutoff) {
+                samplePendingRequests(log, recentCompletions);
+                readNativeWebSocketSnapshot(log?.entries);
+              }
             });
           } catch (_error) {
             pollInFlight = false;
@@ -23557,7 +23631,7 @@ const _NetworkPlus = (function () {
           }
         };
         const pollVisibleHost = () => {
-          if (!document.hidden) pollPendingRequests();
+          if (!document.hidden || mirrorStreamCaptureState().native) pollPendingRequests();
         };
         const timer = setInterval(pollVisibleHost, 1000);
         document.addEventListener('visibilitychange', pollVisibleHost);
@@ -23569,6 +23643,7 @@ const _NetworkPlus = (function () {
         rememberFinished(key);
         const provisional = pendingByKey.get(key);
         pendingByKey.delete(key);
+        if (finishNativeWebSocket(request)) return;
         // Finish rows that were already captured before Pause or Clear.
         // Only newly encountered requests are suppressed while paused.
         if (provisional && isCurrentPending(provisional)) {
@@ -23961,6 +24036,7 @@ const _NetworkPlus = (function () {
           const streamEnabled = control.streamCapture.enabled === true;
           wsCaptureBtnViewer.textContent = uiText(streamEnabled ? 'wsCaptureOn' : 'wsCaptureOff');
           wsCaptureBtnViewer.setAttribute('aria-pressed', streamEnabled ? 'true' : 'false');
+          wsReloadCaptureAvailable = control.streamCapture.reloadSupported === true;
           syncWsCapturePrompt();
         }
         if (control.devtoolsMinimized === false) maybeShowUndockHint();
@@ -23977,6 +24053,7 @@ const _NetworkPlus = (function () {
         }
       };
       enableWsCapture = () => sendViewerCommand('stream-toggle', { enabled: true }, 'Stream capture');
+      reloadWsCapture = () => sendViewerCommand('stream-reload', {}, uiText('wsReloadCapture'));
       const viewerImportInput = document.createElement('input');
       viewerImportInput.type = 'file';
       viewerImportInput.accept = '.har,.saz';
@@ -24115,6 +24192,7 @@ const _NetworkPlus = (function () {
           activeMirrorPort = null;
           resendInspectedOrigin = '';
           wsCaptureBtnViewer.hidden = true;
+          wsReloadCaptureAvailable = false;
           syncWsCapturePrompt();
           viewerSession.failPendingBodyRequests(
             'The DevTools session disconnected before the response content arrived.',
@@ -24270,6 +24348,10 @@ const _NetworkPlus = (function () {
               }
               if (args?.enabled !== true || !capture.enabled) $('#wsCaptureBtn').click();
               done('');
+              return;
+            }
+            if (name === 'stream-reload') {
+              done(reloadWsCapture() ? '' : uiText('statusStreamCaptureReloadFailed'));
               return;
             }
             if (name === 'resend') {
@@ -24468,18 +24550,35 @@ const _NetworkPlus = (function () {
         : null;
     if (wsCaptureBtn && inspectedEval && !mirrorViewerActive && !offlineView) {
       wsCaptureBtn.hidden = false;
+      const nativeNetwork = chrome.devtools.network;
+      const nativeWebSockets = typeof nativeNetwork?.getHAR === 'function';
+      const inspectedPage = chrome.devtools.inspectedWindow;
+      wsReloadCaptureAvailable = typeof inspectedPage.reload === 'function';
+      const nativeSocketRows = new Map();
+      const retiredNativeSockets = new Map();
       const streamCapture = { enabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
       const fullFrameCaptureKey = crypto.randomUUID();
       let streamDocumentGeneration = 0;
+      let nativeCaptureCutoff = pendingCaptureCutoff;
+      let nativeCapturePaused = state.paused || state.sampleCaptureActive;
+      let checkNativeNavigation = false;
       const allowWsFullCapture = () => !state.paused && !state.sampleCaptureActive;
       state.syncWsFullCapture = () => {
+        const paused = !allowWsFullCapture();
+        if (nativeCapturePaused !== paused) nativeCaptureCutoff = Date.now();
+        nativeCapturePaused = paused;
         if (!streamCapture.enabled) return;
+        if (nativeWebSockets) {
+          if (!paused) pollPendingRequests();
+          return;
+        }
         inspectedEval('window.__networkPlusWS__?.setFullCapture?.(' +
           JSON.stringify(fullFrameCaptureKey) + ',' + allowWsFullCapture() + ')', () => {});
       };
       state.clearWsFullFrames = () => {
         streamDocumentGeneration += 1;
-        if (!streamCapture.enabled) return;
+        nativeCaptureCutoff = Date.now();
+        if (!streamCapture.enabled || nativeWebSockets) return;
         inspectedEval('window.__networkPlusWS__?.clearFullFrames?.(' + JSON.stringify(fullFrameCaptureKey) + ')', () => {});
       };
       const streamMemoryByRow = new WeakMap();
@@ -24496,6 +24595,11 @@ const _NetworkPlus = (function () {
         for (const row of evictedSet) {
           streamMemoryUsed -= streamMemoryByRow.get(row) || 0;
           streamMemoryByRow.delete(row);
+          if (row._nativeWsKey && nativeSocketRows.get(row._nativeWsKey) === row) {
+            nativeSocketRows.delete(row._nativeWsKey);
+            retiredNativeSockets.set(row._nativeWsKey, nativeCaptureCutoff);
+            if (retiredNativeSockets.size > 512) retiredNativeSockets.delete(retiredNativeSockets.keys().next().value);
+          }
         }
         for (const rows of [streamCapture.socketRows, streamCapture.sseRows]) {
           for (const [socketId, row] of rows) {
@@ -24510,7 +24614,7 @@ const _NetworkPlus = (function () {
       };
       refreshStreamCaptureLabel = updateStreamCaptureButton;
       const injectStreamWrappers = () => {
-        inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});
+        if (!nativeWebSockets) inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});
         inspectedEval(buildSseWrapperSource(), () => {});
       };
       const readFullFrame = (row, frame, offset, timeout) => new Promise((resolve, reject) => {
@@ -24583,6 +24687,141 @@ const _NetworkPlus = (function () {
         renderBody();
         if (selectedChanged) refreshSelectedStreamDetails();
       };
+      const streamFrameBudget = (onLimit) => ({
+        allowMessage: (row, bytes) => {
+          const retained = reserveStreamMemory(row, bytes);
+          if (!retained) onLimit();
+          return retained;
+        },
+        allowTranscript: (row, event, addedLength, hasFrame) => {
+          const frameBytes = hasFrame && (row._wsFrames?.length || 0) < HAR_WS_MESSAGE_IMPORT_LIMIT
+            ? 96 + 2 * (event.binary ? 0 : event.preview.length) : 0;
+          const retained = reserveStreamMemory(row, 2 * addedLength + frameBytes);
+          if (!retained) onLimit();
+          return retained;
+        },
+      });
+      const readNativeEntry = (key, isCurrent, frame) => new Promise((resolve, reject) => {
+        const available = () => isCurrent() && streamCapture.enabled && frame.fullGeneration === streamDocumentGeneration;
+        if (!available()) {
+          reject(new Error('WebSocket message expired'));
+          return;
+        }
+        const timer = setTimeout(() => reject(new Error('Timed out reading a WebSocket message')), RESPONSE_CONTENT_TIMEOUT_MS);
+        try {
+          nativeNetwork.getHAR((log) => {
+            clearTimeout(timer);
+            const entries = available() && log?.entries;
+            const matches = Array.isArray(entries) ? entries.filter((entry) => getNativeWebSocketKey(entry) === key) : [];
+            if (matches.length === 1) resolve(matches[0]);
+            else reject(new Error('WebSocket message expired'));
+          });
+        } catch (error) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      const updateNativeWebSocket = (entry, key, finished, changed, queued, onLimit) => {
+        if (retiredNativeSockets.get(key) === nativeCaptureCutoff) return;
+        let row = nativeSocketRows.get(key);
+        if (row && !state.activeRows.has(row) && !queued.has(row)) row = null;
+        const recording = streamCapture.enabled && allowWsFullCapture();
+        let frames = null;
+        if (recording) {
+          frames = planNativeWebSocketFrames(entry, row?._nativeWsCursor || 0, row?.id || state.nextId, nativeCaptureCutoff);
+        }
+        const code = entry.response?.status || 0;
+        if (!row) {
+          if (!allowWsFullCapture() || (!frames?.events.length &&
+              (Date.parse(entry.startedDateTime) <= nativeCaptureCutoff || (!finished && !code)))) return;
+          const bytes = 1024 + 2 * entry.request.url.length;
+          if (streamMemoryUsed + bytes > STREAM_CAPTURE_MEMORY_BUDGET) {
+            onLimit();
+            return;
+          }
+          disposeClearUndoSnapshot('live');
+          row = buildRowFromRequest(entry);
+          row._reqObj = null;
+          row._nativeWsKey = key;
+          row._wsSocketId = row.id;
+          row._overviewUnknownDuration = true;
+          if (key.startsWith('nonce:')) row._readWsHarEntry = (isCurrent, frame) => readNativeEntry(key, isCurrent, frame);
+          row.method = 'WS';
+          row.type = 'websocket';
+          row.size = row.requestBodySize = row.responseBodySize = row.responseContentSize = 0;
+          row.requestPostData = { mimeType: 'text/plain', text: '' };
+          publishStreamTranscript(row);
+          reserveStreamMemory(row, bytes);
+          nativeSocketRows.set(key, row);
+          pendingLiveRows.push(row);
+          queued.add(row);
+          changed.add(row);
+        }
+        if (frames) {
+          row._nativeWsCursor = frames.cursor;
+          if (frames.skipped) row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + frames.skipped;
+          const affected = ingestWsEvents(frames.events, {
+            ...streamFrameBudget(onLimit),
+            variant: 'ws',
+            fullFrameGeneration: streamDocumentGeneration,
+            getRow: () => row,
+          });
+          if (affected.length || frames.skipped) changed.add(row);
+        }
+        if (finished) row._nativeWsFinished = true;
+        const failed = (code || row.status) >= 400 || entry.response?._error || entry._error;
+        const status = row._nativeWsFinished ? (failed ? 'Error' : 'Closed') : code ? 'Open' : 'Connecting';
+        if (row.statusText !== status || (code && row.status !== code)) {
+          row.statusText = status;
+          if (code) row.status = code;
+          changed.add(row);
+        }
+        if (finished && Number.isFinite(entry.time) && entry.time >= 0 && row.duration !== entry.time) {
+          row.duration = entry.time;
+          changed.add(row);
+        }
+      };
+      const processNativeWebSockets = (entries, finished, changed = new Set()) => {
+        const queued = new Set(pendingLiveRows);
+        const previousQueueSize = queued.size;
+        let limited = false;
+        for (const [key, entry] of entries) {
+          if (entry) updateNativeWebSocket(entry, key, finished, changed, queued, () => { limited = true; });
+        }
+        publishStreamRows(changed);
+        if (queued.size > previousQueueSize) scheduleLiveRows(false);
+        if (limited) setStatus(uiText('statusStreamMemoryBudget'));
+      };
+      if (nativeWebSockets) {
+        readNativeWebSocketSnapshot = (entries) => {
+          if ((!streamCapture.enabled && !checkNativeNavigation) || !Array.isArray(entries)) return;
+          const sockets = new Map();
+          for (const entry of entries) {
+            const key = getNativeWebSocketKey(entry);
+            if (key) sockets.set(key, sockets.has(key) ? null : entry);
+          }
+          const changed = new Set();
+          if (checkNativeNavigation) {
+            checkNativeNavigation = false;
+            for (const [key, row] of nativeSocketRows) {
+              if (!row._nativeWsFinished && !sockets.has(key) && state.activeRows.has(row)) {
+                row._nativeWsFinished = true;
+                row.statusText = 'Navigated';
+                changed.add(row);
+              }
+            }
+          }
+          processNativeWebSockets(streamCapture.enabled && allowWsFullCapture() ? sockets : [], false, changed);
+        };
+        finishNativeWebSocket = (entry) => {
+          if (!isNativeWebSocketEntry(entry)) return false;
+          // HTTP/2 WebSockets can omit the nonce. Their finish event still
+          // owns all its frames, but there is no safe cross-snapshot identity.
+          const key = getNativeWebSocketKey(entry) || 'finished:' + state.nextId;
+          processNativeWebSockets([[key, entry]], true);
+          return true;
+        };
+      }
       const ingestDrainedStream = (result, variant) => {
         if (!Array.isArray(result) || result.length === 0) return;
         const rowsByVariant = variant === 'sse' ? streamCapture.sseRows : streamCapture.socketRows;
@@ -24635,20 +24874,9 @@ const _NetworkPlus = (function () {
         const createdRows = new Set();
         let memoryLimited = false;
         const changedRows = ingestWsEvents(result, {
+          ...streamFrameBudget(() => { memoryLimited = true; }),
           variant,
           fullFrameGeneration: streamDocumentGeneration,
-          allowMessage: (row, addedBytes) => {
-            if (reserveStreamMemory(row, addedBytes)) return true;
-            memoryLimited = true;
-            return false;
-          },
-          allowTranscript: (row, event, addedLength, hasFrame) => {
-            const frameBytes = hasFrame && (row._wsFrames?.length || 0) < HAR_WS_MESSAGE_IMPORT_LIMIT
-              ? 96 + 2 * (event.binary ? 0 : event.preview.length) : 0;
-            const retained = reserveStreamMemory(row, 2 * addedLength + frameBytes);
-            if (!retained) memoryLimited = true;
-            return retained;
-          },
           createRow: (event) => {
             if (rowsByVariant.has(event.socketId)) return;
             const bytes = 1024 + 2 * (event.url.length + (event.protocols?.length || 0));
@@ -24695,7 +24923,7 @@ const _NetworkPlus = (function () {
       const drainStreamQueues = () => {
         const generation = streamDocumentGeneration;
         const isCurrent = () => streamCapture.enabled && generation === streamDocumentGeneration;
-        inspectedEval(wsDrain, (result, errorInfo) => {
+        if (!nativeWebSockets) inspectedEval(wsDrain, (result, errorInfo) => {
           if (!isCurrent()) return;
           if (errorInfo) {
             streamEvalFailureTicks += 1;
@@ -24715,25 +24943,45 @@ const _NetworkPlus = (function () {
       };
       wsCaptureBtn.addEventListener('click', () => {
         streamCapture.enabled = !streamCapture.enabled;
+        nativeCaptureCutoff = Date.now();
         streamDocumentGeneration += 1;
         streamEvalFailureTicks = 0;
         if (streamCapture.enabled) {
           injectStreamWrappers();
+          if (nativeWebSockets) pollPendingRequests();
           if (!streamCapture.timer) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
-          setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' : 'statusStreamCaptureOn'));
+          setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' :
+            nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'));
         } else {
           if (streamCapture.timer) {
             clearInterval(streamCapture.timer);
             streamCapture.timer = null;
           }
-          inspectedEval('window.__networkPlusWS__ && window.__networkPlusWS__.setEnabled(false)', () => {});
+          if (!nativeWebSockets) inspectedEval('window.__networkPlusWS__ && window.__networkPlusWS__.setEnabled(false)', () => {});
           inspectedEval('window.__networkPlusSSE__ && window.__networkPlusSSE__.setEnabled(false)', () => {});
           setStatus(uiText('statusStreamCaptureOff'));
         }
         updateStreamCaptureButton();
       });
+      reloadWsCapture = () => {
+        if (!wsReloadCaptureAvailable || state.sampleCaptureActive) return false;
+        try {
+          if (!streamCapture.enabled) wsCaptureBtn.click();
+          if (state.paused) $('#pauseBtn').click();
+          if (nativeWebSockets) inspectedPage.reload();
+          else inspectedPage.reload({ injectedScript: buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey) });
+          setStatus(uiText('statusStreamCaptureReload'));
+          return true;
+        } catch (_error) {
+          setStatus(uiText('statusStreamCaptureReloadFailed'), true);
+          return false;
+        }
+      };
       updateStreamCaptureButton();
-      mirrorStreamCaptureState = () => ({ supported: true, enabled: streamCapture.enabled === true });
+      mirrorStreamCaptureState = () => ({
+        supported: true, enabled: streamCapture.enabled === true, native: nativeWebSockets && streamCapture.enabled,
+        reloadSupported: wsReloadCaptureAvailable,
+      });
       if (
         chrome.devtools.network &&
         chrome.devtools.network.onNavigated &&
@@ -24741,7 +24989,8 @@ const _NetworkPlus = (function () {
       ) {
         chrome.devtools.network.onNavigated.addListener(() => {
           // The old document took the wrappers and their connections with it.
-          streamDocumentGeneration += 1;
+          if (nativeWebSockets) checkNativeNavigation = true;
+          else streamDocumentGeneration += 1;
           streamEvalFailureTicks = 0;
           const navigatedRows = [];
           for (const rowsByVariant of [streamCapture.socketRows, streamCapture.sseRows]) {
@@ -25220,6 +25469,8 @@ const _NetworkPlus = (function () {
     WS_FRAME_PREVIEW_CHARS,
     WS_DIRECTION_TEXT_LIMIT_CHARS,
     WS_POLL_INTERVAL_MS,
+    getNativeWebSocketKey,
+    planNativeWebSocketFrames,
     buildWsWrapperSource,
     buildWsFullFrameReadSource,
     buildSseWrapperSource,

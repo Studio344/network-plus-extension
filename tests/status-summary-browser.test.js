@@ -7488,6 +7488,54 @@ browserTest(
 );
 
 browserTest(
+  'native WebSocket snapshots refresh the selected Messages tab without selecting the row again',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: LIVE_CAPTURE_INIT_SCRIPT + `
+        window.__harEntries = [];
+        chrome.devtools.network.getHAR = (callback) => callback({ entries: window.__harEntries });
+        chrome.devtools.inspectedWindow = { eval(_expression, callback) { callback('[]'); } };
+      `,
+    });
+    try {
+      const result = await evaluate(page.cdp, `(async () => {${WAIT_FOR_IN_PAGE}
+        document.querySelector('#wsCaptureBtn').click();
+        const now = Date.now() + 10;
+        const entry = {
+          startedDateTime: new Date(now).toISOString(), time: 0,
+          request: { method: 'GET', url: 'wss://example.test/messages',
+            headers: [{ name: 'Sec-WebSocket-Key', value: 'A'.repeat(22) + '==' }] },
+          response: { status: 101, headers: [], content: {} },
+          _webSocketMessages: [{ type: 'send', opcode: 1, time: now / 1000, data: 'first message' }],
+        };
+        window.__harEntries = [entry];
+        const rows = () => Array.from(document.querySelectorAll('#tbody tr[data-row-id]'));
+        if (!await waitFor(() => rows().length === 1, 3000)) throw new Error('No native WebSocket connection');
+        const id = rows()[0].dataset.rowId;
+        rows()[0].click();
+        const messages = () => Array.from(document.querySelectorAll('.ws-message-list .ws-message-snippet'),
+          (element) => element.textContent);
+        if (!await waitFor(() => messages().includes('first message'), 2000)) throw new Error('No first message');
+        window.__harEntries = [{ ...entry, _webSocketMessages: [...entry._webSocketMessages,
+          { type: 'receive', opcode: 1, time: (now + 20) / 1000, data: 'later reply' }] }];
+        if (!await waitFor(() => messages().includes('later reply'), 3000)) throw new Error('Selected timeline did not refresh');
+        window.__networkPlusLiveListener({ ...window.__harEntries[0], time: 50 });
+        await waitFor(() => rows()[0].querySelector('[data-col-id="status"]').textContent === 'Closed', 2000);
+        return { id, messages: messages(), rows: rows().map((row) => ({
+          id: row.dataset.rowId, status: row.querySelector('[data-col-id="status"]').textContent,
+        })) };
+      })()`, true);
+      expect(result.messages).toEqual(['first message', 'later reply']);
+      expect(result.rows).toEqual([{ id: result.id, status: 'Closed' }]);
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
   'pending requests update the same row and remain consistent across Clear and Undo',
   async () => {
     const page = await launchPanelPage({
