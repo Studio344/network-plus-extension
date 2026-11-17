@@ -13244,7 +13244,7 @@ browserTest(
       // theme's --fg — so the frame's ground below is measured against it and
       // not against a light theme that happened to leak in.
       expect(measured.theme).toBe('dark');
-      expect(measured.paneColor).toBe('rgb(234, 242, 250)');
+      expect(measured.paneColor).toBe('rgb(245, 239, 232)');
       expect(measured.sandbox).toBe('');
       expect(measured.visible).toBe(true);
       expect(measured.sized).toBe(true);

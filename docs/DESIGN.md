@@ -5,9 +5,9 @@ colors:
   accent-light: '#096b9c'
   accent-ink-light: '#075980'
   accent-tint-light: 'rgba(9,105,154,0.12)'
-  accent-dark: '#75c7f0'
-  accent-ink-dark: '#a0dafa'
-  accent-tint-dark: 'rgba(88,181,231,0.14)'
+  accent-dark: '#efbc79'
+  accent-ink-dark: '#f3cc99'
+  accent-tint-dark: 'rgba(239,188,121,0.13)'
   canvas-light: '#f3f6fa'
   surface-light: '#e9eff6'
   content-light: '#ffffff'
@@ -16,14 +16,14 @@ colors:
   border-light: '#d0dce8'
   control-border-light: '#748598'
   separator-light: '#6d8196'
-  canvas-dark: '#111b28'
-  surface-dark: '#1c2b3d'
-  content-dark: '#172433'
-  ink-dark: '#eaf2fa'
-  muted-dark: '#9fb0c2'
-  border-dark: '#34465b'
-  control-border-dark: '#7a8fa6'
-  separator-dark: '#6c829a'
+  canvas-dark: '#121110'
+  surface-dark: '#24211e'
+  content-dark: '#1a1816'
+  ink-dark: '#f5efe8'
+  muted-dark: '#a79b8d'
+  border-dark: '#413a33'
+  control-border-dark: '#8d8276'
+  separator-dark: '#776b5e'
   success: '#059669'
   caution: '#d97706'
   error: '#dc2626'
@@ -136,12 +136,13 @@ already diagnosing a live problem.
 
 ## Colors
 
-Cool neutral layers separate work areas. A blue accent identifies active controls, selection, and keyboard focus.
+Light uses cool neutral surfaces with a blue accent. Dark uses warm charcoal surfaces with amber for active controls, selection, and keyboard focus.
 
 ### Primary
 
-- Focus uses blue (`#096b9c` in Light and `#75c7f0` in Dark).
-- Pressed toggles can use a solid blue fill. Tinted backgrounds with matching text identify lower-emphasis states.
+- Focus uses `#096b9c` in Light and `#efbc79` in Dark.
+- Pressed toggles can use a solid accent fill. Tinted backgrounds with matching text identify lower-emphasis states.
+- The dark toolbar menu and live recording guide share the panel's charcoal and amber. Muted green identifies the saved-capture action.
 
 ### Secondary
 
