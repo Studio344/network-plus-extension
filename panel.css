@@ -254,6 +254,39 @@ input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);ou
 .analysis-chips .analysis-clear{font-weight:650;color:var(--text-accent)}
 .analysis-outside-view{padding:4px 9px;border-bottom:1px solid var(--border);background:var(--accent-dim);color:var(--text-accent);font-size:11px;line-height:1.35}
 .compact-request-host{display:block;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font-size:10px;line-height:1.3}
+.traffic-overview{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:14px;padding:9px 10px;flex:0 0 auto;max-height:min(36vh,260px);overflow:auto;scrollbar-width:thin;background:var(--surface);border-bottom:1px solid var(--separator)}
+.traffic-overview[hidden],.traffic-overview [hidden]{display:none}
+.overview-time,.overview-latency{min-width:0}
+.overview-latency{border-inline-start:1px solid var(--border);padding-inline-start:14px}
+.overview-heading{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:3px 8px;margin-bottom:5px}
+.overview-heading h2{margin:0;font:inherit;font-size:12px;font-weight:700;color:var(--fg)}
+.overview-legend{display:flex;flex-wrap:wrap;gap:8px;color:var(--text-muted);font-size:11px}
+.overview-legend span::before{content:'';display:inline-block;width:7px;height:7px;border-radius:2px;margin-inline-end:4px;background:var(--accent)}
+.overview-legend .overview-legend-errors::before{background:var(--status-5xx-text)}
+.overview-timeline{display:flex;gap:3px;align-items:stretch;min-height:51px;border-bottom:1px solid var(--control-border)}
+.overview-bin{position:relative;isolation:isolate;flex:1 1 0;min-width:0;min-height:51px;padding:0;border:1px solid var(--border);border-radius:4px 4px 0 0;background:var(--bg);cursor:pointer}
+.overview-bar,.overview-bar-error{position:absolute;inset:auto 2px 0;height:var(--overview-bar-height,0%);background:var(--accent);border-radius:2px 2px 0 0;pointer-events:none}
+.overview-bar-error{height:var(--overview-error-height,0%);background:var(--status-5xx-text)}
+.overview-bin:hover,.overview-bin[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-dim)}
+.overview-bin[aria-pressed="true"]{box-shadow:inset 0 0 0 1px var(--accent)}
+.overview-bin--partial{border-color:var(--accent);border-style:dashed}
+.overview-bin:focus-visible,.overview-action:focus-visible{outline:2px solid var(--accent);outline-offset:1px;z-index:1}
+.overview-time-bounds{display:flex;justify-content:space-between;gap:8px;color:var(--text-muted);font-size:10px;font-variant-numeric:tabular-nums}
+.overview-time-bounds span:last-child{text-align:end}
+.overview-muted,.overview-readout{margin:3px 0;color:var(--text-muted);font-size:11px;line-height:1.35;overflow-wrap:anywhere}
+.overview-readout{color:var(--fg);font-variant-numeric:tabular-nums}
+.overview-readout:empty{display:none}
+.overview-action{max-width:100%;margin:3px 3px 0 0;padding:3px 7px;border:1px solid var(--control-border);border-radius:5px;min-height:24px;background:var(--bg);color:var(--text-accent);font:inherit;font-size:11px;text-align:start;overflow-wrap:anywhere;cursor:pointer}
+.overview-action:hover{border-color:var(--accent);background:var(--hover)}
+.overview-peak{color:var(--status-5xx-text)}
+.overview-latency-bands{display:grid;gap:3px}
+.overview-latency-band{display:grid;grid-template-columns:11ch minmax(24px,1fr) 4ch;align-items:center;gap:6px;min-height:13px;color:var(--text-muted);font-size:11px;font-variant-numeric:tabular-nums}
+.overview-latency-band span:first-child{white-space:nowrap}
+.overview-latency-band span:last-child{text-align:end;color:var(--fg)}
+.overview-latency-track{height:5px;border-radius:3px;background:var(--bg);outline:1px solid var(--border)}
+.overview-latency-track::after{content:'';display:block;width:var(--overview-share,0%);height:100%;border-radius:3px;background:var(--accent)}
+.overview-latency-band:last-child .overview-latency-track::after{background:var(--status-5xx-text)}
+@media (max-width:680px){.traffic-overview{grid-template-columns:minmax(0,1fr);gap:7px}.overview-latency{border-inline-start:0;border-top:1px solid var(--border);padding:5px 0 0}}
 @media(max-width:460px){
   .analysis-bar{padding-inline:5px}
   .analysis-actions,.analysis-chips{gap:4px}

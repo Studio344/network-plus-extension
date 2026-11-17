@@ -3694,6 +3694,7 @@ const _NetworkPlus = (function () {
       webSocketOnly: context.webSocketOnly === true,
       requestStatusFacet: context.requestStatusFacet || 'all',
       requestHostFacet: context.requestHostFacet || '',
+      requestTimeFacet: context.requestTimeFacet || null,
       searchKeywords: Array.isArray(context.searchKeywords)
         ? context.searchKeywords.map((keyword) => ({
           query: String((keyword && keyword.query) || ''),
@@ -4238,9 +4239,13 @@ const _NetworkPlus = (function () {
     if (requestBodySize !== null && requestBodySize >= -1) normalizedRequest.bodySize = requestBodySize;
     const bodySize = normalizeImportNumber(response.bodySize, null);
     if (bodySize !== null && bodySize >= -1) normalizedResponse.bodySize = bodySize;
+    const duration = normalizeImportNumber(entry.time, null);
     return {
       startedDateTime: normalizeImportString(entry.startedDateTime),
-      time: Math.max(0, normalizeImportNumber(entry.time, 0)),
+      time: Math.max(0, duration ?? 0),
+      ...(entry._networkPlus?.overviewUnknownStart === true ? { overviewUnknownStart: true } : {}),
+      ...(duration === null || duration < 0 || entry._networkPlus?.overviewUnknownDuration === true
+        ? { overviewUnknownDuration: true } : {}),
       request: normalizedRequest,
       response: normalizedResponse,
       timings,
@@ -5208,6 +5213,76 @@ const _NetworkPlus = (function () {
     return STATUS_CLASS_KEYS.includes(statusClass) ? statusClass : 'other';
   }
 
+  const TRAFFIC_TIMELINE_BINS = 12;
+  const LATENCY_BANDS = [100, 300, 1000, 3000, Infinity];
+
+  function getOverviewStart(row) {
+    const start = row.clientStartEpoch;
+    return row._overviewUnknownStart || !Number.isSafeInteger(start) || start === INVALID_REQUEST_EPOCH ? null : start;
+  }
+
+  function requestStartsInRange(row, range) {
+    if (!range) return true;
+    const start = getOverviewStart(row);
+    return start !== null && start >= range.start && start < range.end;
+  }
+
+  function computeTrafficTimeline(rows) {
+    let first = Infinity;
+    let last = -Infinity;
+    let untimed = 0;
+    for (const row of rows) {
+      const start = getOverviewStart(row);
+      if (start === null) {
+        untimed += 1;
+        continue;
+      }
+      first = Math.min(first, start);
+      last = Math.max(last, start);
+    }
+    const bins = [];
+    if (first === Infinity) return { bins, untimed, peak: null, maxCount: 0 };
+
+    const end = last + 1;
+    const width = Math.max(1, Math.ceil((end - first) / TRAFFIC_TIMELINE_BINS));
+    const count = Math.min(TRAFFIC_TIMELINE_BINS, Math.ceil((end - first) / width));
+    for (let index = 0; index < count; index += 1) {
+      bins.push({ start: first + index * width, end: Math.min(end, first + (index + 1) * width), count: 0, errors: 0 });
+    }
+    let maxCount = 0;
+    for (const row of rows) {
+      const start = getOverviewStart(row);
+      if (start === null) continue;
+      const bin = bins[Math.min(bins.length - 1, Math.floor((start - first) / width))];
+      bin.count += 1;
+      const statusClass = classifyStatusClass(row.status);
+      if (!row._pendingRequest && (statusClass === '4xx' || statusClass === '5xx')) bin.errors += 1;
+      maxCount = Math.max(maxCount, bin.count);
+    }
+    const peak = bins.reduce((best, bin) => bin.errors > (best?.errors || 0) ? bin : best, null);
+    return { bins, untimed, peak, maxCount };
+  }
+
+  function computeLatencyDistribution(rows) {
+    const bands = LATENCY_BANDS.map(() => 0);
+    let measured = 0;
+    let pending = 0;
+    let slowest = null;
+    for (const row of rows) {
+      if (row._pendingRequest) {
+        pending += 1;
+        continue;
+      }
+      if (row._overviewUnknownDuration || isLiveStreamRow(row) || row._mirrorStreamRevision != null ||
+          !Number.isFinite(row.duration) || row.duration < 0) continue;
+      const index = LATENCY_BANDS.findIndex((limit) => row.duration < limit);
+      bands[index] += 1;
+      measured += 1;
+      if (!slowest || row.duration > slowest.duration) slowest = row;
+    }
+    return { bands, measured, slowest, pending, unmeasured: rows.length - measured - pending };
+  }
+
   function getStatusClassIndicators(statusClassCounts) {
     const counts =
       statusClassCounts && typeof statusClassCounts === 'object' ? statusClassCounts : {};
@@ -5389,6 +5464,7 @@ const _NetworkPlus = (function () {
     webSocketOnly: false,
     requestStatusFacet: 'all',
     requestHostFacet: '',
+    requestTimeFacet: null,
     requestScopeRows: null,
     pendingLiveRows: [],
     liveRowsAwaitingRender: [],
@@ -5417,6 +5493,7 @@ const _NetworkPlus = (function () {
     onResponseContentChanged: null,
     syncSearchUI: null,
     syncDomainSummary: null,
+    syncTrafficOverview: null,
     domainSummaryVisible: false,
     automaticResponsePrefetchScheduler: null,
     columnFilterRules: DEFAULT_COLUMN_FILTER_RULES(),
@@ -6171,6 +6248,7 @@ const _NetworkPlus = (function () {
         webSocketOnly: state.webSocketOnly,
         requestStatusFacet: state.requestStatusFacet,
         requestHostFacet: state.requestHostFacet,
+        requestTimeFacet: state.requestTimeFacet,
         searchKeywords: state.search.keywords.map((keyword) => ({
           query: String(keyword.query || ''),
           colorIdx: Number.isInteger(keyword.colorIdx) ? keyword.colorIdx : 0,
@@ -6456,6 +6534,98 @@ const _NetworkPlus = (function () {
   // Every entry carries both languages; the English text doubles as the
   // authored fallback in panel.html, so the two must stay in sync.
   const UI_TEXT = {
+    overviewToggle: {
+      en: 'Timeline',
+      ja: 'タイムライン',
+    },
+    overviewAria: {
+      en: 'Traffic overview',
+      ja: '通信の全体像',
+    },
+    overviewStarts: {
+      en: 'Request starts (UTC)',
+      ja: 'リクエスト開始時刻（UTC）',
+    },
+    overviewRequests: {
+      en: 'Requests',
+      ja: '通信件数',
+    },
+    overviewErrors: {
+      en: 'HTTP 4xx/5xx',
+      ja: 'HTTP 4xx・5xx',
+    },
+    overviewNoStarts: {
+      en: 'No recorded start times in this scope.',
+      ja: 'この範囲に、開始時刻が記録された通信はありません。',
+    },
+    overviewBinGroup: {
+      en: 'Request starts by time window',
+      ja: '時間帯ごとのリクエスト開始件数',
+    },
+    overviewInstructions: {
+      en: 'Choose a bar. Shift+click or Shift+arrow keys selects a span.',
+      ja: '棒を選択。Shift＋クリックまたはShift＋矢印キーで範囲を指定できます。',
+    },
+    overviewSearchScope: {
+      en: 'Timeline counts are before text search.',
+      ja: '時系列の件数は本文・キーワード検索前の集計です。',
+    },
+    overviewLatency: {
+      en: 'Latency of displayed requests',
+      ja: '表示中の通信の遅延分布',
+    },
+    overviewClearTime: {
+      en: 'Clear time range',
+      ja: '時間帯の絞り込みを解除',
+    },
+    overviewRangeFilter: {
+      en: 'Start time {range}',
+      ja: '開始時刻 {range}',
+    },
+    overviewRangeApplied: {
+      en: 'Filtered by start time {range}',
+      ja: '開始時刻 {range} で絞り込みました。',
+    },
+    overviewTimeCleared: {
+      en: 'Time range cleared.',
+      ja: '時間帯の絞り込みを解除しました。',
+    },
+    overviewSelected: {
+      en: 'Selected range {range}',
+      ja: '選択中 {range}',
+    },
+    overviewBinLabel: {
+      en: '{range} · {count} requests · {errors} HTTP errors',
+      ja: '{range}、通信 {count} 件、HTTPエラー {errors} 件',
+    },
+    overviewPartialBin: {
+      en: 'Partly in selected range',
+      ja: '選択範囲と一部重複',
+    },
+    overviewMissingStarts: {
+      en: '{count} requests have no recorded start time.',
+      ja: '開始時刻の記録がない通信 {count} 件は集計対象外です。',
+    },
+    overviewPeak: {
+      en: 'Most HTTP errors · {count}',
+      ja: 'HTTPエラー最多 · {count}件',
+    },
+    overviewSlowest: {
+      en: 'Open slowest request · {duration}',
+      ja: '最も遅い通信を開く · {duration}',
+    },
+    overviewMeasured: {
+      en: '{count} measured',
+      ja: '計測 {count}件',
+    },
+    overviewNoLatency: {
+      en: 'No recorded durations for the displayed requests.',
+      ja: '表示中の通信に計測時間がありません。',
+    },
+    overviewLatencyExcluded: {
+      en: 'Excluded from latency · {pending} pending, {unknown} without a duration',
+      ja: '遅延の集計外 · 応答待ち {pending}件、計測時間なし {unknown}件',
+    },
     analysisAria: {
       en: 'Request filters and actions',
       ja: 'リクエストの絞り込みと操作',
@@ -9406,6 +9576,7 @@ const _NetworkPlus = (function () {
     if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();
     if (state.syncDomainSummary) state.syncDomainSummary();
     renderAnalysisBar();
+    state.syncTrafficOverview?.();
     setStatus(uiTextFormat('statusLanguageApplied', { language: normalized }));
   }
 
@@ -9931,9 +10102,7 @@ const _NetworkPlus = (function () {
       return true;
     });
     state.requestScopeRows = hasRequestFacets() ? scopeRows : null;
-    state.filteredRows = state.requestScopeRows
-      ? scopeRows.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row))
-      : scopeRows;
+    state.filteredRows = state.requestScopeRows ? scopeRows.filter(matchesRequestFacets) : scopeRows;
   }
 
   function classifyRequestFacet(row) {
@@ -9943,7 +10112,8 @@ const _NetworkPlus = (function () {
   }
 
   function hasRequestFacets() {
-    return !state.sampleCaptureActive && (state.requestStatusFacet !== 'all' || state.requestHostFacet !== '');
+    return !state.sampleCaptureActive &&
+      (state.requestStatusFacet !== 'all' || state.requestHostFacet !== '' || !!state.requestTimeFacet);
   }
 
   function matchesRequestHostFacet(row) {
@@ -9954,9 +10124,14 @@ const _NetworkPlus = (function () {
     return state.requestStatusFacet === 'all' || classifyRequestFacet(row) === state.requestStatusFacet;
   }
 
+  function matchesRequestFacets(row) {
+    return matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) && requestStartsInRange(row, state.requestTimeFacet);
+  }
+
   function repaintRequestScope() {
     renderBody();
     syncSearchUIAfterRender();
+    state.syncTrafficOverview?.(true);
   }
 
   function clearColumnFilters() {
@@ -9964,6 +10139,7 @@ const _NetworkPlus = (function () {
       state.webSocketOnly = false;
       state.requestStatusFacet = 'all';
       state.requestHostFacet = '';
+      state.requestTimeFacet = null;
     }
     state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
     renderBody();
@@ -10200,6 +10376,9 @@ const _NetworkPlus = (function () {
       clientStartEpoch,
       serverDoneEpoch,
       duration: durationMs,
+      ...(req.overviewUnknownStart === true ? { _overviewUnknownStart: true } : {}),
+      ...(req.overviewUnknownDuration === true || !Number.isFinite(req.time) || req.time < 0
+        ? { _overviewUnknownDuration: true } : {}),
       startedDateTime: isoStr,
       requestHeaders: (req && req.request && req.request.headers) || [],
       responseHeaders: (req && req.response && req.response.headers) || [],
@@ -10273,6 +10452,8 @@ const _NetworkPlus = (function () {
     return {
       id: row.id,
       ...(row._pendingRequest ? { pending: true } : {}),
+      ...(row._overviewUnknownStart ? { overviewUnknownStart: true } : {}),
+      ...(row._overviewUnknownDuration ? { overviewUnknownDuration: true } : {}),
       ...(isLiveStreamRow(row) ? { streamRevision: row._streamRevision || 0 } : {}),
       ...(row.method === 'WS' || row._wsFrames?.length > 0 ? { webSocket: true } : {}),
       startedDateTime: row.startedDateTime,
@@ -10307,6 +10488,8 @@ const _NetworkPlus = (function () {
     return {
       startedDateTime: typeof wire.startedDateTime === 'string' ? wire.startedDateTime : '',
       time: Number.isFinite(wire.time) ? wire.time : 0,
+      ...(wire.overviewUnknownStart === true ? { overviewUnknownStart: true } : {}),
+      ...(wire.overviewUnknownDuration === true || !Number.isFinite(wire.time) ? { overviewUnknownDuration: true } : {}),
       request: {
         method: request.method,
         url: request.url,
@@ -13891,7 +14074,8 @@ const _NetworkPlus = (function () {
         if (c.id === 'customHeader') v = getRowHeaderColumnValue(row);
         if (c.id === 'size') v = fmtBytes(row.size);
         else if (c.id === 'duration') {
-          v = fmtTime(row.duration);
+          v = row._overviewUnknownDuration && !isLiveStreamRow(row) && row._mirrorStreamRevision == null
+            ? '—' : fmtTime(row.duration);
           td.classList.add('duration-cell');
           // Color duration: green (<100ms), yellow (<500ms), orange (<2s), red (>2s)
           if (row.duration > 2000) td.classList.add('dur-slow');
@@ -16042,7 +16226,8 @@ const _NetworkPlus = (function () {
       tableWrap.appendChild(emptyState);
     }
     const hasQuickFilter = state.webSocketOnly || hasRequestFacets();
-    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter;
+    const hasTimeFilter = !state.sampleCaptureActive && !!state.requestTimeFacet;
+    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter + ':' + hasTimeFilter;
     if (emptyState.dataset.renderKey !== renderKey) {
       emptyState.textContent = '';
       emptyState.dataset.renderKey = renderKey;
@@ -16085,7 +16270,12 @@ const _NetworkPlus = (function () {
         action.className = 'empty-state-action';
         action.textContent = uiText(hasQuickFilter ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');
         action.setAttribute('aria-describedby', description.id);
-        action.addEventListener('click', clearRequestAnalysisFilters);
+        if (hasTimeFilter) {
+          action.textContent = uiText('overviewClearTime');
+          action.addEventListener('click', () => applyOverviewRange(null));
+        } else {
+          action.addEventListener('click', clearRequestAnalysisFilters);
+        }
         emptyState.appendChild(action);
       }
       if (mode === 'capture' && !getMirrorViewParams(window.location ? window.location.search : '').viewerMode) {
@@ -16197,6 +16387,248 @@ const _NetworkPlus = (function () {
     return describeCondition(rule);
   }
 
+  function formatOverviewEpoch(epoch) {
+    return new Date(Math.min(epoch, 8640000000000000)).toISOString().replace('T', ' ');
+  }
+
+  function formatOverviewRange(range) {
+    const start = formatOverviewEpoch(range.start);
+    const end = formatOverviewEpoch(range.end);
+    return start + ' – ' + (start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end);
+  }
+
+  function applyOverviewRange(range) {
+    state.requestTimeFacet = range ? { start: range.start, end: range.end } : null;
+    repaintRequestScope();
+    setStatus(range ? uiTextFormat('overviewRangeApplied', { range: formatOverviewRange(range) }) : uiText('overviewTimeCleared'));
+  }
+
+  function initializeTrafficOverview() {
+    const toggle = $('#overviewToggleBtn');
+    const panel = $('#trafficOverview');
+    const timeline = $('#overviewTimeline');
+    const timeBounds = $('#overviewTimeBounds');
+    const instructions = $('#overviewInstructions');
+    const readout = $('#overviewTimeReadout');
+    const missingStarts = $('#overviewTimeOmissions');
+    const peakButton = $('#overviewPeakBtn');
+    const clearButton = $('#overviewClearTime');
+    const latency = $('#overviewLatency');
+    const measured = $('#overviewLatencyCount');
+    const latencyOmissions = $('#overviewLatencyOmissions');
+    const slowestButton = $('#overviewSlowestBtn');
+    let expanded = false;
+    let timer = null;
+    let activeIndex = 0;
+    let anchor = null;
+    let chart = null;
+    let distribution = null;
+
+    const bins = Array.from({ length: TRAFFIC_TIMELINE_BINS }, (_, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'overview-bin';
+      button.dataset.overviewBin = index;
+      button.hidden = true;
+      button.tabIndex = -1;
+      for (const className of ['overview-bar', 'overview-bar-error']) {
+        const fill = document.createElement('span');
+        fill.className = className;
+        fill.setAttribute('aria-hidden', 'true');
+        button.appendChild(fill);
+      }
+      timeline.appendChild(button);
+      return button;
+    });
+    const latencyBands = ['<100 ms', '100–300 ms', '300 ms–1 s', '1–3 s', '≥3 s'].map((label, index) => {
+      const band = document.createElement('div');
+      band.className = 'overview-latency-band';
+      band.dataset.latencyBand = index;
+      const title = document.createElement('span');
+      title.textContent = label;
+      const bar = document.createElement('span');
+      bar.className = 'overview-latency-track';
+      bar.setAttribute('aria-hidden', 'true');
+      const count = document.createElement('span');
+      band.append(title, bar, count);
+      latency.appendChild(band);
+      return { band, count };
+    });
+
+    const showRangeReadout = () => {
+      const range = state.requestTimeFacet;
+      readout.textContent = range ? uiTextFormat('overviewSelected', { range: formatOverviewRange(range) }) : '';
+    };
+
+    const paint = () => {
+      timer = null;
+      toggle.disabled = state.sampleCaptureActive;
+      panel.hidden = !expanded || toggle.disabled || state.rows.length === 0;
+      toggle.setAttribute('aria-expanded', String(!panel.hidden));
+      if (panel.hidden) return;
+
+      const focusedControl = document.activeElement;
+      const focusedBin = timeline.contains(focusedControl) ? focusedControl : null;
+      const focusedStart = focusedBin ? Number(focusedBin.dataset.start) : NaN;
+      const preTimeRows = state.requestTimeFacet
+        ? state.requestScopeRows.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row))
+        : state.filteredRows;
+      chart = computeTrafficTimeline(preTimeRows);
+      distribution = computeLatencyDistribution(getVisibleRows());
+      const range = state.requestTimeFacet;
+      if (!range) anchor = null;
+
+      const hasTimes = chart.bins.length > 0;
+      const focusIndex = chart.bins.findIndex((bin) => focusedStart >= bin.start && focusedStart < bin.end);
+      activeIndex = focusIndex >= 0 ? focusIndex : Math.max(0, Math.min(activeIndex, chart.bins.length - 1));
+      timeline.hidden = timeBounds.hidden = instructions.hidden = !hasTimes;
+      $('#overviewTimeEmpty').hidden = hasTimes;
+      instructions.textContent = uiText('overviewInstructions') +
+        (state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options)
+          ? ' ' + uiText('overviewSearchScope') : '');
+      for (let index = 0; index < bins.length; index += 1) {
+        const button = bins[index];
+        const bin = chart.bins[index];
+        button.hidden = !bin;
+        button.tabIndex = bin && index === activeIndex ? 0 : -1;
+        if (!bin) continue;
+        button.dataset.start = bin.start;
+        button.dataset.end = bin.end;
+        const selected = !!range && bin.start >= range.start && bin.end <= range.end;
+        const partial = !!range && !selected && bin.start < range.end && range.start < bin.end;
+        button.title = uiTextFormat('overviewBinLabel', {
+          range: formatOverviewRange(bin), count: bin.count, errors: bin.errors,
+        }) + (partial ? ' · ' + uiText('overviewPartialBin') : '');
+        button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-pressed', String(selected));
+        button.classList.toggle('overview-bin--partial', partial);
+        button.style.setProperty('--overview-bar-height', (bin.count / chart.maxCount * 100) + '%');
+        button.style.setProperty('--overview-error-height', (bin.errors / chart.maxCount * 100) + '%');
+      }
+      if (hasTimes) {
+        timeBounds.firstElementChild.textContent = formatOverviewEpoch(chart.bins[0].start);
+        timeBounds.lastElementChild.textContent = formatOverviewEpoch(chart.bins[chart.bins.length - 1].end);
+      }
+      const currentBin = focusedBin && hasTimes ? bins[activeIndex] : null;
+      if (focusedBin && focusedBin !== currentBin) (currentBin || toggle).focus({ preventScroll: true });
+      if (currentBin) readout.textContent = currentBin.title;
+      else showRangeReadout();
+      missingStarts.hidden = chart.untimed === 0;
+      if (chart.untimed) missingStarts.textContent = uiTextFormat('overviewMissingStarts', { count: chart.untimed });
+      peakButton.hidden = !chart.peak;
+      if (chart.peak) {
+        peakButton.textContent = uiTextFormat('overviewPeak', { count: chart.peak.errors });
+        peakButton.title = formatOverviewRange(chart.peak);
+        peakButton.setAttribute('aria-label', peakButton.textContent + ' · ' + peakButton.title);
+      }
+      clearButton.hidden = !range;
+
+      measured.textContent = uiTextFormat('overviewMeasured', { count: distribution.measured });
+      latency.hidden = distribution.measured === 0;
+      $('#overviewLatencyEmpty').hidden = !latency.hidden;
+      for (let index = 0; index < latencyBands.length; index += 1) {
+        const { band, count } = latencyBands[index];
+        const value = distribution.bands[index];
+        count.textContent = value;
+        band.dataset.count = value;
+        band.style.setProperty('--overview-share', distribution.measured ? (value / distribution.measured * 100) + '%' : '0%');
+      }
+      latencyOmissions.hidden = distribution.pending === 0 && distribution.unmeasured === 0;
+      if (!latencyOmissions.hidden) latencyOmissions.textContent = uiTextFormat('overviewLatencyExcluded', {
+        pending: distribution.pending, unknown: distribution.unmeasured,
+      });
+      slowestButton.hidden = !distribution.slowest;
+      if (distribution.slowest) slowestButton.textContent = uiTextFormat('overviewSlowest', {
+        duration: formatTimingDuration(distribution.slowest.duration),
+      });
+      if ([clearButton, peakButton, slowestButton].includes(focusedControl) && focusedControl.hidden) {
+        (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
+      }
+    };
+
+    const repaint = () => {
+      if (timer !== null) clearTimeout(timer);
+      paint();
+    };
+    const selectBin = (bin, extend) => {
+      if (!extend || !anchor) anchor = { start: bin.start, end: bin.end };
+      applyOverviewRange({ start: Math.min(bin.start, anchor.start), end: Math.max(bin.end, anchor.end) });
+    };
+    toggle.addEventListener('click', () => {
+      expanded = !expanded;
+      repaint();
+    });
+    panel.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      expanded = false;
+      repaint();
+      toggle.focus();
+    });
+    timeline.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-overview-bin]');
+      if (!button || button.hidden) return;
+      const index = Number(button.dataset.overviewBin);
+      bins[activeIndex].tabIndex = -1;
+      activeIndex = index;
+      button.tabIndex = 0;
+      selectBin(chart.bins[index], event.shiftKey);
+    });
+    timeline.addEventListener('keydown', (event) => {
+      const button = event.target.closest('[data-overview-bin]');
+      if (!button || !chart.bins.length) return;
+      const current = Number(button.dataset.overviewBin);
+      const last = chart.bins.length - 1;
+      const destinations = { ArrowLeft: Math.max(0, current - 1), ArrowRight: Math.min(last, current + 1), Home: 0, End: last };
+      if (!Object.hasOwn(destinations, event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      activeIndex = destinations[event.key];
+      button.tabIndex = -1;
+      bins[activeIndex].tabIndex = 0;
+      bins[activeIndex].focus();
+      if (event.shiftKey) {
+        if (!anchor) anchor = chart.bins[current];
+        selectBin(chart.bins[activeIndex], true);
+      }
+    });
+    const readBin = (event) => {
+      const button = event.target.closest('[data-overview-bin]');
+      if (button) readout.textContent = button.title;
+    };
+    timeline.addEventListener('focusin', readBin);
+    timeline.addEventListener('pointerover', readBin);
+    timeline.addEventListener('focusout', showRangeReadout);
+    timeline.addEventListener('pointerleave', showRangeReadout);
+    clearButton.addEventListener('click', () => {
+      applyOverviewRange(null);
+      (bins[activeIndex].hidden ? toggle : bins[activeIndex]).focus({ preventScroll: true });
+    });
+    peakButton.addEventListener('click', () => {
+      repaint();
+      if (chart?.peak) selectBin(chart.peak, false);
+    });
+    slowestButton.addEventListener('click', () => {
+      repaint();
+      const row = distribution?.slowest;
+      if (!row || !getVisibleRows().includes(row)) return;
+      selectRow(row, null, true);
+      scrollToSelectedRow();
+    });
+
+    return (immediate = false) => {
+      toggle.disabled = state.sampleCaptureActive;
+      if (!expanded) return;
+      if (immediate) {
+        repaint();
+        return;
+      }
+      if (timer !== null) return;
+      timer = setTimeout(paint, 120);
+    };
+  }
+
   function renderAnalysisBar() {
     const bar = $('#analysisBar');
     if (!bar) return;
@@ -16207,7 +16639,7 @@ const _NetworkPlus = (function () {
     const hasSearchRestriction = state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options);
     const counts = { all: 0, '4xx': 0, '5xx': 0, pending: 0 };
     for (const row of state.requestScopeRows || state.filteredRows) {
-      if (!hasSample && !matchesRequestHostFacet(row)) continue;
+      if (!hasSample && (!matchesRequestHostFacet(row) || !requestStartsInRange(row, state.requestTimeFacet))) continue;
       counts.all += 1;
       const facet = classifyRequestFacet(row);
       if (facet !== 'all') counts[facet] += 1;
@@ -16229,6 +16661,11 @@ const _NetworkPlus = (function () {
     outsideView.hidden = !state.selectedRow || !!state.comparedRows || isVisible(state.selectedRow);
 
     const filters = [];
+    if (!hasSample && state.requestTimeFacet) {
+      filters.push(['time', uiTextFormat('overviewRangeFilter', { range: formatOverviewRange(state.requestTimeFacet) }), () => {
+        applyOverviewRange(null);
+      }]);
+    }
     if (!hasSample && state.requestHostFacet) {
       filters.push(['host', uiTextFormat('analysisHost', { host: state.requestHostFacet }), () => {
         state.requestHostFacet = '';
@@ -16294,7 +16731,10 @@ const _NetworkPlus = (function () {
       chips.appendChild(clear);
       controls.set('clear', clear);
     }
-    if (focused) (controls.get(previousKey) || $('#filterBtn')).focus({ preventScroll: true });
+    if (focused) {
+      const fallback = previousKey === 'time' ? $('#overviewToggleBtn') : $('#filterBtn');
+      (controls.get(previousKey) || fallback).focus({ preventScroll: true });
+    }
   }
 
   function updateTableSummary(visibleRowCount, visibleBytes) {
@@ -16381,6 +16821,7 @@ const _NetworkPlus = (function () {
     // summary panel refreshes without touching the incremental fast path.
     if (state.syncDomainSummary) state.syncDomainSummary();
     renderAnalysisBar();
+    state.syncTrafficOverview?.();
   }
 
   function appendIncrementalRows(liveRows) {
@@ -16424,7 +16865,7 @@ const _NetworkPlus = (function () {
         state.requestScopeRows.push(row);
         scopeSet.add(row);
       }
-      rowsToAppend = scopeBatch.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row));
+      rowsToAppend = scopeBatch.filter(matchesRequestFacets);
     }
     refreshSearchMatches();
     if (rowsToAppend.length === 0) {
@@ -19523,7 +19964,8 @@ const _NetworkPlus = (function () {
     const entries = [];
     for (const r of rows) {
       if (streamEntries?.has(r)) {
-        entries.push(streamEntries.get(r));
+        const stream = streamEntries.get(r);
+        entries.push({ ...stream, _networkPlus: { ...stream._networkPlus, overviewUnknownDuration: true } });
         continue;
       }
       const started = r.startedDateTime || new Date().toISOString();
@@ -19589,6 +20031,14 @@ const _NetworkPlus = (function () {
             binaryFramesWithoutPayload: webSocket.binaryFramesWithoutPayload,
             textPreviewLimit: WS_FRAME_PREVIEW_CHARS,
           },
+        };
+      }
+      const overviewUnknownStart = r._overviewUnknownStart || !r.startedDateTime;
+      if (overviewUnknownStart || r._overviewUnknownDuration || r._pendingRequest) {
+        entry._networkPlus = {
+          ...entry._networkPlus,
+          ...(overviewUnknownStart ? { overviewUnknownStart: true } : {}),
+          ...(r._overviewUnknownDuration || r._pendingRequest ? { overviewUnknownDuration: true } : {}),
         };
       }
       entries.push(entry);
@@ -19664,7 +20114,7 @@ const _NetworkPlus = (function () {
       responseContentReason: STREAM_HAR_UNAVAILABLE_REASON,
     };
     const entry = buildHarLogFromRows([snapshot]).log.entries[0];
-    entry._networkPlus = { streamHarExport: { snapshotUnavailable: true } };
+    entry._networkPlus = { ...entry._networkPlus, streamHarExport: { snapshotUnavailable: true } };
     if (row.method === 'WS') entry._networkPlus.webSocketExport = { mirrorFramesUnavailable: true };
     return entry;
   }
@@ -20055,6 +20505,7 @@ const _NetworkPlus = (function () {
       state.webSocketOnly = restorePlan.webSocketOnly;
       state.requestStatusFacet = restorePlan.requestStatusFacet;
       state.requestHostFacet = restorePlan.requestHostFacet;
+      state.requestTimeFacet = restorePlan.requestTimeFacet;
       state.sort = restorePlan.sort;
       state.paused = restorePlan.paused;
       state.autoScroll = restorePlan.autoScroll;
@@ -20136,6 +20587,7 @@ const _NetworkPlus = (function () {
       state.webSocketOnly = false;
       state.requestStatusFacet = 'all';
       state.requestHostFacet = '';
+      state.requestTimeFacet = null;
       state.selectedRow = null;
       state.focusedRow = null;
       state.pendingRowFocusId = null;
@@ -20882,8 +21334,9 @@ const _NetworkPlus = (function () {
         return;
       }
       const scopeRows = state.requestScopeRows || state.filteredRows;
-      const summary = computeDomainSummary(state.requestStatusFacet === 'all' || state.sampleCaptureActive
-        ? scopeRows : scopeRows.filter(matchesRequestStatusFacet));
+      const hasScope = !state.sampleCaptureActive && (state.requestStatusFacet !== 'all' || state.requestTimeFacet);
+      const summary = computeDomainSummary(hasScope
+        ? scopeRows.filter((row) => matchesRequestStatusFacet(row) && requestStartsInRange(row, state.requestTimeFacet)) : scopeRows);
       const activeHost = state.sampleCaptureActive ? '' : state.requestHostFacet;
       // The signature includes the pressed state: clicking a domain that
       // already spans every filtered row changes no aggregate but must still
@@ -20965,6 +21418,7 @@ const _NetworkPlus = (function () {
     };
     state.syncDomainSummary = renderDomainSummary;
     renderDomainSummary();
+    state.syncTrafficOverview = initializeTrafficOverview();
 
     // [U6] Roving row focus, selection, copy, and context actions
     const tableWrap = $('#tableWrap');
@@ -22520,7 +22974,7 @@ const _NetworkPlus = (function () {
             extractedEntries.get(`raw/${id}_s.txt`),
             startedDateTime,
           );
-          rows.push(buildRowFromRequest(entry, 0));
+          rows.push(buildRowFromRequest({ ...entry, overviewUnknownStart: true, overviewUnknownDuration: true }, 0));
         }
         return {
           format: 'SAZ',
@@ -22541,6 +22995,7 @@ const _NetworkPlus = (function () {
         updateRecordState();
         resetPendingLiveRows();
         clearStoredRows();
+        state.requestTimeFacet = null;
         state.selectedRow = null;
         state.focusedRow = null;
         state.selectedRows.clear();
@@ -23113,6 +23568,7 @@ const _NetworkPlus = (function () {
       const applyWireSnapshot = (wireRows, options) => {
         commitPendingLiveRows();
         state.liveRowsAwaitingRender.splice(0, state.liveRowsAwaitingRender.length);
+        if (options?.sessionChanged) state.requestTimeFacet = null;
         if (options && options.sessionChanged && state.rows.length > 0) {
           // A new DevTools session restarts row ids at 1. Matching its rows
           // by id against the old session's would alias stale evidence onto
@@ -23332,6 +23788,10 @@ const _NetworkPlus = (function () {
         setStatus(uiTextFormat('statusSendingImportToDevtools', { file: file.name }));
         const reportImportResult = (error) => {
           setViewerImportBusy(false);
+          if (!error && state.requestTimeFacet) {
+            state.requestTimeFacet = null;
+            repaintRequestScope();
+          }
           setStatus(error ? formatImportFailure(error.message) : uiText('statusImportFinished'));
         };
         if (getImportFormat(file.name) === 'har' && file.size > MAX_SAZ_SOURCE_BYTES) {
@@ -23836,6 +24296,7 @@ const _NetworkPlus = (function () {
         row.status = '';
         row.initiator = isSse ? { text: 'EventSource', typeLabel: 'SSE' } : { text: 'WebSocket', typeLabel: 'WS' };
         row._wsSocketId = event.socketId;
+        row._overviewUnknownDuration = true;
         if (!isSse) row._readWsFullFrame = (frame, offset, timeout) => readFullFrame(row, frame, offset, timeout);
         (isSse ? streamCapture.sseRows : streamCapture.socketRows).set(event.socketId, row);
         pendingLiveRows.push(row);
@@ -24414,6 +24875,9 @@ const _NetworkPlus = (function () {
     updateTableSummary,
     planRequestCountSummary,
     computeStats,
+    computeTrafficTimeline,
+    computeLatencyDistribution,
+    requestStartsInRange,
     computeDomainSummary,
     DOMAIN_SUMMARY_KEY,
     loadDomainSummaryPref,

@@ -10,6 +10,51 @@ const np = require('../panel.js');
 
 const PANEL_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
 
+describe('traffic overview', () => {
+  test('groups absolute starts over midnight and keeps adjacent intervals half-open', () => {
+    const base = Date.UTC(2026, 10, 17, 23, 59, 59, 994);
+    const rows = [
+      { clientStartEpoch: base, status: 404 },
+      { clientStartEpoch: base + 6, status: 503 },
+      { clientStartEpoch: base + 6, status: 429 },
+      { clientStartEpoch: base + 11, status: 200 },
+      { clientStartEpoch: base + 6, status: 500, _pendingRequest: true },
+      { clientStartEpoch: base + 3, status: 500, _overviewUnknownStart: true },
+      { clientStartEpoch: Number.MAX_SAFE_INTEGER, status: 500 },
+    ];
+    const model = np.computeTrafficTimeline(rows);
+    expect(model.bins).toHaveLength(12);
+    expect(model.bins.map((bin) => bin.count)).toEqual([1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1]);
+    expect(model).toMatchObject({ untimed: 2, maxCount: 3, peak: { start: base + 6, end: base + 7, errors: 2 } });
+    expect(rows.filter((row) => np.requestStartsInRange(row, { start: base, end: base + 6 }))).toEqual([rows[0]]);
+    expect(rows.filter((row) => np.requestStartsInRange(row, { start: base + 6, end: base + 12 }))).toEqual([
+      rows[1], rows[2], rows[3], rows[4],
+    ]);
+    expect(np.computeTrafficTimeline([{ clientStartEpoch: 0 }]).bins).toEqual([{ start: 0, end: 1, count: 1, errors: 0 }]);
+  });
+
+  test('keeps measured zero and band boundaries, and excludes pending and unknown durations', () => {
+    const rows = [0, 99, 100, 299, 300, 999, 1000, 2999, 3000].map((duration) => ({ duration }));
+    const model = np.computeLatencyDistribution(rows.concat([
+      { duration: 0, _pendingRequest: true },
+      { duration: 0, _overviewUnknownDuration: true },
+      { duration: -1 },
+      { duration: 0, _mirrorStreamRevision: 1 },
+    ]));
+    expect(model).toEqual({ bands: [2, 2, 2, 2, 1], measured: 9, slowest: rows[8], pending: 1, unmeasured: 3 });
+  });
+
+  test('keeps timing provenance across normalized HAR and pop-out rows', () => {
+    const source = { startedDateTime: '2026-11-17T23:59:59Z', request: { url: 'https://example.test' }, response: { status: 200 } };
+    const measured = np.buildRowFromRequest(np.normalizeHarEntry({ ...source, time: 0 }), 1);
+    const unknown = np.buildRowFromRequest(np.normalizeHarEntry({ ...source, _networkPlus: { overviewUnknownStart: true } }), 2);
+    expect(np.computeLatencyDistribution([measured, unknown])).toMatchObject({ measured: 1, unmeasured: 1 });
+    expect(np.serializeRowForMirror(unknown)).toMatchObject({ overviewUnknownStart: true, overviewUnknownDuration: true });
+    const wire = np.serializeRowForMirror(unknown);
+    expect(np.buildMirrorEntryFromWire(wire)).toMatchObject({ overviewUnknownStart: true, overviewUnknownDuration: true });
+  });
+});
+
 describe('capture rendering after a hidden document becomes visible', () => {
   let originalWindow;
   let originalDocument;
