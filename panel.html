@@ -99,7 +99,15 @@
       <div id="detailsSummary" class="details-summary" hidden></div>
       <div id="comparePanel" class="compare-panel" hidden aria-label="Request comparison" data-i18n-aria-label="ariaComparePanel" aria-hidden="true"></div>
       <p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open</p>
-      <div class="inspector-panels">
+      <div class="tab-bar ws-detail-tabs" id="ws-detail-tabs" role="tablist" aria-label="WebSocket connection" data-i18n-aria-label="wsConnectionTabs" hidden>
+        <button id="ws-tab-messages" class="tab-btn active" type="button" role="tab" aria-selected="true" aria-controls="ws-messages-panel" data-i18n="wsMessagesTab">Messages</button>
+        <button id="ws-tab-details" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="ws-details-panel" tabindex="-1" data-i18n="wsDetailsTab">Details</button>
+      </div>
+      <section id="ws-messages-panel" class="ws-messages-panel" role="tabpanel" aria-labelledby="ws-tab-messages" tabindex="0" hidden>
+        <p id="ws-messages-status" class="ws-messages-status" role="status" hidden></p>
+        <ol class="ws-message-list"></ol>
+      </section>
+      <div class="inspector-panels" id="ws-details-panel">
         <div class="inspector-half" id="inspector-request">
           <button id="inspector-request-toggle" class="inspector-label" type="button" aria-expanded="true" aria-controls="inspector-request-content" title="Collapse the Request inspector to its tabs" aria-label="Request" data-i18n-aria-label="ariaInspectorRequestToggle">Request</button>
           <div class="tab-bar" id="req-tab-bar" role="tablist" aria-label="Request details" data-i18n-aria-label="ariaRequestTabs">

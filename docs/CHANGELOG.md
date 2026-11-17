@@ -4,7 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- No changes have been recorded since v1.18.0.
+- ✨ **WebSocket Messages** — Read recent sent and received messages in order, expand long payloads individually, and view formatted JSON.
 
 ## v1.18.0 - 2026-11-17
 

@@ -426,7 +426,10 @@ browserTest(
       })()`)).toBe('accepted');
       const opened = await wait(viewer, `(() => { const row = ${rowState}; return row?.status === 'Open' && row; })()`);
       expect(opened.id).toBe(initial.id);
-      await evaluate(viewer.cdp, "document.querySelector('#tbody tr').click(); document.querySelector('#res-tab-raw').click(); true");
+      await evaluate(viewer.cdp, `
+        document.querySelector('#tbody tr').click();
+        document.querySelector('#ws-tab-details').click();
+        document.querySelector('#res-tab-raw').click(); true`);
       await wait(viewer, "document.querySelector('#res-raw').textContent.includes('first-private')");
       await evaluate(host.cdp, "window.__socket.emit('message', { data: 'later-private' }); true");
       await wait(viewer, "document.querySelector('#res-raw').textContent.includes('later-private')");
@@ -561,7 +564,10 @@ browserTest(
         type: 'body-result', requestId: request.requestId, viewer: request.viewer, ok: true, content, encoding: '',
       }]);
       const lastBodyRequest = () => evaluate(viewer.cdp, `window.__sentToHost.filter((m) => m.type === 'body-request').at(-1)`);
-      await evaluate(viewer.cdp, "document.querySelector('#tbody tr').click();document.querySelector('#res-tab-raw').click();true");
+      await evaluate(viewer.cdp, `
+        document.querySelector('#tbody tr').click();
+        document.querySelector('#ws-tab-details').click();
+        document.querySelector('#res-tab-raw').click(); true`);
       const firstBody = await waitForImportResult(viewer.cdp, `window.__sentToHost.find((m) => m.type === 'body-request')`);
       expect(firstBody).toBeTruthy();
       await answerBody(firstBody, 'synthetic frame');
@@ -735,6 +741,15 @@ browserTest(
       ]);
       expect(sanitizedTraffic.some((message) => 'frames' in message || message.type === 'body-request')).toBe(false);
 
+      await evaluate(viewer.cdp, "document.querySelector('#tbody tr[data-row-id]').click(); true");
+      const hasImportedHistory = `!document.querySelector('#ws-messages-panel').hidden &&
+        document.querySelector('#ws-messages-panel .ws-message:last-child .ws-message-payload')?.textContent === 'private-frame-1001' &&
+        document.querySelector('#ws-messages-status').textContent.includes('902')`;
+      expect(await waitWithRelay(viewer, hasImportedHistory)).toBe(true);
+      const firstMessagesRequest = traffic.find((message) => message.type === 'ws-messages-request');
+      expect(firstMessagesRequest).toMatchObject({ minimumRevision: 0 });
+      await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').click(); true");
+
       await evaluate(host.cdp, `(() => {
         document.querySelector('#pauseBtn').click();
         window.__wsEvents.push(
@@ -766,9 +781,19 @@ browserTest(
       ]);
 
       // A same-session reconnect supplies the same IDs and transcripts again.
+      const reconnectStart = traffic.length;
       await evaluate(viewer.cdp, 'window.__hostListeners.disconnect.forEach((fn) => fn()); true');
       await attachScriptedHostPort(viewer.cdp);
       await relay();
+      expect(await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').getAttribute('aria-selected')")).toBe('true');
+      expect(traffic.slice(reconnectStart).some((message) => message.type === 'ws-messages-request')).toBe(false);
+      await evaluate(viewer.cdp, "document.querySelector('#ws-tab-messages').click(); true");
+      expect(await waitWithRelay(viewer, hasImportedHistory)).toBe(true);
+      const refreshedMessages = traffic.slice(reconnectStart).filter((message) => message.type === 'ws-messages-request');
+      expect(refreshedMessages).toEqual([
+        expect.objectContaining({ rowId: firstMessagesRequest.rowId, session: firstMessagesRequest.session, minimumRevision: 0 }),
+      ]);
+      expect(refreshedMessages[0].requestId).not.toBe(firstMessagesRequest.requestId);
       const reconnected = await exportHar(viewer, 'full');
       expect(reconnected.log.entries).toHaveLength(2);
       expect(liveEntry(reconnected)._webSocketMessages).toEqual(laterLive._webSocketMessages);
