@@ -36,6 +36,8 @@ const _NetworkPlus = (function () {
   const COPY_FEEDBACK_DURATION_MS = 1800;
   const SCROLL_THRESHOLD = 10;
   const TRUNCATE_LIMIT = 2000;
+  const INSPECTOR_PAYLOAD_PREVIEW_BYTES = 16 * 1024;
+  const PAYLOAD_DOWNLOAD_CHUNK_CHARS = 256 * 1024;
   const FILTER_DEBOUNCE_MS = 150;
   const DEEP_SEARCH_DEBOUNCE_MS = 250;
   // Cap on in-pane (detail view) search hits so pathological bodies stay responsive.
@@ -4138,6 +4140,32 @@ const _NetworkPlus = (function () {
     return count;
   }
 
+  async function readImportedHarEntry(file, entryIndex, isCurrent = () => true) {
+    // The full import already validated the file. Stop this explicit reread
+    // after its target to avoid scanning any later entries or retaining their
+    // bodies. The same stream parser and entry limits still apply.
+    const found = Symbol('HAR entry found');
+    let entry;
+    let index = 0;
+    async function* chunks() {
+      for await (const chunk of file.stream()) {
+        if (!isCurrent()) throw createImportError('The selected HAR entry changed.');
+        yield chunk;
+      }
+    }
+    try {
+      await readHarEntries(chunks(), (candidate) => {
+        if (index++ !== entryIndex) return;
+        entry = candidate;
+        throw found;
+      });
+    } catch (error) {
+      if (error !== found) throw error;
+    }
+    if (!entry) throw createImportError('The selected HAR entry is no longer available.');
+    return entry;
+  }
+
   function normalizeHarPostData(postData) {
     if (!isRecord(postData)) return null;
     const normalized = {
@@ -4646,16 +4674,33 @@ const _NetworkPlus = (function () {
     return new TextEncoder().encode(typeof value === 'string' ? value : '').length;
   }
 
+  function exceedsInspectorPayloadBudget(text) {
+    return text.length > INSPECTOR_PAYLOAD_PREVIEW_BYTES ||
+      getUtf8ByteLength(text) > INSPECTOR_PAYLOAD_PREVIEW_BYTES;
+  }
+
+  function inspectorPayloadPrefix(text) {
+    const scratch = new Uint8Array(INSPECTOR_PAYLOAD_PREVIEW_BYTES);
+    const { read } = new TextEncoder().encodeInto(text.slice(0, scratch.length), scratch);
+    // A source slice can end between the surrogate halves of one character.
+    const last = text.charCodeAt(read - 1);
+    return text.slice(0, read < text.length && last >= 0xd800 && last <= 0xdbff ? read - 1 : read);
+  }
+
   // Charset declared by the response's Content-Type header, if any.
   function resolveRowResponseCharset(row) {
     const headers = row && Array.isArray(row.responseHeaders) ? row.responseHeaders : [];
     return extractCharsetFromContentType(getNormalizedHeaderValue(headers, 'content-type'));
   }
 
-  function measureResponsePayload(content, encoding, charset, sniffHtmlMeta) {
+  function measureResponsePayload(content, encoding, charset, sniffHtmlMeta, maxBytes = Infinity) {
     const rawContent = typeof content === 'string' ? content : '';
-    const text = decodeResponseContent(rawContent, encoding, charset, sniffHtmlMeta);
+    // UTF-8 never occupies fewer bytes than UTF-16 code units. Skip allocation
+    // and decoding when raw text alone already exceeds the cache budget.
+    if (rawContent.length > maxBytes) return { content: null, encoding: '', text: null, bytes: rawContent.length };
     const rawBytes = getUtf8ByteLength(rawContent);
+    if (rawBytes > maxBytes) return { content: null, encoding: '', text: null, bytes: rawBytes };
+    const text = decodeResponseContent(rawContent, encoding, charset, sniffHtmlMeta);
     const decodedBytes = text === rawContent ? 0 : getUtf8ByteLength(text);
     return {
       content: rawContent,
@@ -4948,15 +4993,18 @@ const _NetworkPlus = (function () {
 
   function applyHarWebSocketMessages(row, messages) {
     if (!row || !Array.isArray(messages) || messages.length === 0) return 0;
+    const previewText = (text) => text.length <= WS_FRAME_PREVIEW_CHARS
+      ? text : text.slice(0, WS_FRAME_PREVIEW_CHARS).split('').join('');
     const usable = messages
-      .filter((message) => message && typeof message === 'object' && (message.type === 'send' || message.type === 'receive'))
-      .sort((a, b) => (getHarWsTime(a) ?? 0) - (getHarWsTime(b) ?? 0));
+      .map((message, fullIndex) => ({ message, fullIndex }))
+      .filter(({ message }) => message && typeof message === 'object' && (message.type === 'send' || message.type === 'receive'))
+      .sort((a, b) => (getHarWsTime(a.message) ?? 0) - (getHarWsTime(b.message) ?? 0));
     if (usable.length === 0) return 0;
     const limited = usable.slice(0, HAR_WS_MESSAGE_IMPORT_LIMIT);
     let applied = 0;
-    for (const message of limited) {
+    for (const { message } of limited) {
       const at = getHarWsTime(message);
-      const text = normalizeImportString(message.data).slice(0, WS_FRAME_PREVIEW_CHARS);
+      const text = previewText(normalizeImportString(message.data));
       const preview =
         message.opcode === 2
           ? '[binary frame' + (typeof message.data === 'string' ? ', ' + message.data.length + ' base64 chars' : '') + ']'
@@ -4988,16 +5036,19 @@ const _NetworkPlus = (function () {
       applied += 1;
     }
     const recent = usable.slice(-WS_MESSAGE_HISTORY_LIMIT);
-    for (const message of recent) {
+    for (const { message, fullIndex } of recent) {
       const binary = message.opcode === 2;
       const data = binary ? '' : normalizeImportString(message.data);
+      const truncated = data.length > WS_FRAME_PREVIEW_CHARS;
       recordWsMessage(row, {
         type: message.type,
         time: getHarWsTime(message),
         binary,
         bytes: null,
-        data: data.slice(0, WS_FRAME_PREVIEW_CHARS),
-        truncated: data.length > WS_FRAME_PREVIEW_CHARS,
+        data: previewText(data),
+        truncated,
+        ...(truncated && typeof row._readImportedHarEntry === 'function'
+          ? { fullIndex, fullLength: data.length } : {}),
       });
     }
     row._wsMessagesOmitted = usable.length - recent.length;
@@ -5919,6 +5970,9 @@ const _NetworkPlus = (function () {
       releaseResponseContent(row, 'row-evicted', false);
       row._responseContentPromise = null;
       row._responsePayloadPromise = null;
+      row._boundedResponsePayloadPromise = null;
+      row._liveRawResponsePromise = null;
+      row._readImportedHarEntry = null;
       row._retentionDisposed = true;
       state.retainedRows.delete(row);
       state.activeRows.delete(row);
@@ -7329,6 +7383,54 @@ const _NetworkPlus = (function () {
     bodyPaneShowFullCached: {
       en: 'Show full cached body ({size})',
       ja: 'キャッシュされたボディ全体を表示（{size}）',
+    },
+    largePayloadPreview: {
+      en: 'This payload exceeds the 16 KiB inspector preview budget. Search here covers the preview.',
+      ja: 'このペイロードはインスペクターのプレビュー上限（16 KiB）を超えています。ここでの検索はプレビューが対象です。',
+    },
+    largePayloadBinary: {
+      en: 'This payload exceeds the 16 KiB inspector preview budget. Raw bytes are available as a file.',
+      ja: 'このペイロードはインスペクターのプレビュー上限（16 KiB）を超えています。元のバイト列はファイルで保存できます。',
+    },
+    largePayloadLive: {
+      en: 'Get the full body from the original DevTools capture and save it directly.',
+      ja: '元の DevTools キャプチャからボディ全体を取得し、直接ファイルに保存します。',
+    },
+    largePayloadImported: {
+      en: 'Read the full body from the original HAR file and save it directly.',
+      ja: '元の HAR ファイルからボディ全体を読み込み、直接ファイルに保存します。',
+    },
+    largePayloadMirror: {
+      en: 'This body cannot be saved in the pop-out. For live captures, try the original Network+ DevTools panel.',
+      ja: 'このボディはポップアウトから保存できません。ライブキャプチャの場合は、元の DevTools の Network+ パネルをお試しください。',
+    },
+    largePayloadSaveRequest: {
+      en: 'Save full request body',
+      ja: 'リクエストボディ全体を保存',
+    },
+    largePayloadSaveResponse: {
+      en: 'Save full response body',
+      ja: 'レスポンスボディ全体を保存',
+    },
+    largePayloadSaveTitle: {
+      en: 'Save full body?',
+      ja: 'ボディ全体を保存しますか？',
+    },
+    largePayloadSaveDetail: {
+      en: 'Save the captured body to a local file without redaction.',
+      ja: '取得したボディをマスキングせずローカルファイルに保存します。',
+    },
+    largePayloadSaving: {
+      en: 'Preparing the full body…',
+      ja: 'ボディ全体の保存を準備しています…',
+    },
+    largePayloadSaved: {
+      en: 'Full body download started.',
+      ja: 'ボディ全体のダウンロードを開始しました。',
+    },
+    largePayloadSaveUnavailable: {
+      en: 'Could not save the full body from this capture.',
+      ja: 'このキャプチャからボディ全体を保存できませんでした。',
     },
     detailsEmptyTitle: {
       en: 'Select a request...',
@@ -8744,6 +8846,34 @@ const _NetworkPlus = (function () {
       en: 'Only the first {limit} characters were captured.',
       ja: '最初の {limit} 文字分を記録しました。',
     },
+    wsMessagePreviewOnly: {
+      en: 'Preview of the first {limit} characters.',
+      ja: '最初の {limit} 文字をプレビューしています。',
+    },
+    wsSaveFullMessage: {
+      en: 'Save full message',
+      ja: '全文を保存',
+    },
+    wsSaveFullMessageTitle: {
+      en: 'Save the full WebSocket message?',
+      ja: 'WebSocket メッセージの全文を保存しますか？',
+    },
+    wsSaveFullMessageDetail: {
+      en: 'The local file contains the complete captured message, which may include sensitive data.',
+      ja: 'ローカルファイルに、機密情報を含む可能性のある記録済みメッセージをそのまま保存します。',
+    },
+    wsSavingFullMessage: {
+      en: 'Reading the complete WebSocket message…',
+      ja: 'WebSocket メッセージの全文を取得しています…',
+    },
+    wsSavedFullMessage: {
+      en: 'Saved the full WebSocket message.',
+      ja: 'WebSocket メッセージの全文を保存しました。',
+    },
+    wsFullMessageUnavailable: {
+      en: 'The full message is no longer available. The preview is still visible.',
+      ja: '全文を取得できませんでした。プレビューは引き続き確認できます。',
+    },
     statusPendingRequest: {
       en: 'Pending',
       ja: '応答待ち',
@@ -10065,6 +10195,11 @@ const _NetworkPlus = (function () {
   // itself is never altered), and a navigation wipes it until reinjection.
   const WS_QUEUE_CAP = 5000;
   const WS_FRAME_PREVIEW_CHARS = 2048;
+  // Full text stays in the inspected document until explicitly downloaded.
+  // Count UTF-16 units conservatively as at most two bytes each.
+  const WS_FULL_TEXT_LIMIT_CHARS = 8 * 1024 * 1024;
+  const WS_FULL_TEXT_CHUNK_CHARS = 64 * 1024;
+  const WS_FULL_TEXT_READ_TIMEOUT_MS = 20000;
   const WS_MESSAGE_HISTORY_LIMIT = 100;
   const WS_DIRECTION_TEXT_LIMIT_CHARS = 262144;
   const WS_POLL_INTERVAL_MS = 1000;
@@ -10122,17 +10257,49 @@ const _NetworkPlus = (function () {
         message.opcode === 1 && typeof message.data === 'string' && message.data.length <= WS_FRAME_PREVIEW_CHARS);
   }
 
-  function pageWebSocketWrapper(queueCap, previewChars, urlLimit) {
+  function pageWebSocketWrapper(queueCap, previewChars, urlLimit, fullLimit, fullChunkSize, allowFullCapture, captureKey) {
     if (window.__networkPlusWS__) {
       window.__networkPlusWS__.setEnabled(true);
+      window.__networkPlusWS__.configureFullCapture?.(captureKey, allowFullCapture);
       return 'already-installed';
     }
     const queue = [];
     let enabled = true;
+    let fullCapture = allowFullCapture && !!captureKey;
     let nextSocketId = 1;
+    let nextFrameId = 0;
+    const frameNamespace = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    const fullFrames = new Map();
+    let fullChars = 0;
+    const clearFullFrames = function () {
+      fullFrames.clear();
+      fullChars = 0;
+    };
+    const keepFullFrame = function (text) {
+      let copy;
+      try {
+        copy = structuredClone(text); // Detach a small substring from its potentially huge backing store.
+        if (typeof copy !== 'string' || copy.length !== text.length) return undefined;
+      } catch (_error) {
+        return undefined;
+      }
+      while (fullChars + text.length > fullLimit) {
+        const oldest = fullFrames.keys().next().value;
+        fullChars -= fullFrames.get(oldest).length;
+        fullFrames.delete(oldest);
+      }
+      const key = frameNamespace + '-' + (++nextFrameId).toString(36);
+      fullFrames.set(key, copy);
+      fullChars += text.length;
+      return key;
+    };
     const preview = function (data) {
       try {
-        if (typeof data === 'string') return data.slice(0, previewChars);
+        // Materialize a small independent string instead of a V8 slice
+        // that can keep its much larger backing string alive in the queue.
+        if (typeof data === 'string') {
+          return data.length <= previewChars ? data : data.slice(0, previewChars).split('').join('');
+        }
         if (data && typeof data.byteLength === 'number') return '[binary ' + data.byteLength + ' bytes]';
         if (data && typeof data.size === 'number') return '[binary ' + data.size + ' bytes]';
         return '[unsupported frame]';
@@ -10162,6 +10329,15 @@ const _NetworkPlus = (function () {
         droppedCount += 1;
       }
     };
+    const recordFrame = function (kind, socketId, data, binary) {
+      if (!enabled) return;
+      const truncated = typeof data === 'string' && data.length > previewChars;
+      const fullId = fullCapture && truncated && data.length <= fullLimit ? keepFullFrame(data) : undefined;
+      record({
+        kind, socketId, preview: preview(data), binary, truncated, fullId,
+        fullLength: fullId ? data.length : undefined,
+      });
+    };
     const Native = window.WebSocket;
     const Wrapped = function (url, protocols) {
       const socket = protocols === undefined ? new Native(url) : new Native(url, protocols);
@@ -10177,21 +10353,15 @@ const _NetworkPlus = (function () {
       const nativeSend = socket.send.bind(socket);
       socket.send = function (data) {
         const result = nativeSend(data);
-        record({
-          kind: 'ws-sent', socketId, preview: preview(data),
-          binary: ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob),
-          truncated: typeof data === 'string' && data.length > previewChars,
-        });
+        recordFrame('ws-sent', socketId, data,
+          ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob));
         return result;
       };
       socket.addEventListener('open', function () {
         record({ kind: 'ws-open', socketId });
       });
       socket.addEventListener('message', function (event) {
-        record({
-          kind: 'ws-received', socketId, preview: preview(event.data), binary: typeof event.data !== 'string',
-          truncated: typeof event.data === 'string' && event.data.length > previewChars,
-        });
+        recordFrame('ws-received', socketId, event.data, typeof event.data !== 'string');
       });
       socket.addEventListener('error', function () {
         record({ kind: 'ws-error', socketId });
@@ -10218,13 +10388,50 @@ const _NetworkPlus = (function () {
       },
       setEnabled: function (value) {
         enabled = value === true;
+        if (!enabled) clearFullFrames();
+      },
+      configureFullCapture: function (key, value) {
+        // A reopened DevTools panel starts a new session. It cannot read
+        // any full content retained under the previous credential.
+        if (key !== captureKey) clearFullFrames();
+        captureKey = key;
+        fullCapture = typeof key === 'string' && !!key && value === true;
+      },
+      setFullCapture: function (key, value) {
+        if (key && key === captureKey) fullCapture = value === true;
+      },
+      clearFullFrames: function (key) {
+        if (key && key === captureKey) clearFullFrames();
+      },
+      readFullFrame: function (key, id, offset) {
+        if (!key || key !== captureKey) return null;
+        const data = fullFrames.get(id);
+        if (!data || !Number.isInteger(offset) || offset < 0 || offset >= data.length) return null;
+        return data.slice(offset, offset + fullChunkSize);
       },
     };
     return 'installed';
   }
 
-  function buildWsWrapperSource() {
-    return '(' + String(pageWebSocketWrapper) + ')(' + WS_QUEUE_CAP + ',' + WS_FRAME_PREVIEW_CHARS + ',' + STREAM_URL_LIMIT_CHARS + ')';
+  function buildWsWrapperSource(allowFullCapture = true, captureKey = '') {
+    return '(' + String(pageWebSocketWrapper) + ')(' +
+      [WS_QUEUE_CAP, WS_FRAME_PREVIEW_CHARS, STREAM_URL_LIMIT_CHARS, WS_FULL_TEXT_LIMIT_CHARS,
+        WS_FULL_TEXT_CHUNK_CHARS, allowFullCapture === true, JSON.stringify(captureKey)].join(',') + ')';
+  }
+
+  function pageReadWsFullFrame(key, id, offset, expected) {
+    try {
+      const part = window.__networkPlusWS__?.readFullFrame?.(key, id, offset);
+      return typeof part === 'string' && part.length === expected ? part : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function buildWsFullFrameReadSource(key, frame, offset) {
+    const expected = Math.min(WS_FULL_TEXT_CHUNK_CHARS, frame.fullLength - offset);
+    return '(' + String(pageReadWsFullFrame) + ')(' +
+      [JSON.stringify(key), JSON.stringify(frame.fullId), offset, expected].join(',') + ')';
   }
 
   // The SSE wrapper speaks the same ws-* event dialect as the WebSocket
@@ -10363,6 +10570,8 @@ const _NetworkPlus = (function () {
           ? event.preview : undefined,
         binary: typeof event.binary === 'boolean' ? event.binary : undefined,
         truncated: typeof event.truncated === 'boolean' ? event.truncated : undefined,
+        fullId: typeof event.fullId === 'string' && event.fullId.length <= 64 ? event.fullId : undefined,
+        fullLength: Number.isSafeInteger(event.fullLength) ? event.fullLength : undefined,
         reason: typeof event.reason === 'string' && event.reason.length <= 256 ? event.reason : undefined,
         code: typeof event.code === 'number' ? event.code : undefined,
         count: typeof event.count === 'number' ? event.count : undefined,
@@ -10478,6 +10687,7 @@ const _NetworkPlus = (function () {
   // and creation so the same logic is testable without a DevTools session.
   function ingestWsEvents(events, context) {
     const changedRows = new Set();
+    const responseRows = new Set();
     for (const event of Array.isArray(events) ? events : []) {
       if (!isValidStreamEvent(event, context.variant)) continue;
       if (event.kind === 'ws-open-attempt') {
@@ -10508,7 +10718,7 @@ const _NetworkPlus = (function () {
         if (line && keepTranscript) {
           row.responseContent = nextText;
           if (isLiveStreamRow(row)) {
-            publishStreamTranscript(row);
+            responseRows.add(row);
           } else {
             row.responseContentState = 'pending-admission';
             row.responseContentEncoding = '';
@@ -10556,6 +10766,10 @@ const _NetworkPlus = (function () {
             ...frame,
             bytes: Number.isSafeInteger(bytes) ? bytes : null,
             truncated: !binary && event.truncated === true,
+            ...(!binary && event.truncated === true && typeof event.fullId === 'string' &&
+              /^[a-z0-9-]{1,64}$/.test(event.fullId) && Number.isSafeInteger(event.fullLength) &&
+              event.fullLength > WS_FRAME_PREVIEW_CHARS && event.fullLength <= WS_FULL_TEXT_LIMIT_CHARS
+              ? { fullId: event.fullId, fullLength: event.fullLength, fullGeneration: context.fullFrameGeneration } : {}),
           });
         } else {
           row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + 1;
@@ -10563,6 +10777,7 @@ const _NetworkPlus = (function () {
       }
       changedRows.add(row);
     }
+    for (const row of responseRows) publishStreamTranscript(row);
     return Array.from(changedRows);
   }
 
@@ -11383,8 +11598,11 @@ const _NetworkPlus = (function () {
     };
   }
 
-  function fetchResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
-    if (row._responsePayloadPromise) return row._responsePayloadPromise;
+  function fetchResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS, maxBytes = Infinity) {
+    // An explicit Full HAR may start while bounded prefetch is pending.
+    // Measurement stays separate so its cache verdict cannot omit that export.
+    const promiseKey = maxBytes === Infinity ? '_responsePayloadPromise' : '_boundedResponsePayloadPromise';
+    if (row[promiseKey]) return row[promiseKey];
     const requestLabel = row.id == null ? 'unknown request' : 'request ' + row.id;
     if (typeof row._mirrorFetchBody === 'function') {
       // Mirror rows hold no getContent; the DevTools session serves the body
@@ -11410,6 +11628,7 @@ const _NetworkPlus = (function () {
                     payload.encoding,
                     resolveRowResponseCharset(row),
                     isHtmlLikeMime(row.type),
+                    maxBytes,
                   ),
                 );
               } catch (error) {
@@ -11431,17 +11650,35 @@ const _NetworkPlus = (function () {
             },
           );
       });
-      row._responsePayloadPromise = pending;
+      row[promiseKey] = pending;
       pending.then(
         () => {
-          if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
+          if (row[promiseKey] === pending) row[promiseKey] = null;
         },
         () => {
-          if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
+          if (row[promiseKey] === pending) row[promiseKey] = null;
         },
       );
       return pending;
     }
+    const pending = fetchRawLiveResponsePayload(row, timeoutMs).then(({ content, encoding }) => {
+      try {
+        return measureResponsePayload(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type), maxBytes);
+      } catch (error) {
+        throw new Error('Failed to process response content for ' + requestLabel + ': ' + error.message, { cause: error });
+      }
+    });
+    row[promiseKey] = pending;
+    const clear = () => {
+      if (row[promiseKey] === pending) row[promiseKey] = null;
+    };
+    pending.then(clear, clear);
+    return pending;
+  }
+
+  function fetchRawLiveResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
+    if (row._liveRawResponsePromise) return row._liveRawResponsePromise;
+    const requestLabel = row.id == null ? 'unknown request' : 'request ' + row.id;
     if (!row._reqObj || typeof row._reqObj.getContent !== 'function') {
       return Promise.reject(new Error('Response content is unavailable for ' + requestLabel));
     }
@@ -11471,30 +11708,19 @@ const _NetworkPlus = (function () {
             fail('Failed to retrieve response content for ' + requestLabel + ': ' + runtimeError);
             return;
           }
-          let payload;
-          try {
-            payload = measureResponsePayload(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
-          } catch (error) {
-            fail('Failed to process response content for ' + requestLabel + ': ' + error.message);
-            return;
-          }
           settled = true;
           clearTimeout(timeoutId);
-          resolve(payload);
+          resolve({ content, encoding });
         });
       } catch (error) {
         fail('Failed to retrieve response content for ' + requestLabel + ': ' + error.message);
       }
     });
-    row._responsePayloadPromise = pending;
-    pending.then(
-      () => {
-        if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
-      },
-      () => {
-        if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
-      },
-    );
+    row._liveRawResponsePromise = pending;
+    const clear = () => {
+      if (row._liveRawResponsePromise === pending) row._liveRawResponsePromise = null;
+    };
+    pending.then(clear, clear);
     return pending;
   }
 
@@ -11517,10 +11743,18 @@ const _NetworkPlus = (function () {
       touchResponseCacheRow(row);
       return Promise.resolve(row);
     }
+    if (row._managedRetention && row.responseContentSize > MAX_RESPONSE_BODY_BYTES) {
+      try {
+        return Promise.resolve(admitResponsePayload(row, { bytes: row.responseContentSize }));
+      } catch (error) {
+        row.responseContentError = error;
+        return Promise.reject(error);
+      }
+    }
 
     row.responseContentState = 'loading';
     const streamRevision = row._mirrorStreamRevision;
-    const pending = fetchResponsePayload(row, timeoutMs)
+    const pending = fetchResponsePayload(row, timeoutMs, row._managedRetention ? MAX_RESPONSE_BODY_BYTES : Infinity)
       .then((payload) => {
         if (streamRevision !== row._mirrorStreamRevision) return row;
         if (row._managedRetention) {
@@ -14174,7 +14408,63 @@ const _NetworkPlus = (function () {
     return formatted;
   }
 
-  function createWsMessage(frame) {
+  let wsFullSavePending = false;
+  async function readWsFullMessage(row, frame) {
+    const isCurrent = () => state.selectedRow === row && !row._retentionDisposed;
+    const deadline = Date.now() + WS_FULL_TEXT_READ_TIMEOUT_MS;
+    if (Number.isInteger(frame.fullIndex)) {
+      const entry = await row._readImportedHarEntry(() => isCurrent() && Date.now() < deadline);
+      const message = entry._webSocketMessages?.[frame.fullIndex];
+      const content = message?.data;
+      if (!isCurrent() || message?.type !== frame.type || getHarWsTime(message) !== frame.time ||
+          typeof content !== 'string' || content.length !== frame.fullLength || !content.startsWith(frame.data)) {
+        throw new Error('WebSocket message could not be read completely');
+      }
+      return content;
+    }
+    const parts = [];
+    for (let offset = 0; offset < frame.fullLength; offset += WS_FULL_TEXT_CHUNK_CHARS) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || !isCurrent()) throw new Error('WebSocket message is no longer available');
+      const part = await row._readWsFullFrame(frame, offset, remaining);
+      const expected = Math.min(WS_FULL_TEXT_CHUNK_CHARS, frame.fullLength - offset);
+      if (typeof part !== 'string' || part.length !== expected ||
+          (offset === 0 && !part.startsWith(frame.data))) {
+        throw new Error('WebSocket message could not be read completely');
+      }
+      parts.push(part);
+    }
+    // Join before UTF-8 encoding so that a surrogate pair split across two
+    // bounded chunks still becomes the original character.
+    return parts.join('');
+  }
+
+  function requestWsFullMessageSave(row, frame, trigger) {
+    if (wsFullSavePending) return;
+    requestFullOutboundAction({
+      title: uiText('wsSaveFullMessageTitle'),
+      detail: uiText('wsSaveFullMessageDetail'),
+      confirmLabel: uiText('wsSaveFullMessage'),
+      trigger,
+      onConfirm: async () => {
+        wsFullSavePending = true;
+        setStatus(uiText('wsSavingFullMessage'));
+        try {
+          const content = await readWsFullMessage(row, frame);
+          if (state.selectedRow !== row || row._retentionDisposed) return;
+          const file = new Blob([content], { type: 'text/plain;charset=utf-8' });
+          triggerObjectUrlDownload(URL.createObjectURL(file), 'network-plus-websocket-' + row.id + '-' + frame.id + '.txt');
+          setStatus(uiText('wsSavedFullMessage'));
+        } catch (_error) {
+          setStatus(uiText('wsFullMessageUnavailable'), true);
+        } finally {
+          wsFullSavePending = false;
+        }
+      },
+    });
+  }
+
+  function createWsMessage(frame, row) {
     const item = document.createElement('li');
     item.className = 'ws-message';
     item.dataset.direction = frame.type;
@@ -14216,10 +14506,25 @@ const _NetworkPlus = (function () {
       else pre.textContent = body;
       disclosure.appendChild(pre);
       if (frame.truncated) {
+        const canReadFull = typeof row._readWsFullFrame === 'function' && !!frame.fullId ||
+          typeof row._readImportedHarEntry === 'function' && Number.isInteger(frame.fullIndex);
         const note = document.createElement('p');
         note.className = 'ws-message-note';
-        note.textContent = uiTextFormat('wsMessageTruncated', { limit: WS_FRAME_PREVIEW_CHARS.toLocaleString() });
+        note.textContent = uiTextFormat(canReadFull ? 'wsMessagePreviewOnly' : 'wsMessageTruncated', {
+          limit: WS_FRAME_PREVIEW_CHARS.toLocaleString(activeLanguage),
+        });
         disclosure.appendChild(note);
+        if (canReadFull) {
+          const actions = document.createElement('div');
+          actions.className = 'ws-message-actions';
+          const save = document.createElement('button');
+          save.type = 'button';
+          save.className = 'copy-btn ws-message-save-full';
+          save.textContent = uiText('wsSaveFullMessage');
+          save.addEventListener('click', () => requestWsFullMessageSave(row, frame, save));
+          actions.appendChild(save);
+          disclosure.appendChild(actions);
+        }
       }
       disclosure.removeEventListener('toggle', showPayload);
     };
@@ -14301,7 +14606,7 @@ const _NetworkPlus = (function () {
     for (const frame of ordered) {
       let item = view.items.get(frame.id);
       if (!item) {
-        item = createWsMessage(frame);
+        item = createWsMessage(frame, row);
         view.items.set(frame.id, item);
       }
       const matches = (view.direction === 'all' || frame.type === view.direction) &&
@@ -15466,6 +15771,7 @@ const _NetworkPlus = (function () {
       topbar.classList.remove('paused');
     }
     updateSampleCaptureStatus();
+    state.syncWsFullCapture?.();
     if (announceStatus !== false) setStatus(uiText(state.paused ? 'statusPaused' : 'statusRecording'));
   }
 
@@ -17187,7 +17493,7 @@ const _NetworkPlus = (function () {
     container.insertBefore(wrapper, container.firstChild);
   }
 
-  function buildRawRequestText(row) {
+  function buildRawRequestText(row, body = row.requestPostData?.text) {
     const method = row.method || 'GET';
     const url = row.url || '/';
     let path;
@@ -17207,9 +17513,7 @@ const _NetworkPlus = (function () {
       }
     }
     raw += '\r\n';
-    if (row.requestPostData && row.requestPostData.text) {
-      raw += row.requestPostData.text;
-    }
+    if (body) raw += body;
     return raw;
   }
 
@@ -17621,7 +17925,7 @@ const _NetworkPlus = (function () {
    * method, path and protocol), header names colored, a hairline divider
    * before the body, and a JSON body highlighted in place.
    */
-  function renderRawHighlighted(rawText) {
+  function renderRawHighlighted(rawText, highlightBody = true) {
     const pre = document.createElement('pre');
     pre.className = 'code-block code-raw';
     const lines = rawText.split('\n');
@@ -17669,7 +17973,7 @@ const _NetworkPlus = (function () {
           const divider = document.createElement('span');
           divider.className = 'raw-body-divider';
           pre.appendChild(divider);
-          if (formatJsonSafe(body) !== null) {
+          if (highlightBody && formatJsonSafe(body) !== null) {
             appendJsonHighlight(pre, body);
           } else {
             pre.appendChild(document.createTextNode(body));
@@ -17847,6 +18151,144 @@ const _NetworkPlus = (function () {
     if (pressed) pressed.focus();
   }
 
+  async function buildPayloadDownloadBlob(content, encoding, isCurrent) {
+    const binary = encoding === 'base64';
+    const parts = [];
+    let offset = 0;
+    let carry = '';
+    let reachedPadding = false;
+    while (offset < content.length) {
+      if (!isCurrent()) return null;
+      let end = Math.min(offset + PAYLOAD_DOWNLOAD_CHUNK_CHARS, content.length);
+      const last = content.charCodeAt(end - 1);
+      if (!binary && end < content.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+      const part = content.slice(offset, end);
+      if (binary) {
+        const encoded = carry + part.replace(/[\t\n\f\r ]/g, '');
+        if (reachedPadding && encoded) throw new Error('Unexpected data after base64 padding');
+        const length = end === content.length ? encoded.length : encoded.length - encoded.length % 4;
+        if (length) {
+          const complete = encoded.slice(0, length);
+          parts.push(base64ToBytes(complete));
+          reachedPadding = complete.endsWith('=');
+        }
+        carry = encoded.slice(length);
+      } else {
+        parts.push(part);
+      }
+      offset = end;
+      if (offset < content.length) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return new Blob(parts, { type: binary ? 'application/octet-stream' : 'text/plain;charset=utf-8' });
+  }
+
+  async function readFullResponseDownload(row, isCurrent) {
+    if (typeof row.responseContent === 'string') {
+      return { content: row.responseContent, encoding: row.responseContentEncoding };
+    }
+    if (row._originalHarHasBody && row._readImportedHarEntry) {
+      const entry = await row._readImportedHarEntry(isCurrent);
+      return { content: entry.response.content?.text, encoding: entry.response.content?.encoding };
+    }
+    return fetchRawLiveResponsePayload(row);
+  }
+
+  function appendLargePayloadNotice(pane, row, messageKey, side) {
+    const notice = document.createElement('div');
+    notice.className = 'large-payload-notice';
+    const message = document.createElement('p');
+    message.textContent = uiText(messageKey);
+    notice.appendChild(message);
+    if (side) {
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'link-btn';
+      const label = uiText(side === 'request' ? 'largePayloadSaveRequest' : 'largePayloadSaveResponse');
+      save.textContent = label;
+      const isCurrent = () => state.selectedRow === row && !row._retentionDisposed;
+      save.addEventListener('click', () => requestFullOutboundAction({
+        title: uiText('largePayloadSaveTitle'),
+        detail: uiText('largePayloadSaveDetail'),
+        confirmLabel: label,
+        trigger: save,
+        onConfirm: async () => {
+          if (!isCurrent()) return;
+          save.disabled = true;
+          setStatus(uiText('largePayloadSaving'));
+          try {
+            const payload = side === 'request'
+              ? { content: row.requestPostData?.text, encoding: row.requestPostData?.encoding }
+              : await readFullResponseDownload(row, isCurrent);
+            if (!isCurrent()) return;
+            if (typeof payload.content !== 'string') throw new Error('The captured body is unavailable');
+            const blob = await buildPayloadDownloadBlob(payload.content, payload.encoding, isCurrent);
+            if (!blob || !isCurrent()) return;
+            const id = Number.isSafeInteger(row.id) && row.id >= 0 ? '-' + row.id : '';
+            const extension = payload.encoding === 'base64' ? '.bin' : '.txt';
+            triggerObjectUrlDownload(URL.createObjectURL(blob), 'network-plus-' + side + '-body' + id + extension);
+            setStatus(uiText('largePayloadSaved'));
+          } catch (_error) {
+            if (isCurrent()) setStatus(uiText('largePayloadSaveUnavailable'), true);
+          } finally {
+            save.disabled = false;
+          }
+        },
+      }));
+      notice.appendChild(save);
+    }
+    pane.appendChild(notice);
+  }
+
+  function renderUnavailableResponseContent(row, error) {
+    const display = describeResponseContentState(row, error);
+    setResponsePaneMessage(formatBodyPaneMessage(display));
+    const canSaveLive = display.label === 'omitted' && typeof row._reqObj?.getContent === 'function';
+    const canSaveImported = (display.label === 'omitted' || display.label === 'evicted') &&
+      row._originalHarHasBody && typeof row._readImportedHarEntry === 'function';
+    const canSave = canSaveLive || canSaveImported;
+    const mirrorLimit = typeof row._mirrorFetchBody === 'function' &&
+      (display.label === 'omitted' || /per-body cache limit/.test(display.reason));
+    if (canSave || mirrorLimit) {
+      for (const pane of [$('#res-body'), $('#res-raw')]) {
+        const message = canSaveImported ? 'largePayloadImported' : canSaveLive ? 'largePayloadLive' : 'largePayloadMirror';
+        appendLargePayloadNotice(pane, row, message, canSave ? 'response' : '');
+      }
+    }
+    applyResponseTabSignals({ 'res-body': canSave || mirrorLimit ? 1 : 0, 'res-raw': canSave || mirrorLimit ? 1 : 0 });
+    return display;
+  }
+
+  function renderLargeResponseContent(row, text, encoding) {
+    const body = $('#res-body');
+    const raw = $('#res-raw');
+    const binary = encoding === 'base64' && (!text || isUndecodableBodyText(text));
+    const preview = binary ? '' : inspectorPayloadPrefix(text);
+    body.replaceChildren(createResponsePreviewHeading());
+    raw.textContent = '';
+    const message = binary ? 'largePayloadBinary' : 'largePayloadPreview';
+    appendLargePayloadNotice(body, row, message, 'response');
+    appendLargePayloadNotice(raw, row, message, 'response');
+    if (preview) {
+      const pre = document.createElement('pre');
+      pre.className = 'code-block';
+      pre.textContent = preview;
+      body.appendChild(pre);
+    }
+    raw.appendChild(renderRawHighlighted(buildRawResponseText(row, preview), false));
+    for (const [pane, action, labelKey, statusKey] of [
+      [body, 'responseBody', 'paneNameResponseBody', 'statusCopiedSanitizedResponseBody'],
+      [raw, 'rawResponse', 'paneNameRawResponse', 'statusCopiedSanitizedRawResponse'],
+    ]) {
+      addCopyActions(pane, [
+        { label: uiText('menuCopySanitized'), onClick: () => copySanitizedAction(action, row, row.responseContent, uiText(statusKey)) },
+        { label: uiText('paneCopyFull'), onClick: (button) => requestFullClipboardAction(action, row, row.responseContent, button, labelKey) },
+      ]);
+    }
+    attachPaneSearch(body, preview, { emptyContent: !preview });
+    attachPaneSearch(raw);
+    applyResponseTabSignals({ 'res-body': 1, 'res-raw': 1 });
+  }
+
   // The Body pane's plain text block: a hex dump when the bytes are not text,
   // otherwise the decoded body, cut at TRUNCATE_LIMIT behind a control that
   // opens the rest. Shared by the text renderer and by HTML's Source view.
@@ -17936,20 +18378,23 @@ const _NetworkPlus = (function () {
 
   function renderCachedResponseContent(row) {
     if (row.responseContentState !== 'cached') {
-      const display = describeResponseContentState(row);
-      setResponsePaneMessage(formatBodyPaneMessage(display));
-      // A pane holding only the reason a body is missing is an empty pane,
-      // and its tab says so the same way the request half's Body tab does.
-      applyResponseTabSignals({ 'res-body': 0, 'res-raw': 0 });
+      renderUnavailableResponseContent(row);
       return;
     }
     const resBodyPane = $('#res-body');
     const resRawPane = $('#res-raw');
     const rawContent = typeof row.responseContent === 'string' ? row.responseContent : '';
     const encoding = row.responseContentEncoding === 'base64' ? 'base64' : '';
+    const largeRawContent = exceedsInspectorPayloadBudget(rawContent);
     let text = row.responseContentText != null
       ? row.responseContentText
-      : decodeResponseContent(rawContent, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
+      : largeRawContent && encoding === 'base64'
+        ? ''
+        : decodeResponseContent(rawContent, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
+    if (largeRawContent || exceedsInspectorPayloadBudget(text)) {
+      renderLargeResponseContent(row, text, encoding);
+      return;
+    }
     if (encoding === 'base64' && rawContent && !text) text = '(could not decode base64 response)';
 
     // Only a base64 body carries the real bytes, so only there can an honest
@@ -18197,18 +18642,20 @@ const _NetworkPlus = (function () {
     // Request > Body
     const reqBodyPane = $('#req-body');
     reqBodyPane.textContent = '';
-    const requestBodyText = row.requestPostData && row.requestPostData.text;
+    const requestBodyText = row.requestPostData?.text || '';
+    const largeRequestBody = exceedsInspectorPayloadBudget(requestBodyText);
+    const requestBodyPreview = largeRequestBody ? inspectorPayloadPrefix(requestBodyText) : requestBodyText;
     if (requestBodyText) {
-      const text = requestBodyText;
-      const treeEl = renderJsonTree(text);
+      const treeEl = largeRequestBody ? null : renderJsonTree(requestBodyPreview);
       if (treeEl) {
         reqBodyPane.appendChild(treeEl);
       } else {
         const pre = document.createElement('pre');
         pre.className = 'code-block';
-        pre.textContent = text;
+        pre.textContent = requestBodyPreview;
         reqBodyPane.appendChild(pre);
       }
+      if (largeRequestBody) appendLargePayloadNotice(reqBodyPane, row, 'largePayloadPreview', 'request');
 
       addCopyActions(reqBodyPane, [
         {
@@ -18223,7 +18670,7 @@ const _NetworkPlus = (function () {
     } else {
       renderPaneEmptyMessage(reqBodyPane, uiText('emptyRequestBody'));
     }
-    attachPaneSearch(reqBodyPane, requestBodyText || '', { emptyContent: !requestBodyText });
+    attachPaneSearch(reqBodyPane, requestBodyPreview, { emptyContent: !requestBodyText });
     const hasRequestBody = !!requestBodyText;
 
     // Request > Query
@@ -18303,7 +18750,7 @@ const _NetworkPlus = (function () {
     // Request > Raw
     const reqRawPane = $('#req-raw');
     reqRawPane.textContent = '';
-    const rawReqPre = renderRawHighlighted(buildRawRequestText(row));
+    const rawReqPre = renderRawHighlighted(buildRawRequestText(row, requestBodyPreview), !largeRequestBody);
     addCopyActions(reqRawPane, [
       {
         label: uiText('menuCopySanitized'),
@@ -18315,6 +18762,7 @@ const _NetworkPlus = (function () {
       },
     ]);
     reqRawPane.appendChild(rawReqPre);
+    if (largeRequestBody) appendLargePayloadNotice(reqRawPane, row, 'largePayloadPreview', 'request');
     attachPaneSearch(reqRawPane);
 
     // === RESPONSE TABS ===
@@ -18364,9 +18812,7 @@ const _NetworkPlus = (function () {
       })
       .catch((error) => {
         if (!shouldRenderSelectedRow(state.selectedRow, row) || streamRevision !== row._mirrorStreamRevision) return;
-        const display = describeResponseContentState(row, error);
-        setResponsePaneMessage(formatBodyPaneMessage(display));
-        applyResponseTabSignals({ 'res-body': 0, 'res-raw': 0 });
+        const display = renderUnavailableResponseContent(row, error);
         if (display.label === 'error') {
           setStatus(
             uiTextFormat('statusResponseBodyRetryFailed', { id: row.id }),
@@ -19365,6 +19811,7 @@ const _NetworkPlus = (function () {
     // [U4] Clear — reset visible working state and retain one bounded Undo snapshot.
     clearButton.addEventListener('click', () => {
       pendingCaptureCutoff = Date.now();
+      state.clearWsFullFrames?.();
       commitPendingLiveRows();
       disposeClearUndoSnapshot('clear');
       const snapshot = createClearUndoSnapshot(searchPanelVisible);
@@ -21651,7 +22098,7 @@ const _NetworkPlus = (function () {
         importBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
       };
 
-      const stageHarImport = async (file) => {
+      const stageHarImport = async (file, retainSource) => {
         const rowLimit = state.retention.unlimited ? Infinity : state.retention.requestLimit;
         const rows = [];
         const bodies = new Map();
@@ -21673,6 +22120,16 @@ const _NetworkPlus = (function () {
           const entry = normalizeHarEntry(rawEntry);
           const row = buildRowFromRequest(entry, 0);
           row._reqObj = null;
+          // Only retain the actual File selected in this window. A streamed
+          // mirror import cannot be reopened, and a chunk-built File would
+          // otherwise pin an extra copy of the entire archive in memory.
+          if (retainSource) {
+            row._originalHarHasBody = typeof entry.response.content.text === 'string';
+            if (row._originalHarHasBody || Array.isArray(rawEntry._webSocketMessages)) {
+              const entryIndex = index;
+              row._readImportedHarEntry = (isCurrent) => readImportedHarEntry(file, entryIndex, isCurrent);
+            }
+          }
           const availability = classifyImportedResponseContent(entry);
           if (availability.state === 'empty') {
             row.responseContent = '';
@@ -21704,6 +22161,7 @@ const _NetworkPlus = (function () {
           if (typeof row.responseContent !== 'string') return;
           const payload = measureResponsePayload(
             row.responseContent, row.responseContentEncoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type),
+            MAX_RESPONSE_BODY_BYTES,
           );
           if (payload.bytes > MAX_RESPONSE_BODY_BYTES) {
             dropBody(row, 'omitted',
@@ -21810,7 +22268,7 @@ const _NetworkPlus = (function () {
 
       // Shared by the local file picker and the mirror tab's transferred
       // imports; resolves with '' on success or the user-facing reason.
-      importCapturedFile = async (file) => {
+      importCapturedFile = async (file, retainHarSource = false) => {
         if (importInProgress) return 'Another import is already in progress.';
         const sourceValidation = validateImportSource(file.name, file.size);
         setImportBusy(true);
@@ -21819,7 +22277,7 @@ const _NetworkPlus = (function () {
           setStatus(uiTextFormat('statusImportInProgress', { format: sourceValidation.format.toUpperCase() }));
           const stagedImport =
             sourceValidation.format === 'har'
-              ? await stageHarImport(file)
+              ? await stageHarImport(file, retainHarSource)
               : await stageSazImport(file);
           const retainedCount = commitStagedImport(stagedImport);
           setStatus(uiTextFormat('statusImportSummary', {
@@ -21845,7 +22303,7 @@ const _NetworkPlus = (function () {
           importFile.value = '';
           return;
         }
-        await importCapturedFile(file);
+        await importCapturedFile(file, true);
         importFile.value = '';
       });
     }
@@ -22314,6 +22772,7 @@ const _NetworkPlus = (function () {
         releaseResponseContent(row, 'not-loaded', false);
         row._responseContentPromise = null;
         row._responsePayloadPromise = null;
+        row._boundedResponsePayloadPromise = null;
         row.responseContentReason = '';
         row.responseContentError = null;
         for (const key of ['statusText', 'duration', 'size', 'requestPostData', 'requestBodySize', 'responseBodySize',
@@ -22719,17 +23178,18 @@ const _NetworkPlus = (function () {
             // travels to the mirror tab with its real reason.
             return Promise.reject(new Error(row.responseContentReason));
           }
-          return fetchResponsePayload(row).then((payload) => {
+          const rejectOversized = (bytes) => new Error(
+            'Body is ' + fmtBytes(bytes) + '; the per-body cache limit is ' + fmtBytes(MAX_RESPONSE_BODY_BYTES) + '.',
+          );
+          if (row.responseContentSize > MAX_RESPONSE_BODY_BYTES) {
+            return Promise.reject(rejectOversized(row.responseContentSize));
+          }
+          return fetchResponsePayload(row, RESPONSE_CONTENT_TIMEOUT_MS, MAX_RESPONSE_BODY_BYTES).then((payload) => {
             // The local panel refuses bodies over the per-body limit at cache
             // admission; the mirror path must not serve what the host itself
             // would refuse — and one oversize port message throws, is
             // swallowed, and leaves the viewer with a bare 10-second timeout.
-            const payloadChars = typeof payload.content === 'string' ? payload.content.length : 0;
-            if (payloadChars > MAX_RESPONSE_BODY_BYTES) {
-              throw new Error(
-                'Body is ' + fmtBytes(payloadChars) + '; the per-body cache limit is ' + fmtBytes(MAX_RESPONSE_BODY_BYTES) + '.',
-              );
-            }
+            if (payload.bytes > MAX_RESPONSE_BODY_BYTES) throw rejectOversized(payload.bytes);
             return { content: payload.content, encoding: payload.encoding };
           });
         },
@@ -22987,6 +23447,19 @@ const _NetworkPlus = (function () {
     if (wsCaptureBtn && inspectedEval && !mirrorViewerActive && !offlineView) {
       wsCaptureBtn.hidden = false;
       const streamCapture = { enabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
+      const fullFrameCaptureKey = crypto.randomUUID();
+      let streamDocumentGeneration = 0;
+      const allowWsFullCapture = () => !state.paused && !state.sampleCaptureActive;
+      state.syncWsFullCapture = () => {
+        if (!streamCapture.enabled) return;
+        inspectedEval('window.__networkPlusWS__?.setFullCapture?.(' +
+          JSON.stringify(fullFrameCaptureKey) + ',' + allowWsFullCapture() + ')', () => {});
+      };
+      state.clearWsFullFrames = () => {
+        streamDocumentGeneration += 1;
+        if (!streamCapture.enabled) return;
+        inspectedEval('window.__networkPlusWS__?.clearFullFrames?.(' + JSON.stringify(fullFrameCaptureKey) + ')', () => {});
+      };
       const streamMemoryByRow = new WeakMap();
       let streamMemoryUsed = 0;
       const reserveStreamMemory = (row, bytes) => {
@@ -23014,9 +23487,30 @@ const _NetworkPlus = (function () {
       };
       refreshStreamCaptureLabel = updateStreamCaptureButton;
       const injectStreamWrappers = () => {
-        inspectedEval(buildWsWrapperSource(), () => {});
+        inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});
         inspectedEval(buildSseWrapperSource(), () => {});
       };
+      const readFullFrame = (row, frame, offset, timeout) => new Promise((resolve, reject) => {
+        const available = () => streamCapture.enabled && frame.fullGeneration === streamDocumentGeneration &&
+          isActiveRetainedRow(row, state.retainedRows, state.activeRows);
+        if (!available()) {
+          reject(new Error('WebSocket message expired'));
+          return;
+        }
+        const timer = setTimeout(() => reject(new Error('Timed out reading a WebSocket message')),
+          Math.min(timeout, RESPONSE_CONTENT_TIMEOUT_MS));
+        try {
+          inspectedEval(buildWsFullFrameReadSource(fullFrameCaptureKey, frame, offset),
+            (part, errorInfo) => {
+              clearTimeout(timer);
+              if (errorInfo || !available()) reject(new Error('WebSocket message expired'));
+              else resolve(part);
+            });
+        } catch (error) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
       const createStreamRow = (event, variant) => {
         const isSse = variant === 'sse';
         const row = buildRowFromRequest({
@@ -23043,6 +23537,7 @@ const _NetworkPlus = (function () {
         row.status = '';
         row.initiator = isSse ? { text: 'EventSource', typeLabel: 'SSE' } : { text: 'WebSocket', typeLabel: 'WS' };
         row._wsSocketId = event.socketId;
+        if (!isSse) row._readWsFullFrame = (frame, offset, timeout) => readFullFrame(row, frame, offset, timeout);
         (isSse ? streamCapture.sseRows : streamCapture.socketRows).set(event.socketId, row);
         pendingLiveRows.push(row);
         return row;
@@ -23117,6 +23612,7 @@ const _NetworkPlus = (function () {
         let memoryLimited = false;
         const changedRows = ingestWsEvents(result, {
           variant,
+          fullFrameGeneration: streamDocumentGeneration,
           allowMessage: (row, addedBytes) => {
             if (reserveStreamMemory(row, addedBytes)) return true;
             memoryLimited = true;
@@ -23170,7 +23666,6 @@ const _NetworkPlus = (function () {
       // Swallowing every eval failure left the toggle claiming capture was on
       // while nothing could reach the page; a short streak surfaces it once.
       let streamEvalFailureTicks = 0;
-      let streamDocumentGeneration = 0;
       const wsDrain = buildStreamDrainSource('__networkPlusWS__');
       const sseDrain = buildStreamDrainSource('__networkPlusSSE__');
       const drainStreamQueues = () => {
@@ -23698,6 +24193,7 @@ const _NetworkPlus = (function () {
     WS_DIRECTION_TEXT_LIMIT_CHARS,
     WS_POLL_INTERVAL_MS,
     buildWsWrapperSource,
+    buildWsFullFrameReadSource,
     buildSseWrapperSource,
     buildStreamDrainSource,
     formatWsFrameLine,

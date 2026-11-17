@@ -4,7 +4,7 @@ Last updated: 2026-11-17
 
 ## Scope
 
-Network+ for DevTools is a Microsoft Edge and Google Chrome DevTools extension for inspecting HTTP requests and responses from the page being debugged. This notice describes the extension behavior in the current repository version. It does not make a legal guarantee or replace a user's responsibility to handle network evidence safely.
+Network+ for DevTools is a Microsoft Edge and Google Chrome DevTools extension for inspecting HTTP requests, responses, and WebSocket messages from the page being debugged. This notice describes the extension behavior in the current repository version. It does not make a legal guarantee or replace a user's responsibility to handle network evidence safely.
 
 ## Data Network+ can access
 
@@ -41,15 +41,17 @@ Search results, selected rows, captured request records, headers, and bodies are
 
 ## Retention and user controls
 
-Captured and imported traffic is held in the DevTools panel's memory while that panel session remains open. Request rows are retained without a count limit by default; a limit from 100 to 100,000 rows can be configured in the Settings dialog, which states the memory cost of the unlimited default. Response bodies always remain limited to 1 MiB per body and 32 MiB across the shared cache. Old requests or bodies can be evicted when limits are reached.
+The DevTools panel holds its working set in memory. Request rows are retained without a count limit by default. The Settings dialog explains the memory cost and lets users set a limit from 100 to 100,000 rows. The shared HTTP response cache keeps up to 1 MiB per body and 32 MiB in total. Old requests or bodies can be evicted when limits are reached.
+
+Live WebSocket capture keeps recent long text messages in the inspected page's memory, up to 8 Mi UTF-16 code units. This makes it possible to save complete messages while showing short previews in the panel. Stopping or clearing the capture, starting a new capture session, and leaving the inspected document release the retained text. Newer messages can also evict older ones. If the panel closes without clearing the capture, the page can retain the text until the document or capture session changes.
 
 `Clear` removes the current working set from the panel and keeps one bounded Undo snapshot for up to 10 seconds. Retention pressure can release some or all of that snapshot earlier. After the Undo window expires, Network+ releases the retained snapshot. Closing DevTools ends the in-memory panel session. Clear and closing DevTools do not delete files the user already downloaded or text the user already placed on the system clipboard.
 
 ## Clipboard and HAR output
 
-Network+ writes to the clipboard or creates a HAR download only after a user selects a copy or export action. Sanitized output is the default. It redacts URL query and form-like fragment values, URL credentials, cookie values, and header values outside a small structural allowlist; it defensively redacts selected JSON fields and omits body formats it cannot safely sanitize. Sanitization reduces accidental disclosure but cannot guarantee that every sensitive value is removed, so users should review output before sharing it.
+Network+ writes to the clipboard or creates a local download only after the user selects a copy, save, or export action. Sanitized output is the default. It redacts URL query and form-like fragment values, URL credentials, cookie values, and header values outside a small structural allowlist. It defensively redacts selected JSON fields and omits body formats it cannot safely sanitize. Users should review output before sharing it because some sensitive values may remain.
 
-Full output can include URLs, headers, cookies, request bodies, response bodies, captured WebSocket frames, and authentication or personal information. It is never the default. Full HAR export and the full body copies in the Request and Response panes are available only after a warning and one-time confirmation for that action. The row menu's full copy formats are reached through a collapsed group labelled `Copy full (unsanitized)`, which states what it hands out at the point of choosing rather than after it. Network+ does not save a preference to use full output automatically.
+Full output can include URLs, headers, cookies, request bodies, response bodies, captured WebSocket frames, and authentication or personal information. Whenever you choose a full HAR export, a full body copy, or a complete HTTP body or WebSocket message download, Network+ shows a warning and asks for one-time confirmation for that action. Saving an available complete HTTP response can retrieve a body larger than the shared cache allows. The row menu labels its collapsed group of full copy formats `Copy full (unsanitized)`. Network+ does not save a preference to use full output automatically.
 
 Edit and resend sends a request only after the user chooses to send it. The destination must have the same scheme, host, and port as the inspected page. The browser may ask for optional scripting and access to that site when the user resends. A packaged script runs in an isolated context of the inspected document so the browser can use that site’s session when requested. The request fields are not passed to the page’s JavaScript. Network+ blocks redirects and does not store the composed request. JWT-shaped header values decode locally for display only. The decoded claims are never verified, stored, copied, or exported.
 

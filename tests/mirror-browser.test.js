@@ -657,6 +657,7 @@ browserTest(
         entry.response.content = { mimeType: 'websocket', size: 0, text: '' };
         const customPayloads = {
           1: 'AP8=',
+          997: 'retained-from-original-har ' + '日本語'.repeat(1000) + ' end-of-original-frame',
           998: 'a'.repeat(180) + ' HiddenMarker[',
           999: 'b'.repeat(180) + ' hiddenmarker[',
           1000: messageJson,
@@ -738,6 +739,26 @@ browserTest(
       });
       expect(viewerImported._webSocketMessages[0]).toEqual({ type: 'send', time: 1700000000, opcode: 1, data: 'private-frame-0' });
       expect(viewerImported._webSocketMessages[1]).toEqual({ type: 'receive', time: 1700000000.001, opcode: 2 });
+
+      const importedFrameSelector = '.ws-message-snippet';
+      await evaluate(host.cdp, `(() => {
+        document.querySelector('#tbody tr[data-row-id]').click();
+        const preview = [...document.querySelectorAll('${importedFrameSelector}')]
+          .find((element) => element.textContent.startsWith('retained-from-original-har '));
+        preview.closest('summary').click();
+        return true;
+      })()`);
+      expect(await waitWithRelay(host, "Boolean(document.querySelector('.ws-message-save-full'))")).toBe(true);
+      const savedIndex = await evaluate(host.cdp, `(() => {
+        document.querySelector('.ws-message-save-full').click();
+        return window.__harExports.length;
+      })()`);
+      expect(await evaluate(host.cdp, "document.querySelector('#dataSafetyDialog').open")).toBe(true);
+      await evaluate(host.cdp, "document.querySelector('#dataSafetyConfirmBtn').click(); true");
+      expect(await waitWithRelay(host, `window.__harExports.length === ${savedIndex + 1}`)).toBe(true);
+      expect(await evaluate(host.cdp, `window.__harExports[${savedIndex}].text()`, true))
+        .toBe('retained-from-original-har ' + '日本語'.repeat(1000) + ' end-of-original-frame');
+
       const sanitizedStart = traffic.length;
       const sanitized = (await exportHar(viewer, 'sanitized')).log.entries[0];
       expect(sanitized._webSocketMessages).toBeUndefined();
@@ -1628,7 +1649,9 @@ browserTest(
     try {
       const result = await evaluate(page.cdp, `(async () => {
         const file = document.querySelector('#importFile');
-        const body = 'x'.repeat(2000) + 'Y'.repeat(200000);
+        // Fit within the inspector preview budget and exceed both the
+        // single-line fold length and the pane search match limit.
+        const body = 'x'.repeat(2000) + 'Y'.repeat(12000);
         const har = ${MINI_HAR};
         har.log.entries[0].response.content.text = body;
         const files = new DataTransfer();
@@ -1670,7 +1693,7 @@ browserTest(
         return { hidden, rawDense, rawExact, rawTextIntact };
       })()`, true);
       expect(result).toEqual({
-        hidden: { count: 'No matches (+200000 collapsed)', marks: 0 },
+        hidden: { count: 'No matches (+12000 collapsed)', marks: 0 },
         rawDense: { count: '1 / 1500+', marks: 1500 },
         rawExact: { count: '1 / 1500', marks: 1500 },
         rawTextIntact: true,

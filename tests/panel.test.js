@@ -1661,6 +1661,25 @@ describe('response content helpers', () => {
     expect(row.responseContentEncoding).toBe('base64');
   });
 
+  test('skips admission of a known oversized response while explicit full HAR can read it', async () => {
+    const original = 'x'.repeat(1024 * 1024) + 'source tail';
+    const getContent = jest.fn((callback) => callback(original, ''));
+    const row = {
+      id: 28,
+      responseContent: null,
+      responseContentState: 'not-loaded',
+      responseContentSize: original.length,
+      responseHeaders: [],
+      _managedRetention: true,
+      _reqObj: { getContent },
+    };
+    await expect(np.cacheResponseContent(row)).rejects.toThrow('per-body cache limit');
+    expect(getContent).not.toHaveBeenCalled();
+    expect(row.responseContentState).toBe('omitted');
+    expect((await np.resolveHarResponseContent(row)).text).toBe(original);
+    expect(getContent).toHaveBeenCalledTimes(1);
+  });
+
   test('normalizes thrown callback registration and runtime failures as rejected payloads', async () => {
     const thrownRow = responseRowForPayloadTest(21, () => {
       throw new Error('registration unavailable');
@@ -8232,6 +8251,54 @@ describe('websocket capture pieces', () => {
     expect(window.__networkPlusWS__.drain()).toEqual([
       expect.objectContaining({ kind: 'ws-sent', socketId: 1, preview: 'accepted' }),
     ]);
+  });
+
+  test('keeps a small preview and makes complete WebSocket text available in bounded chunks', () => {
+    class SyntheticWebSocket {
+      constructor(url) {
+        this.url = url;
+      }
+      addEventListener() {}
+      send() {}
+    }
+    const window = { WebSocket: SyntheticWebSocket };
+    const context = vm.createContext({ window, structuredClone });
+    const key = 'test-frame-capture-key';
+    vm.runInContext(np.buildWsWrapperSource(true, key), context);
+    const socket = new window.WebSocket('wss://example.test/stream');
+    const capture = window.__networkPlusWS__;
+    capture.drain();
+
+    const message = 'a'.repeat(65535) + '🙂tail';
+    socket.send(message);
+    const [frame] = JSON.parse(vm.runInContext(np.buildStreamDrainSource('__networkPlusWS__'), context));
+    expect(frame).toMatchObject({ truncated: true, fullLength: message.length, preview: message.slice(0, 2048) });
+    expect(frame.fullId).toMatch(/^[a-z0-9-]+$/);
+    expect(capture.readFullFrame('another-reader', frame.fullId, 0)).toBeNull();
+    const first = vm.runInContext(np.buildWsFullFrameReadSource(key, frame, 0), context);
+    expect(first).toHaveLength(65536);
+    expect(first + vm.runInContext(np.buildWsFullFrameReadSource(key, frame, first.length), context)).toBe(message);
+    expect(capture.readFullFrame(key, frame.fullId, message.length)).toBeNull();
+
+    capture.setFullCapture(key, false);
+    socket.send(message);
+    expect(capture.drain()[0].fullId).toBeUndefined();
+    capture.configureFullCapture('next-session', true);
+    expect(capture.readFullFrame(key, frame.fullId, 0)).toBeNull();
+    expect(capture.readFullFrame('next-session', frame.fullId, 0)).toBeNull();
+    capture.setEnabled(false);
+    socket.send(message);
+    expect(capture.drain()).toEqual([]);
+  });
+
+  test('never transfers a malformed or oversized full WebSocket chunk from the inspected world', () => {
+    const request = np.buildWsFullFrameReadSource('reader', { fullId: 'frame', fullLength: 65537 }, 65536);
+    for (const response of ['xy', { payload: 'x' }, undefined]) {
+      const window = { __networkPlusWS__: { readFullFrame: () => response } };
+      expect(vm.runInNewContext(request, { window })).toBeNull();
+    }
+    const window = { __networkPlusWS__: { readFullFrame: () => 'x' } };
+    expect(vm.runInNewContext(request, { window })).toBe('x');
   });
 
   test('frame lines carry direction arrows and bounded text trims from the front', () => {
