@@ -24681,11 +24681,15 @@ const _NetworkPlus = (function () {
       let streamDocumentGeneration = 0;
       let nativeCaptureCutoff = pendingCaptureCutoff;
       let nativeCapturePaused = state.paused || state.sampleCaptureActive;
+      let initialNativeCaptureCutoff = nativeCapturePaused ? null : Date.now();
       let checkNativeNavigation = false;
       const allowWsFullCapture = () => !state.paused && !state.sampleCaptureActive;
       state.syncWsFullCapture = () => {
         const paused = !allowWsFullCapture();
-        if (nativeCapturePaused !== paused) nativeCaptureCutoff = Date.now();
+        if (nativeCapturePaused !== paused) {
+          nativeCaptureCutoff = Date.now();
+          initialNativeCaptureCutoff = null;
+        }
         nativeCapturePaused = paused;
         if (!streamCapture.enabled) return;
         if (nativeWebSockets) {
@@ -24698,6 +24702,7 @@ const _NetworkPlus = (function () {
       state.clearWsFullFrames = () => {
         streamDocumentGeneration += 1;
         nativeCaptureCutoff = Date.now();
+        initialNativeCaptureCutoff = null;
         if (!streamCapture.enabled || nativeWebSockets) return;
         inspectedEval('window.__networkPlusWS__?.clearFullFrames?.(' + JSON.stringify(fullFrameCaptureKey) + ')', () => {});
       };
@@ -24846,14 +24851,17 @@ const _NetworkPlus = (function () {
         let row = nativeSocketRows.get(key);
         if (row && !state.activeRows.has(row) && !queued.has(row)) row = null;
         const recording = streamCapture.enabled && allowWsFullCapture();
+        const startedAt = Date.parse(entry.startedDateTime);
+        const cutoff = recording && initialNativeCaptureCutoff !== null && startedAt >= initialNativeCaptureCutoff
+          ? initialNativeCaptureCutoff : nativeCaptureCutoff;
         let frames = null;
         if (recording) {
-          frames = planNativeWebSocketFrames(entry, row?._nativeWsCursor || 0, row?.id || state.nextId, nativeCaptureCutoff);
+          frames = planNativeWebSocketFrames(entry, row?._nativeWsCursor || 0, row?.id || state.nextId, cutoff);
         }
         const code = entry.response?.status || 0;
         if (!row) {
           if (!allowWsFullCapture() || (!frames?.events.length &&
-              (Date.parse(entry.startedDateTime) <= nativeCaptureCutoff || (!finished && !code)))) return;
+              (startedAt <= cutoff || (!finished && !code)))) return;
           const bytes = 1024 + 2 * entry.request.url.length;
           if (streamMemoryUsed + bytes > STREAM_CAPTURE_MEMORY_BUDGET) {
             onLimit();
@@ -25073,6 +25081,7 @@ const _NetworkPlus = (function () {
           setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' :
             nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'));
         } else {
+          initialNativeCaptureCutoff = null;
           if (streamCapture.timer) {
             clearInterval(streamCapture.timer);
             streamCapture.timer = null;
@@ -25109,8 +25118,12 @@ const _NetworkPlus = (function () {
       ) {
         chrome.devtools.network.onNavigated.addListener(() => {
           // The old document took the wrappers and their connections with it.
-          if (nativeWebSockets) checkNativeNavigation = true;
-          else streamDocumentGeneration += 1;
+          if (nativeWebSockets) {
+            checkNativeNavigation = true;
+            if (initialNativeCaptureCutoff !== null) {
+              initialNativeCaptureCutoff = streamCapture.enabled ? null : Date.now();
+            }
+          } else streamDocumentGeneration += 1;
           streamEvalFailureTicks = 0;
           const navigatedRows = [];
           for (const rowsByVariant of [streamCapture.socketRows, streamCapture.sseRows]) {
