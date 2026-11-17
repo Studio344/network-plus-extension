@@ -150,6 +150,7 @@ With the panel open and no traffic captured yet, choose **Explore sample capture
 
 ### Find
 
+- **Request filters and actions.** Narrow the request list to 4xx, 5xx, or requests still awaiting a response. Open **Hosts** to switch between exact hosts. Remove active conditions from the list bar, and select two visible requests to open **Compare** there.
 - Integrated multi-keyword search (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>F</kbd>): one input per keyword, six highlight colors, per-keyword match counts and ▲▼ navigation, a scope switch for URL / Body / Headers, match options (case / whole word / regex), and a **Matches only** toggle that hides non-matching rows (HAR export follows the displayed set). Scope, match options, and the toggle persist between sessions; keyword text does not.
 - Per-column filters: a visual local-time range picker for Client start and Server done, method multi-select, repeatable `contains` / `notcontains` rules for domain and path, and any/all/exclude logic for URLs.
 - View preset — the Columns menu keeps one saved view (column visibility + filter rules). Apply restores it (or the factory default before anything is saved) and Update overwrites it with the current view. Presets store column/filter configuration only, never captured traffic.

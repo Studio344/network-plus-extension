@@ -18,7 +18,7 @@ const BROWSER_REQUIRED_IN_CI_MESSAGE =
 const TRANSIENT_PROFILE_CLEANUP_ERRORS = new Set(['ENOTEMPTY', 'EBUSY']);
 const TOOLBAR_VIEWPORT_WIDTHS = [375, 500, 800, 1254, 1255, 1280, 1500];
 const TOOLBAR_FOCUS_VIEWPORT_WIDTHS = [375, 500, 800, 1280];
-const GRID_FOCUS_VIEWPORT_WIDTHS = [375, 500, 800, 1280];
+const GRID_FOCUS_VIEWPORT_WIDTHS = [300, 375, 500, 800, 1280];
 const STATUS_WORKSPACE_VIEWPORT_WIDTHS = [320, 375, 414, 768, 1280];
 const SEPARATOR_FOCUS_VIEWPORT_WIDTHS = [320, 375, 414, 768, 800, 801, 1280];
 const SEPARATOR_FOCUS_THEMES = [
@@ -824,6 +824,7 @@ browserTest(
           const section = Array.from(document.querySelectorAll('#columnFilterPopup .filter-section'))
             .find((item) => item.querySelector('.filter-section-name')?.textContent === 'Server done');
           if (!section) throw new Error('Server done filter control is missing.');
+          section.querySelector('.filter-section-toggle').click();
           const [start, end] = section.querySelectorAll('input[type="time"]');
           if (!start || !end) throw new Error('Server done time inputs are missing.');
           start.value = '22:00';
@@ -894,6 +895,8 @@ browserTest(
           };
           const controls = (label, conditionIndex = 0) => {
             const root = section(label);
+            const toggle = root.querySelector('.filter-section-toggle');
+            if (toggle.getAttribute('aria-expanded') === 'false') toggle.click();
             const row = root.querySelectorAll('.filter-condition-row')[conditionIndex] || root;
             const operator = row.querySelector('.filter-op');
             const input = row.querySelector('.filter-value');
@@ -3892,12 +3895,12 @@ browserTest(
         'pauseBtn',
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
         'webSocketOnlyBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'popoutBtn',
@@ -3945,11 +3948,11 @@ browserTest(
       const expectedTabOrder = [
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'shortcutBtn',
@@ -4259,7 +4262,7 @@ browserTest(
         // button's own measured midpoint, so brand or font metric changes can
         // never silently push the cut line off the button.
         { caseId: 'exportHarBtn@mid', actionId: 'exportHarBtn' },
-        { caseId: 'columnsBtn@mid', actionId: 'columnsBtn' },
+        { caseId: 'columnsBtn@mid', actionId: 'columnsBtn', referenceWidth: 600 },
         {
           caseId: 'exportHarBtn@500-sub-4px',
           width: 500,
@@ -4274,7 +4277,7 @@ browserTest(
           // Measure at a width where the toolbar overflows: packed positions
           // are width-independent, unlike the space-between spread layout.
           await cdp.send('Emulation.setDeviceMetricsOverride', {
-            width: 375,
+            width: pointerCase.referenceWidth || 375,
             height: 800,
             deviceScaleFactor: 1,
             mobile: false,
@@ -4494,11 +4497,11 @@ browserTest(
       const toolbarTabOrder = [
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'shortcutBtn',
@@ -4516,13 +4519,18 @@ browserTest(
       // never a font measurement — the nearest boundary is 26px away, well
       // outside any scrollbar-width difference between platforms.
       const EXPECTED_PAINTED_COLUMNS = {
-        // Below the undroppable set's own width: only the row's sentence and
-        // the sort key the order needs are left, and the grid scrolls.
+        // A compact row keeps its host below Path. At 300px even the
+        // compact columns can need a small amount of horizontal scroll.
+        300: [
+          ['id', 'ID'],
+          ['method', 'Method'],
+          ['status', 'Status'],
+          ['path', 'Path'],
+        ],
         375: [
           ['id', 'ID'],
           ['method', 'Method'],
           ['status', 'Status'],
-          ['domain', 'Domain'],
           ['path', 'Path'],
         ],
         500: [
@@ -4720,8 +4728,13 @@ browserTest(
         expect([width, paintedColumns]).toEqual([width, EXPECTED_PAINTED_COLUMNS[width]]);
         const expectedGridTargets = buildGridTargets(paintedColumns);
         const reverseGridTargets = expectedGridTargets.slice().reverse();
-        // The wrap may drop columns, never the four the row's sentence needs.
-        for (const requiredId of GRID_PRIORITY_1_COLUMN_IDS) {
+        // The compact row still carries its host if the Domain column yields.
+        const compact = width <= 440;
+        const required = compact ? GRID_PRIORITY_1_COLUMN_IDS.filter((id) => id !== 'domain') : GRID_PRIORITY_1_COLUMN_IDS;
+        if (compact) {
+          expect(await evaluate(cdp, "document.querySelector('.compact-request-host')?.textContent")).toBeTruthy();
+        }
+        for (const requiredId of required) {
           expect([width, requiredId, paintedColumns.map(([id]) => id).includes(requiredId)]).toEqual([
             width,
             requiredId,
@@ -4853,7 +4866,7 @@ browserTest(
       );
 
       await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: 375,
+        width: 500,
         height: 800,
         deviceScaleFactor: 1,
         mobile: false,
@@ -4980,7 +4993,7 @@ browserTest(
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           tableWrap.style.transform = 'translateX(2px)';
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          // Domain, not Size: Size is dropped to fit a 375px wrap, and a
+          // Domain is painted as a column at 500px. Size is dropped, and a
           // separator that is not painted cannot be probed for pointer hits.
           const separator = document.querySelector('th[data-col-id="domain"] .col-resizer');
           separator.style.transform = '';
@@ -5814,6 +5827,7 @@ const ELASTIC_GRID_MEASURE = `(() => {
     firstRowCellIds: Array.from(
       document.querySelectorAll('#tbody tr[data-row-id]')[0]?.querySelectorAll('td[data-col-id]') || [],
     ).map((td) => td.dataset.colId),
+    compactHost: document.querySelector('#tbody .compact-request-host')?.textContent ?? null,
     // Auto-hide is not a preference: this is the raw preference blob, and it
     // has to stay exactly what the reader's own actions put there.
     storedRaw: localStorage.getItem('networkPlus.cols'),
@@ -5830,12 +5844,13 @@ function expectedElasticWidths(measure) {
   const ids = measure.headerIds;
   const storedSum = ids.reduce((sum, id) => sum + measure.storedByAria[id], 0);
   const slack = measure.wrapClientWidth - storedSum;
+  const pathFloor = measure.wrapClientWidth <= 440 ? 100 : ELASTIC_PATH_MIN_WIDTH;
   const elasticId = ids.includes('path') ? 'path' : ids[ids.length - 1];
   const delta =
     slack >= 0
       ? slack
       : elasticId === 'path'
-        ? Math.max(slack, ELASTIC_PATH_MIN_WIDTH - measure.storedByAria.path)
+        ? Math.max(slack, pathFloor - measure.storedByAria.path)
         : 0;
   const expected = {};
   for (const id of ids) expected[id] = measure.storedByAria[id] + (id === elasticId ? delta : 0);
@@ -5848,12 +5863,12 @@ function expectElasticGridInvariants(measure, at) {
   expect([at, measure.headerWidths]).toEqual([at, expected]);
   // Header and cells name the same columns in the same order, or the grid skews.
   expect([at, measure.firstRowCellIds]).toEqual([at, measure.headerIds]);
-  // No column the row's sentence needs is ever dropped.
+  // The compact row keeps its host under the path when Domain is hidden.
   for (const id of GRID_PRIORITY_1_COLUMN_IDS) {
-    expect([at, id, measure.headerIds.includes(id)]).toEqual([at, id, true]);
+    expect([at, id, measure.headerIds.includes(id) || (id === 'domain' && !!measure.compactHost)]).toEqual([at, id, true]);
   }
-  // Path never paints narrower than its floor.
-  expect([at, measure.headerWidths.path >= ELASTIC_PATH_MIN_WIDTH]).toEqual([at, true]);
+  const pathFloor = measure.wrapClientWidth <= 440 ? 100 : ELASTIC_PATH_MIN_WIDTH;
+  expect([at, measure.headerWidths.path >= pathFloor]).toEqual([at, true]);
   const painted = Object.values(expected).reduce((sum, width) => sum + width, 0);
   expect([at, measure.gridStyleWidth]).toEqual([at, painted + 'px']);
   // Horizontal scroll exists exactly when the columns that may not be dropped
@@ -5911,6 +5926,17 @@ browserTest(
         mobile: false,
       });
       await settleLayout(cdp);
+      const compact = await evaluate(cdp, ELASTIC_GRID_MEASURE);
+      expectElasticGridInvariants(compact, 'compact row fits 320px');
+      expect(compact.horizontalScroll).toBe(false);
+      expect(compact.compactHost).toBeTruthy();
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: 280,
+        height: 800,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await settleLayout(cdp);
       const overflowing = await evaluate(cdp, ELASTIC_GRID_MEASURE);
       expectElasticGridInvariants(overflowing, 'undroppable set wider than the wrap');
       expect(overflowing.horizontalScroll).toBe(true);
@@ -5921,7 +5947,7 @@ browserTest(
           (id) => !GRID_PRIORITY_1_COLUMN_IDS.includes(id) && id !== 'id',
         ),
       ).toEqual([]);
-      expect(overflowing.headerWidths.path).toBe(ELASTIC_PATH_MIN_WIDTH);
+      expect(overflowing.headerWidths.path).toBe(100);
       expect(overflowing.gridWidth).toBeGreaterThan(overflowing.wrapClientWidth);
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1280,
@@ -14445,6 +14471,7 @@ const INSPECTOR_COLUMN_SCROLL_MATRIX = `(() => {
     positions.push({
       fraction,
       labelTopOffset: Math.round(labelBox.top - panelsBox.top),
+      expectedLabelTopOffset: Math.min(0, Math.round(requestLabel.closest('.inspector-half').getBoundingClientRect().bottom - labelBox.height - panelsBox.top)),
       labelVisible: labelBox.bottom > panelsBox.top && labelBox.top < panelsBox.bottom,
       // The caption is the collapse toggle, so being on top is not cosmetic.
       labelHit: Boolean(hit) && (hit === requestLabel || requestLabel.contains(hit)),
@@ -14578,7 +14605,9 @@ browserTest(
           labelVisible: position.labelVisible,
           labelHit: position.labelHit,
         }).toEqual({ fraction: position.fraction, labelVisible: true, labelHit: true });
-        expect(Math.abs(position.labelTopOffset)).toBeLessThanOrEqual(1);
+        // At the very end a sticky caption can leave with its section while
+        // the response remains reachable. Compare with its containing block.
+        expect(Math.abs(position.labelTopOffset - position.expectedLabelTopOffset)).toBeLessThanOrEqual(1);
       }
       // Both loops below skip: a position the column did not actually scroll
       // to, and a bar the previous reading did not have. A column that stopped
@@ -16843,6 +16872,8 @@ browserTest(
     };
     try {
       await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      expect(await evaluate(cdp, "document.activeElement.getAttribute('aria-expanded')")).toBe('false');
+      await evaluate(cdp, "document.activeElement.click()");
       await press('Tab', 'Tab', 9);
       expect(await evaluate(cdp, `({
         open: document.querySelector('#columnFilterPopup').classList.contains('show'),
