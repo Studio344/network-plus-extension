@@ -667,6 +667,7 @@ browserTest(
         entry.response.content = { mimeType: 'websocket', size: 0, text: '' };
         const customPayloads = {
           1: 'AP8=',
+          996: '{"boundedJson":{"approved":true},"body":"' + 'X'.repeat(2400) + '","tail":"uncaptured"}',
           997: 'retained-from-original-har ' + '日本語'.repeat(1000) + ' end-of-original-frame',
           998: 'a'.repeat(180) + ' HiddenMarker[',
           999: 'b'.repeat(180) + ' hiddenmarker[',
@@ -833,6 +834,23 @@ browserTest(
         ],
       });
       const firstMessagesRequest = traffic.find((message) => message.type === 'ws-messages-request');
+      await evaluate(viewer.cdp, `(() => {
+        const preview = [...document.querySelectorAll('.ws-message-snippet')]
+          .find((element) => element.textContent.startsWith('{"boundedJson":'));
+        preview.closest('summary').click();
+        return true;
+      })()`);
+      expect(await waitWithRelay(viewer, `(() => {
+        const key = [...document.querySelectorAll('.ws-message-payload[data-format="json"] .syn-key')]
+          .find((element) => element.textContent === '"boundedJson"');
+        if (!key) return null;
+        const payload = key.closest('pre');
+        return {
+          indented: payload.textContent.includes('\\n    "approved": true'),
+          partialString: payload.lastChild.textContent.startsWith('"XXX') && payload.textContent.endsWith('X'),
+          fullAction: !!payload.closest('details').querySelector('.ws-message-show-full'),
+        };
+      })()`)).toEqual({ indented: true, partialString: true, fullAction: false });
       expect(firstMessagesRequest).toMatchObject({ minimumRevision: 0 });
       await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').click(); true");
 

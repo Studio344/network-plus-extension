@@ -8454,11 +8454,35 @@ describe('websocket capture pieces', () => {
   });
 
   test('formats WebSocket JSON without changing captured numbers, keys, or escapes', () => {
-    expect(np.formatWsMessageJson('{"id":9007199254740993,"id":-0,"nested":[{},1.2e+8,"a\\n"]}')).toBe(
+    expect(np.planWsMessageJson('{"id":9007199254740993,"id":-0,"nested":[{},1.2e+8,"a\\n"]}').formatted).toBe(
       '{\n  "id": 9007199254740993,\n  "id": -0,\n  "nested": [\n    {},\n    1.2e+8,\n    "a\\n"\n  ]\n}',
     );
-    expect(np.formatWsMessageJson('{"unfinished":')).toBeNull();
-    expect(np.formatWsMessageJson('['.repeat(80) + '0' + ']'.repeat(80))).toBeNull();
+    expect(np.planWsMessageJson('{"unfinished":')).toBeNull();
+    expect(np.planWsMessageJson('['.repeat(80) + '0' + ']'.repeat(80))).toBeNull();
+  });
+
+  test('formats only captured JSON tokens and keeps an incomplete literal verbatim', () => {
+    expect(np.planWsMessageJson('{"list":[{"ok":true}],"note":"a\\uD8', true)).toEqual({
+      envelope: '',
+      formatted: '{\n  "list": [\n    {\n      "ok": true\n    }\n  ],\n  "note": ',
+      tail: '"a\\uD8',
+    });
+    expect(np.planWsMessageJson('{"latency":1.2e-', true)).toMatchObject({ tail: '1.2e-' });
+    expect(np.planWsMessageJson('{"ok":tr', true)).toMatchObject({ tail: 'tr' });
+    expect(np.planWsMessageJson('{"id":1 2,"message":', true)).toBeNull();
+    expect(np.planWsMessageJson('{"nested":[1}', true)).toBeNull();
+    expect(np.planWsMessageJson('["invalid\\x', true)).toBeNull();
+  });
+
+  test('retains Socket.IO envelopes and respects the inline JSON budget', () => {
+    expect(np.planWsMessageJson('42/chat,17["joined",{"success":true}]')).toMatchObject({
+      envelope: '42/chat,17',
+      formatted: '[\n  "joined",\n  {\n    "success": true\n  }\n]',
+    });
+    expect(np.planWsMessageJson('\ufeff{"id":1}')).toMatchObject({ formatted: '{\n  "id": 1\n}' });
+    expect(np.planWsMessageJson('label={"ok":true}')).toBeNull();
+    expect(np.planWsMessageJson('["' + 'x'.repeat(17 * 1024) + '"]')).toBeNull();
+    expect(np.planWsMessageJson('[' + '0,'.repeat(2050) + '0]')).toBeNull();
   });
 
   test('the latest WebSocket history keeps recording after the full HAR frame cap', () => {
