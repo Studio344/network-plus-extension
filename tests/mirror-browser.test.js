@@ -743,9 +743,13 @@ browserTest(
 
       await evaluate(viewer.cdp, "document.querySelector('#tbody tr[data-row-id]').click(); true");
       const hasImportedHistory = `!document.querySelector('#ws-messages-panel').hidden &&
-        document.querySelector('#ws-messages-panel .ws-message:last-child .ws-message-payload')?.textContent === 'private-frame-1001' &&
+        document.querySelector('#ws-messages-panel .ws-message:last-child .ws-message-snippet')?.textContent === 'private-frame-1001' &&
         document.querySelector('#ws-messages-status').textContent.includes('902')`;
       expect(await waitWithRelay(viewer, hasImportedHistory)).toBe(true);
+      expect(await evaluate(viewer.cdp, `document.querySelector('#ws-timeline-header').hidden === false &&
+        !document.querySelector('#ws-messages-panel details[open], #ws-messages-panel pre')`)).toBe(true);
+      await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child summary').click(); true");
+      expect(await waitWithRelay(viewer, `document.querySelector('#ws-messages-panel .ws-message:last-child details[open] pre')?.textContent === 'private-frame-1001'`)).toBe(true);
       const firstMessagesRequest = traffic.find((message) => message.type === 'ws-messages-request');
       expect(firstMessagesRequest).toMatchObject({ minimumRevision: 0 });
       await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').click(); true");
