@@ -212,21 +212,21 @@ changes remain unmistakable.
 ### Buttons
 
 - **Shape:** Compact rounded rectangle (`6px`) with a `32px` minimum height in the toolbar.
-- **Primary:** Neutral canvas at rest; icon and brand actions use a ghost treatment. Signal Indigo is reserved for active or selected state.
-- **Hover / Focus:** Border and text shift to Signal Indigo; keyboard focus uses a visible `2px` outline.
+- Primary buttons use the neutral canvas at rest. Filled accent colors identify active controls.
+- Hover shifts the border and text to the accent color. Keyboard focus uses a visible `2px` outline.
 - **Destructive:** Neutral at rest, Error Red only on hover, focus, or confirmed destructive state.
 - **Disabled:** Reduced opacity with the pointer affordance removed.
 
 ### Inputs / Fields
 
 - **Style:** One-pixel Control Boundary, canvas background, `6px` radius, compact `4px 8px` padding.
-- **Focus:** Signal Indigo border plus a restrained soft ring.
+- Focus uses an accent border and a soft ring.
 - **Error / Disabled:** Error text must be explicit; disabled state cannot rely on color alone.
 
 ### Navigation
 
 - **Toolbar:** Left side owns capture and data actions; right side owns configuration and theme.
-- **Tabs:** Single-line scrollable labels with Signal Indigo text and underline for the active tab.
+- Use single-line scrollable labels and accent text and an underline for the active tab.
 - **Keyboard:** Arrow keys move within tablists; Home and End jump to boundaries; focus follows selection.
 
 ### Request Grid
@@ -253,7 +253,7 @@ changes remain unmistakable.
 ### Do:
 
 - **Do** preserve compact `11px` to `13px` typography and `32px` toolbar controls.
-- **Do** use Signal Indigo only for action, focus, selection, or navigation state.
+- **Do** use the accent color for action, focus, selection, and navigation.
 - **Do** keep sticky surfaces opaque and distinguish them with borders or inset shadows.
 - **Do** verify every UI change in System, Dark, and Light themes at wide and approximately `600px` panel widths.
 - **Do** pair semantic colors with labels, shape, icons, or ARIA state.
