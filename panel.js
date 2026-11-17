@@ -5214,22 +5214,31 @@ const _NetworkPlus = (function () {
   }
 
   const TRAFFIC_TIMELINE_BINS = 12;
+  const OVERVIEW_PAGE_SIZE = 6;
+  const MAX_OVERVIEW_EPOCH = 8640000000000000;
   const LATENCY_BANDS = [100, 300, 1000, 3000, Infinity];
 
   function getOverviewStart(row) {
     const start = row.clientStartEpoch;
-    return row._overviewUnknownStart || !Number.isSafeInteger(start) || start === INVALID_REQUEST_EPOCH ? null : start;
+    return row._overviewUnknownStart || !Number.isSafeInteger(start) || Math.abs(start) > MAX_OVERVIEW_EPOCH ? null : start;
   }
 
-  function requestStartsInRange(row, range) {
+  function getOverviewDuration(row) {
+    return row._pendingRequest || row._overviewUnknownDuration || isLiveStreamRow(row) || row._mirrorStreamRevision != null ||
+      !Number.isFinite(row.duration) || row.duration < 0 ? null : row.duration;
+  }
+
+  function requestOverlapsRange(row, range) {
     if (!range) return true;
     const start = getOverviewStart(row);
-    return start !== null && start >= range.start && start < range.end;
+    if (start === null || start >= range.end) return false;
+    const duration = getOverviewDuration(row);
+    return duration > 0 ? start + duration > range.start : start >= range.start;
   }
 
   function computeTrafficTimeline(rows) {
     let first = Infinity;
-    let last = -Infinity;
+    let end = -Infinity;
     let untimed = 0;
     for (const row of rows) {
       const start = getOverviewStart(row);
@@ -5238,18 +5247,17 @@ const _NetworkPlus = (function () {
         continue;
       }
       first = Math.min(first, start);
-      last = Math.max(last, start);
+      end = Math.max(end, start + Math.max(1, Math.ceil(getOverviewDuration(row) ?? 0)));
     }
     const bins = [];
-    if (first === Infinity) return { bins, untimed, peak: null, maxCount: 0 };
+    if (first === Infinity) return { bins, untimed, peak: null, range: null };
 
-    const end = last + 1;
+    end = Math.min(end, MAX_OVERVIEW_EPOCH + 1);
     const width = Math.max(1, Math.ceil((end - first) / TRAFFIC_TIMELINE_BINS));
     const count = Math.min(TRAFFIC_TIMELINE_BINS, Math.ceil((end - first) / width));
     for (let index = 0; index < count; index += 1) {
       bins.push({ start: first + index * width, end: Math.min(end, first + (index + 1) * width), count: 0, errors: 0 });
     }
-    let maxCount = 0;
     for (const row of rows) {
       const start = getOverviewStart(row);
       if (start === null) continue;
@@ -5257,10 +5265,30 @@ const _NetworkPlus = (function () {
       bin.count += 1;
       const statusClass = classifyStatusClass(row.status);
       if (!row._pendingRequest && (statusClass === '4xx' || statusClass === '5xx')) bin.errors += 1;
-      maxCount = Math.max(maxCount, bin.count);
     }
     const peak = bins.reduce((best, bin) => bin.errors > (best?.errors || 0) ? bin : best, null);
-    return { bins, untimed, peak, maxCount };
+    return { bins, untimed, peak, range: { start: first, end } };
+  }
+
+  function planOverviewWaterfallPage(rows, range, page) {
+    const timed = rows.filter((row) => getOverviewStart(row) !== null)
+      .sort((a, b) => a.clientStartEpoch - b.clientStartEpoch);
+    const lastPage = Math.max(0, Math.ceil(timed.length / OVERVIEW_PAGE_SIZE) - 1);
+    page = Math.min(page, lastPage);
+    const offset = page * OVERVIEW_PAGE_SIZE;
+    const span = range.end - range.start;
+    const entries = timed.slice(offset, offset + OVERVIEW_PAGE_SIZE).map((row) => {
+      const start = getOverviewStart(row);
+      const duration = getOverviewDuration(row);
+      return {
+        row,
+        startsAt: (start - range.start) / span,
+        width: Math.min(duration ?? 0, range.end - start) / span,
+        duration,
+        error: !row._pendingRequest && (classifyStatusClass(row.status) === '4xx' || classifyStatusClass(row.status) === '5xx'),
+      };
+    });
+    return { entries, total: timed.length, page, lastPage, offset };
   }
 
   function computeLatencyDistribution(rows) {
@@ -5273,9 +5301,9 @@ const _NetworkPlus = (function () {
         pending += 1;
         continue;
       }
-      if (row._overviewUnknownDuration || isLiveStreamRow(row) || row._mirrorStreamRevision != null ||
-          !Number.isFinite(row.duration) || row.duration < 0) continue;
-      const index = LATENCY_BANDS.findIndex((limit) => row.duration < limit);
+      const duration = getOverviewDuration(row);
+      if (duration === null) continue;
+      const index = LATENCY_BANDS.findIndex((limit) => duration < limit);
       bands[index] += 1;
       measured += 1;
       if (!slowest || row.duration > slowest.duration) slowest = row;
@@ -6542,13 +6570,9 @@ const _NetworkPlus = (function () {
       en: 'Traffic overview',
       ja: '通信の全体像',
     },
-    overviewStarts: {
-      en: 'Request starts (UTC)',
-      ja: 'リクエスト開始時刻（UTC）',
-    },
-    overviewRequests: {
-      en: 'Requests',
-      ja: '通信件数',
+    overviewWaterfall: {
+      en: 'Request waterfall',
+      ja: 'リクエストのウォーターフォール',
     },
     overviewErrors: {
       en: 'HTTP 4xx/5xx',
@@ -6559,16 +6583,36 @@ const _NetworkPlus = (function () {
       ja: 'この範囲に、開始時刻が記録された通信はありません。',
     },
     overviewBinGroup: {
-      en: 'Request starts by time window',
-      ja: '時間帯ごとのリクエスト開始件数',
+      en: 'Filter by time range. Use Shift and arrow keys to extend.',
+      ja: '時間帯で絞り込む。Shift＋矢印キーで範囲を広げます。',
     },
     overviewInstructions: {
-      en: 'Choose a bar. Shift+click or Shift+arrow keys selects a span.',
-      ja: '棒を選択。Shift＋クリックまたはShift＋矢印キーで範囲を指定できます。',
+      en: 'Left edge = start. Bar length = duration. Drag the time ruler to filter.',
+      ja: '横棒の左端が開始、長さが所要時間です。時間軸をドラッグして絞り込めます。',
     },
     overviewSearchScope: {
-      en: 'Timeline counts are before text search.',
-      ja: '時系列の件数は本文・キーワード検索前の集計です。',
+      en: 'Time ruler totals are before text search.',
+      ja: '時間軸の件数はテキスト検索前の値です。',
+    },
+    overviewNoDisplayed: {
+      en: 'No displayed requests with a recorded start time.',
+      ja: '表示中の通信に開始時刻の記録がありません。',
+    },
+    overviewPageCount: {
+      en: '{first}–{last} of {total}',
+      ja: '{total}件中 {first}–{last}件',
+    },
+    overviewPreviousPage: {
+      en: 'Previous requests',
+      ja: '前の通信',
+    },
+    overviewNextPage: {
+      en: 'Next requests',
+      ja: '次の通信',
+    },
+    overviewUnknownDuration: {
+      en: 'Duration unavailable',
+      ja: '所要時間の記録なし',
     },
     overviewLatency: {
       en: 'Latency of displayed requests',
@@ -6579,12 +6623,12 @@ const _NetworkPlus = (function () {
       ja: '時間帯の絞り込みを解除',
     },
     overviewRangeFilter: {
-      en: 'Start time {range}',
-      ja: '開始時刻 {range}',
+      en: 'Active during {range}',
+      ja: '通信時間帯 {range}',
     },
     overviewRangeApplied: {
-      en: 'Filtered by start time {range}',
-      ja: '開始時刻 {range} で絞り込みました。',
+      en: 'Showing requests active during {range}',
+      ja: '{range} に通信していたリクエストを表示しています。',
     },
     overviewTimeCleared: {
       en: 'Time range cleared.',
@@ -6595,8 +6639,8 @@ const _NetworkPlus = (function () {
       ja: '選択中 {range}',
     },
     overviewBinLabel: {
-      en: '{range} · {count} requests · {errors} HTTP errors',
-      ja: '{range}、通信 {count} 件、HTTPエラー {errors} 件',
+      en: '{range} · {count} starts · {errors} HTTP errors',
+      ja: '{range}、開始 {count} 件、HTTPエラー {errors} 件',
     },
     overviewPartialBin: {
       en: 'Partly in selected range',
@@ -6607,8 +6651,8 @@ const _NetworkPlus = (function () {
       ja: '開始時刻の記録がない通信 {count} 件は集計対象外です。',
     },
     overviewPeak: {
-      en: 'Most HTTP errors · {count}',
-      ja: 'HTTPエラー最多 · {count}件',
+      en: 'Open HTTP error peak · {count}',
+      ja: 'HTTPエラーが集中した時間帯 · {count}件',
     },
     overviewSlowest: {
       en: 'Open slowest request · {duration}',
@@ -9006,6 +9050,14 @@ const _NetworkPlus = (function () {
       en: 'Stream capture: Off',
       ja: 'ストリームキャプチャ: オフ',
     },
+    wsCapturePromptHelp: {
+      en: 'Enable stream capture before opening a new WebSocket connection.',
+      ja: '新しい WebSocket 接続を開く前に、ストリーム記録をオンにしてください。',
+    },
+    wsCapturePromptBtn: {
+      en: 'Enable stream capture',
+      ja: 'ストリーム記録をオンにする',
+    },
     wsConnectionTabs: {
       en: 'WebSocket connection',
       ja: 'WebSocket 接続',
@@ -9021,6 +9073,10 @@ const _NetworkPlus = (function () {
     titleWebSocketOnly: {
       en: 'Show only WebSocket requests',
       ja: 'WebSocket 通信だけを表示',
+    },
+    webSocketOnly: {
+      en: 'WebSocket only',
+      ja: 'WebSocket のみ',
     },
     wsFilterDirection: {
       en: 'Message direction',
@@ -9101,6 +9157,18 @@ const _NetworkPlus = (function () {
     wsMessagesEmpty: {
       en: 'No messages recorded for this connection yet.',
       ja: 'この接続のメッセージはまだ記録されていません。',
+    },
+    wsMessagesArchiveEmpty: {
+      en: 'The imported file contains no messages for this connection.',
+      ja: '読み込んだファイルに、この接続のメッセージは含まれていません。',
+    },
+    wsMessagesArchiveOmitted: {
+      en: '{count} messages were omitted when this HAR was sanitized.',
+      ja: 'HAR のサニタイズ時にメッセージ {count} 件が省略されました。',
+    },
+    wsMessagesHandshakeEmpty: {
+      en: 'Only the handshake was recorded. Enable stream capture and make sure recording is running before opening a new connection.',
+      ja: 'この接続はハンドシェイクのみ記録されています。新しい接続を開く前に、ストリーム記録とライブ記録をオンにしてください。',
     },
     wsMessagesLoading: {
       en: 'Loading messages…',
@@ -9417,6 +9485,10 @@ const _NetworkPlus = (function () {
     statusStreamCaptureOn: {
       en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',
       ja: 'ストリームキャプチャをオンにしました。以後に作成される WebSocket と SSE の接続を記録します。',
+    },
+    statusStreamCaptureOnPaused: {
+      en: 'Stream capture is on. Resume recording before opening a new WebSocket connection.',
+      ja: 'ストリーム記録をオンにしました。新しい WebSocket 接続を開く前に、ライブ記録を再開してください。',
     },
     statusStreamCaptureOff: {
       en: 'Stream capture off; recorded connections stay in the table.',
@@ -10125,7 +10197,7 @@ const _NetworkPlus = (function () {
   }
 
   function matchesRequestFacets(row) {
-    return matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) && requestStartsInRange(row, state.requestTimeFacet);
+    return matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) && requestOverlapsRange(row, state.requestTimeFacet);
   }
 
   function repaintRequestScope() {
@@ -10377,6 +10449,9 @@ const _NetworkPlus = (function () {
       serverDoneEpoch,
       duration: durationMs,
       ...(req.overviewUnknownStart === true ? { _overviewUnknownStart: true } : {}),
+      ...(req.wsArchive === true ? { _wsArchive: true } : {}),
+      ...(Number.isSafeInteger(req.wsArchiveOmitted) && req.wsArchiveOmitted > 0
+        ? { _wsArchiveOmitted: req.wsArchiveOmitted } : {}),
       ...(req.overviewUnknownDuration === true || !Number.isFinite(req.time) || req.time < 0
         ? { _overviewUnknownDuration: true } : {}),
       startedDateTime: isoStr,
@@ -10454,8 +10529,10 @@ const _NetworkPlus = (function () {
       ...(row._pendingRequest ? { pending: true } : {}),
       ...(row._overviewUnknownStart ? { overviewUnknownStart: true } : {}),
       ...(row._overviewUnknownDuration ? { overviewUnknownDuration: true } : {}),
+      ...(row._wsArchive ? { wsArchive: true } : {}),
+      ...(row._wsArchiveOmitted ? { wsArchiveOmitted: row._wsArchiveOmitted } : {}),
       ...(isLiveStreamRow(row) ? { streamRevision: row._streamRevision || 0 } : {}),
-      ...(row.method === 'WS' || row._wsFrames?.length > 0 ? { webSocket: true } : {}),
+      ...((row.method === 'WS' && !row._wsArchive) || row._wsFrames?.length > 0 ? { webSocket: true } : {}),
       startedDateTime: row.startedDateTime,
       time: row.duration,
       initiator: row.initiator || null,
@@ -10490,6 +10567,8 @@ const _NetworkPlus = (function () {
       time: Number.isFinite(wire.time) ? wire.time : 0,
       ...(wire.overviewUnknownStart === true ? { overviewUnknownStart: true } : {}),
       ...(wire.overviewUnknownDuration === true || !Number.isFinite(wire.time) ? { overviewUnknownDuration: true } : {}),
+      ...(wire.wsArchive === true ? { wsArchive: true } : {}),
+      ...(Number.isSafeInteger(wire.wsArchiveOmitted) && wire.wsArchiveOmitted > 0 ? { wsArchiveOmitted: wire.wsArchiveOmitted } : {}),
       request: {
         method: request.method,
         url: request.url,
@@ -10543,8 +10622,7 @@ const _NetworkPlus = (function () {
   }
 
   function matchesRequestTypeFilter(row) {
-    return !state.webSocketOnly || state.sampleCaptureActive || hasWsMessages(row) ||
-      isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders);
+    return !state.webSocketOnly || state.sampleCaptureActive || isWebSocketRow(row);
   }
 
   function describeWebSocketExport(row) {
@@ -14708,8 +14786,9 @@ const _NetworkPlus = (function () {
   let wsMessagesView = null;
   let wsMessagesRequest = null;
 
-  function hasWsMessages(row) {
-    return !!row && (row.method === 'WS' || !!row._wsMessages || !!row._mirrorFetchWsMessages);
+  function isWebSocketRow(row) {
+    return !!row && (!!row._wsMessages || !!row._mirrorFetchWsMessages || !!row._wsArchiveOmitted ||
+      isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders));
   }
 
   function formatWsMessageJson(text) {
@@ -14920,10 +14999,15 @@ const _NetworkPlus = (function () {
     const frames = (remote ? view.snapshot?.frames : row._wsMessages) || [];
     const omitted = (remote ? view.snapshot?.omitted : row._wsMessagesOmitted) || 0;
     view.searchReady = !remote || !!view.snapshot;
+    const emptyMessage = row._wsArchiveOmitted
+      ? uiTextFormat('wsMessagesArchiveOmitted', { count: row._wsArchiveOmitted.toLocaleString() })
+      : uiText(row._wsArchive ? 'wsMessagesArchiveEmpty'
+        : row.method === 'WS' || remote ? 'wsMessagesEmpty'
+          : 'wsMessagesHandshakeEmpty');
     const message = remote && view.unavailable ? uiText('wsMessagesUnavailable')
       : remote && !view.snapshot ? uiText('wsMessagesLoading')
       : omitted > 0 ? uiTextFormat('wsMessagesOmitted', { count: omitted.toLocaleString() })
-      : frames.length === 0 && !hasFilters ? uiText('wsMessagesEmpty') : '';
+      : frames.length === 0 && !hasFilters ? emptyMessage : '';
     status.hidden = !message;
     if (status.textContent !== message) status.textContent = message;
     const directions = $all('[data-ws-direction]', panel);
@@ -15073,7 +15157,7 @@ const _NetworkPlus = (function () {
     const panels = $('#ws-details-panel');
     const messages = $('#ws-messages-panel');
     const details = $('#details');
-    const available = hasWsMessages(row);
+    const available = isWebSocketRow(row);
     const showMessages = available && wsDetailsChoice === 'ws-tab-messages';
     const wasShowingMessages = details.classList.contains('is-ws-messages');
     if (wsMessagesView && wsMessagesView.row !== row) resetWsMessagesView();
@@ -15098,6 +15182,15 @@ const _NetworkPlus = (function () {
     if (showMessages) renderWsMessages(row);
     else if (wasShowingMessages && row && resyncInspectorSplit) resyncInspectorSplit();
     return showMessages;
+  }
+
+  function syncWsCapturePrompt() {
+    const prompt = $('#wsCapturePrompt');
+    const capture = $('#wsCaptureBtn');
+    const hidden = !state.webSocketOnly || state.sampleCaptureActive ||
+      capture.hidden || capture.getAttribute('aria-pressed') === 'true';
+    if (hidden && prompt.contains(document.activeElement)) $('#webSocketOnlyBtn').focus({ preventScroll: true });
+    prompt.hidden = hidden;
   }
 
   function initializeWsDetailTabs() {
@@ -16388,7 +16481,7 @@ const _NetworkPlus = (function () {
   }
 
   function formatOverviewEpoch(epoch) {
-    return new Date(Math.min(epoch, 8640000000000000)).toISOString().replace('T', ' ');
+    return new Date(Math.min(epoch, MAX_OVERVIEW_EPOCH)).toISOString().replace('T', ' ');
   }
 
   function formatOverviewRange(range) {
@@ -16407,6 +16500,11 @@ const _NetworkPlus = (function () {
     const toggle = $('#overviewToggleBtn');
     const panel = $('#trafficOverview');
     const timeline = $('#overviewTimeline');
+    const waterfall = $('#overviewWaterfall');
+    const requests = $('#overviewRequests');
+    const pager = $('#overviewPager');
+    const previousPage = $('#overviewPreviousPage');
+    const nextPage = $('#overviewNextPage');
     const timeBounds = $('#overviewTimeBounds');
     const instructions = $('#overviewInstructions');
     const readout = $('#overviewTimeReadout');
@@ -16423,6 +16521,12 @@ const _NetworkPlus = (function () {
     let anchor = null;
     let chart = null;
     let distribution = null;
+    let requestPage = 0;
+    let lastPage = 0;
+    let visibleRequests = [];
+    let drag = null;
+    let ignorePointerClick = false;
+    let drawnRange = null;
 
     const bins = Array.from({ length: TRAFFIC_TIMELINE_BINS }, (_, index) => {
       const button = document.createElement('button');
@@ -16431,14 +16535,32 @@ const _NetworkPlus = (function () {
       button.dataset.overviewBin = index;
       button.hidden = true;
       button.tabIndex = -1;
-      for (const className of ['overview-bar', 'overview-bar-error']) {
-        const fill = document.createElement('span');
-        fill.className = className;
-        fill.setAttribute('aria-hidden', 'true');
-        button.appendChild(fill);
-      }
       timeline.appendChild(button);
       return button;
+    });
+    const lanes = Array.from({ length: OVERVIEW_PAGE_SIZE }, (_, index) => {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'overview-request';
+      const name = document.createElement('span');
+      name.className = 'overview-request-name';
+      const track = document.createElement('span');
+      track.className = 'overview-request-track';
+      track.setAttribute('aria-hidden', 'true');
+      const bar = document.createElement('span');
+      track.append(bar);
+      const info = document.createElement('span');
+      button.append(name, track, info);
+      item.append(button);
+      requests.append(item);
+      button.addEventListener('click', () => {
+        const row = visibleRequests[index]?.row;
+        if (!row || !getVisibleRows().includes(row)) return;
+        selectRow(row, null, true);
+        scrollToSelectedRow();
+      });
+      return { item, button, name, bar, info };
     });
     const latencyBands = ['<100 ms', '100–300 ms', '300 ms–1 s', '1–3 s', '≥3 s'].map((label, index) => {
       const band = document.createElement('div');
@@ -16460,8 +16582,54 @@ const _NetworkPlus = (function () {
       readout.textContent = range ? uiTextFormat('overviewSelected', { range: formatOverviewRange(range) }) : '';
     };
 
+    const paintSelection = (selection, scale) => {
+      const span = scale.end - scale.start;
+      const clamp = (epoch) => Math.min(100, Math.max(0, (epoch - scale.start) / span * 100));
+      const start = selection ? clamp(selection.start) : 0;
+      const end = selection ? clamp(selection.end) : 0;
+      waterfall.style.setProperty('--overview-selection-start', start + '%');
+      waterfall.style.setProperty('--overview-selection-width', (end - start) + '%');
+    };
+
+    const paintRequests = (rows, range) => {
+      const page = planOverviewWaterfallPage(rows, range, requestPage);
+      requestPage = page.page;
+      lastPage = page.lastPage;
+      visibleRequests = page.entries;
+      $('#overviewNoDisplayed').hidden = page.total > 0;
+      pager.hidden = lastPage === 0;
+      previousPage.setAttribute('aria-disabled', String(requestPage === 0));
+      nextPage.setAttribute('aria-disabled', String(requestPage === lastPage));
+      const pageCount = uiTextFormat('overviewPageCount', {
+        first: page.offset + 1, last: page.offset + visibleRequests.length, total: page.total,
+      });
+      if ($('#overviewPageCount').textContent !== pageCount) $('#overviewPageCount').textContent = pageCount;
+      for (let index = 0; index < lanes.length; index += 1) {
+        const { item, button, name, bar, info } = lanes[index];
+        const entry = visibleRequests[index];
+        item.hidden = !entry;
+        if (!entry) continue;
+        const { row, duration, error } = entry;
+        const measured = duration !== null;
+        const timing = measured ? formatTimingDuration(duration) :
+          uiText(row._pendingRequest ? 'analysisPending' : 'overviewUnknownDuration');
+        name.textContent = row.path || row.url;
+        info.textContent = error ? row.status + ' · ' + timing : timing;
+        info.className = 'overview-request-info' + (error ? ' overview-request-info--error' : '');
+        button.dataset.overviewRequest = row.id;
+        button.title = [row.method + ' ' + row.url, info.textContent, formatOverviewEpoch(getOverviewStart(row))].join(' · ');
+        button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-current', String(row === state.selectedRow));
+        bar.className = 'overview-request-bar' + (error ? ' overview-request-bar--error' : '');
+        if (!duration) bar.classList.add('overview-request-bar--' + (measured ? 'zero' : row._pendingRequest ? 'pending' : 'unknown'));
+        bar.style.setProperty('--overview-start', (entry.startsAt * 100) + '%');
+        bar.style.setProperty('--overview-width', (entry.width * 100) + '%');
+      }
+    };
+
     const paint = () => {
       timer = null;
+      if (drag) return;
       toggle.disabled = state.sampleCaptureActive;
       panel.hidden = !expanded || toggle.disabled || state.rows.length === 0;
       toggle.setAttribute('aria-expanded', String(!panel.hidden));
@@ -16474,15 +16642,19 @@ const _NetworkPlus = (function () {
         ? state.requestScopeRows.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row))
         : state.filteredRows;
       chart = computeTrafficTimeline(preTimeRows);
-      distribution = computeLatencyDistribution(getVisibleRows());
+      const visible = getVisibleRows();
+      distribution = computeLatencyDistribution(visible);
       const range = state.requestTimeFacet;
       if (!range) anchor = null;
+      if (range !== drawnRange) requestPage = 0;
+      drawnRange = range;
 
-      const hasTimes = chart.bins.length > 0;
+      const hasTimes = !!chart.range;
       const focusIndex = chart.bins.findIndex((bin) => focusedStart >= bin.start && focusedStart < bin.end);
       activeIndex = focusIndex >= 0 ? focusIndex : Math.max(0, Math.min(activeIndex, chart.bins.length - 1));
-      timeline.hidden = timeBounds.hidden = instructions.hidden = !hasTimes;
+      waterfall.hidden = instructions.hidden = !hasTimes;
       $('#overviewTimeEmpty').hidden = hasTimes;
+      if (!hasTimes) pager.hidden = true;
       instructions.textContent = uiText('overviewInstructions') +
         (state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options)
           ? ' ' + uiText('overviewSearchScope') : '');
@@ -16502,12 +16674,15 @@ const _NetworkPlus = (function () {
         button.setAttribute('aria-label', button.title);
         button.setAttribute('aria-pressed', String(selected));
         button.classList.toggle('overview-bin--partial', partial);
-        button.style.setProperty('--overview-bar-height', (bin.count / chart.maxCount * 100) + '%');
-        button.style.setProperty('--overview-error-height', (bin.errors / chart.maxCount * 100) + '%');
+        button.style.setProperty('--overview-bin-width', (bin.end - bin.start) / (chart.range.end - chart.range.start));
       }
       if (hasTimes) {
-        timeBounds.firstElementChild.textContent = formatOverviewEpoch(chart.bins[0].start);
-        timeBounds.lastElementChild.textContent = formatOverviewEpoch(chart.bins[chart.bins.length - 1].end);
+        const span = chart.range.end - chart.range.start;
+        timeBounds.firstElementChild.textContent = '0 ms';
+        timeBounds.children[1].textContent = formatTimingDuration(span / 2);
+        timeBounds.lastElementChild.textContent = formatTimingDuration(span);
+        paintSelection(range, chart.range);
+        paintRequests(visible, chart.range);
       }
       const currentBin = focusedBin && hasTimes ? bins[activeIndex] : null;
       if (focusedBin && focusedBin !== currentBin) (currentBin || toggle).focus({ preventScroll: true });
@@ -16544,6 +16719,9 @@ const _NetworkPlus = (function () {
       if ([clearButton, peakButton, slowestButton].includes(focusedControl) && focusedControl.hidden) {
         (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
       }
+      if ((requests.contains(focusedControl) || pager.contains(focusedControl)) && focusedControl.closest('[hidden]')) {
+        (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
+      }
     };
 
     const repaint = () => {
@@ -16554,6 +16732,16 @@ const _NetworkPlus = (function () {
       if (!extend || !anchor) anchor = { start: bin.start, end: bin.end };
       applyOverviewRange({ start: Math.min(bin.start, anchor.start), end: Math.max(bin.end, anchor.end) });
     };
+    previousPage.addEventListener('click', () => {
+      if (requestPage === 0) return;
+      requestPage -= 1;
+      repaint();
+    });
+    nextPage.addEventListener('click', () => {
+      if (requestPage === lastPage) return;
+      requestPage += 1;
+      repaint();
+    });
     toggle.addEventListener('click', () => {
       expanded = !expanded;
       repaint();
@@ -16562,11 +16750,18 @@ const _NetworkPlus = (function () {
       if (event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();
+      if (drag) {
+        drag = null;
+        ignorePointerClick = true;
+        repaint();
+        return;
+      }
       expanded = false;
       repaint();
       toggle.focus();
     });
     timeline.addEventListener('click', (event) => {
+      if (event.detail && ignorePointerClick) return;
       const button = event.target.closest('[data-overview-bin]');
       if (!button || button.hidden) return;
       const index = Number(button.dataset.overviewBin);
@@ -16574,6 +16769,48 @@ const _NetworkPlus = (function () {
       activeIndex = index;
       button.tabIndex = 0;
       selectBin(chart.bins[index], event.shiftKey);
+    });
+    timeline.addEventListener('pointerdown', (event) => {
+      if (!event.isPrimary || event.button !== 0 || !chart?.range) return;
+      const { left, width } = timeline.getBoundingClientRect();
+      if (!width) return;
+      ignorePointerClick = false;
+      drag = { id: event.pointerId, origin: event.clientX, left, width, scale: chart.range, selection: null };
+    });
+    const updateDrag = (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (!drag.selection && Math.abs(event.clientX - drag.origin) < 4) return;
+      const { origin, left, width, scale } = drag;
+      const toEpoch = (x) => scale.start + Math.max(0, Math.min(1, (x - left) / width)) * (scale.end - scale.start);
+      const start = Math.min(scale.end - 1, Math.floor(toEpoch(Math.min(origin, event.clientX))));
+      const end = Math.max(start + 1, Math.ceil(toEpoch(Math.max(origin, event.clientX))));
+      drag.selection = { start, end };
+      paintSelection(drag.selection, scale);
+      readout.textContent = uiTextFormat('overviewSelected', { range: formatOverviewRange(drag.selection) });
+    };
+    window.addEventListener('pointermove', updateDrag);
+    window.addEventListener('pointerup', (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      updateDrag(event);
+      const { selection } = drag;
+      drag = null;
+      if (selection) {
+        ignorePointerClick = true;
+        anchor = selection;
+        applyOverviewRange(selection);
+      } else {
+        repaint();
+      }
+    });
+    window.addEventListener('pointercancel', (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      drag = null;
+      repaint();
+    });
+    window.addEventListener('blur', () => {
+      if (!drag) return;
+      drag = null;
+      repaint();
     });
     timeline.addEventListener('keydown', (event) => {
       const button = event.target.closest('[data-overview-bin]');
@@ -16594,13 +16831,16 @@ const _NetworkPlus = (function () {
       }
     });
     const readBin = (event) => {
+      if (drag) return;
       const button = event.target.closest('[data-overview-bin]');
       if (button) readout.textContent = button.title;
     };
     timeline.addEventListener('focusin', readBin);
     timeline.addEventListener('pointerover', readBin);
     timeline.addEventListener('focusout', showRangeReadout);
-    timeline.addEventListener('pointerleave', showRangeReadout);
+    timeline.addEventListener('pointerleave', () => {
+      if (!drag) showRangeReadout();
+    });
     clearButton.addEventListener('click', () => {
       applyOverviewRange(null);
       (bins[activeIndex].hidden ? toggle : bins[activeIndex]).focus({ preventScroll: true });
@@ -16639,7 +16879,7 @@ const _NetworkPlus = (function () {
     const hasSearchRestriction = state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options);
     const counts = { all: 0, '4xx': 0, '5xx': 0, pending: 0 };
     for (const row of state.requestScopeRows || state.filteredRows) {
-      if (!hasSample && (!matchesRequestHostFacet(row) || !requestStartsInRange(row, state.requestTimeFacet))) continue;
+      if (!hasSample && (!matchesRequestHostFacet(row) || !requestOverlapsRange(row, state.requestTimeFacet))) continue;
       counts.all += 1;
       const facet = classifyRequestFacet(row);
       if (facet !== 'all') counts[facet] += 1;
@@ -16758,6 +16998,7 @@ const _NetworkPlus = (function () {
     const webSocketOnlyButton = $('#webSocketOnlyBtn');
     webSocketOnlyButton.disabled = state.sampleCaptureActive;
     webSocketOnlyButton.setAttribute('aria-pressed', String(state.webSocketOnly && !state.sampleCaptureActive));
+    syncWsCapturePrompt();
     const filterButton = $('#filterBtn');
     if (filterButton) {
       filterButton.textContent =
@@ -20022,6 +20263,8 @@ const _NetworkPlus = (function () {
       if (webSocket?.count > 0) {
         if (webSocket.frames) entry._webSocketMessages = webSocket.frames;
         else entry._networkPlus = { webSocketFramesOmitted: webSocket.count };
+      } else if (r._wsArchiveOmitted) {
+        entry._networkPlus = { webSocketFramesOmitted: r._wsArchiveOmitted };
       }
       if (webSocket?.droppedFrames > 0 || webSocket?.binaryFramesWithoutPayload > 0 || webSocket?.unavailable) {
         entry._networkPlus = {
@@ -21051,6 +21294,10 @@ const _NetworkPlus = (function () {
 
     const columnsBtn = $('#columnsBtn');
     const filterBtn = $('#filterBtn');
+    let enableWsCapture = () => $('#wsCaptureBtn').click();
+    $('#wsCapturePromptBtn').addEventListener('click', () => {
+      if (!$('#wsCapturePrompt').hidden) enableWsCapture();
+    });
     $('#webSocketOnlyBtn').addEventListener('click', () => {
       state.webSocketOnly = !state.webSocketOnly;
       renderBody();
@@ -21336,7 +21583,7 @@ const _NetworkPlus = (function () {
       const scopeRows = state.requestScopeRows || state.filteredRows;
       const hasScope = !state.sampleCaptureActive && (state.requestStatusFacet !== 'all' || state.requestTimeFacet);
       const summary = computeDomainSummary(hasScope
-        ? scopeRows.filter((row) => matchesRequestStatusFacet(row) && requestStartsInRange(row, state.requestTimeFacet)) : scopeRows);
+        ? scopeRows.filter((row) => matchesRequestStatusFacet(row) && requestOverlapsRange(row, state.requestTimeFacet)) : scopeRows);
       const activeHost = state.sampleCaptureActive ? '' : state.requestHostFacet;
       // The signature includes the pressed state: clicking a domain that
       // already spans every filtered row changes no aggregate but must still
@@ -22894,6 +23141,9 @@ const _NetworkPlus = (function () {
             if (parserOmitted) omittedBodies += 1;
           }
           applyHarWebSocketMessages(row, rawEntry._webSocketMessages);
+          const omitted = rawEntry._networkPlus?.webSocketFramesOmitted;
+          if (Number.isSafeInteger(omitted) && omitted > 0) row._wsArchiveOmitted = omitted;
+          if (isWebSocketRow(row)) row._wsArchive = true;
           if (index >= rowLimit) {
             const displaced = rows[index % rowLimit];
             stagedMetadataBytes -= metadataCosts.get(displaced);
@@ -22974,7 +23224,9 @@ const _NetworkPlus = (function () {
             extractedEntries.get(`raw/${id}_s.txt`),
             startedDateTime,
           );
-          rows.push(buildRowFromRequest({ ...entry, overviewUnknownStart: true, overviewUnknownDuration: true }, 0));
+          const row = buildRowFromRequest({ ...entry, overviewUnknownStart: true, overviewUnknownDuration: true }, 0);
+          if (isWebSocketRow(row)) row._wsArchive = true;
+          rows.push(row);
         }
         return {
           format: 'SAZ',
@@ -23480,7 +23732,7 @@ const _NetworkPlus = (function () {
             );
           });
         }
-        if (wireRow.webSocket === true || row.method === 'WS') {
+        if (wireRow.webSocket === true || (row.method === 'WS' && !row._wsArchive)) {
           row._mirrorFetchWsMessages = (minimumRevision) => new Promise((resolve, reject) => {
             viewerSession.requestWsMessages(
               row.id, session, minimumRevision,
@@ -23703,6 +23955,7 @@ const _NetworkPlus = (function () {
           const streamEnabled = control.streamCapture.enabled === true;
           wsCaptureBtnViewer.textContent = uiText(streamEnabled ? 'wsCaptureOn' : 'wsCaptureOff');
           wsCaptureBtnViewer.setAttribute('aria-pressed', streamEnabled ? 'true' : 'false');
+          syncWsCapturePrompt();
         }
         if (control.devtoolsMinimized === false) maybeShowUndockHint();
       };
@@ -23717,6 +23970,7 @@ const _NetworkPlus = (function () {
           if (typeof onDone === 'function') onDone(error);
         }
       };
+      enableWsCapture = () => sendViewerCommand('stream-toggle', { enabled: true }, 'Stream capture');
       const viewerImportInput = document.createElement('input');
       viewerImportInput.type = 'file';
       viewerImportInput.accept = '.har,.saz';
@@ -23854,6 +24108,8 @@ const _NetworkPlus = (function () {
           if (activeMirrorPort !== port) return;
           activeMirrorPort = null;
           resendInspectedOrigin = '';
+          wsCaptureBtnViewer.hidden = true;
+          syncWsCapturePrompt();
           viewerSession.failPendingBodyRequests(
             'The DevTools session disconnected before the response content arrived.',
           );
@@ -24001,11 +24257,12 @@ const _NetworkPlus = (function () {
               return;
             }
             if (name === 'stream-toggle') {
-              if (mirrorStreamCaptureState().supported !== true) {
+              const capture = mirrorStreamCaptureState();
+              if (capture.supported !== true) {
                 done('Stream capture is not available in this DevTools session.');
                 return;
               }
-              $('#wsCaptureBtn').click();
+              if (args?.enabled !== true || !capture.enabled) $('#wsCaptureBtn').click();
               done('');
               return;
             }
@@ -24243,6 +24500,7 @@ const _NetworkPlus = (function () {
       const updateStreamCaptureButton = () => {
         wsCaptureBtn.textContent = uiText(streamCapture.enabled ? 'wsCaptureOn' : 'wsCaptureOff');
         wsCaptureBtn.setAttribute('aria-pressed', streamCapture.enabled ? 'true' : 'false');
+        syncWsCapturePrompt();
       };
       refreshStreamCaptureLabel = updateStreamCaptureButton;
       const injectStreamWrappers = () => {
@@ -24456,7 +24714,7 @@ const _NetworkPlus = (function () {
         if (streamCapture.enabled) {
           injectStreamWrappers();
           if (!streamCapture.timer) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
-          setStatus(uiText('statusStreamCaptureOn'));
+          setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' : 'statusStreamCaptureOn'));
         } else {
           if (streamCapture.timer) {
             clearInterval(streamCapture.timer);
@@ -24876,8 +25134,9 @@ const _NetworkPlus = (function () {
     planRequestCountSummary,
     computeStats,
     computeTrafficTimeline,
+    planOverviewWaterfallPage,
     computeLatencyDistribution,
-    requestStartsInRange,
+    requestOverlapsRange,
     computeDomainSummary,
     DOMAIN_SUMMARY_KEY,
     loadDomainSummaryPref,
