@@ -13208,9 +13208,12 @@ browserTest(
 const HTML_FRAME_GROUND_MEASURE = `(() => {
   const frame = document.querySelector('#res-body iframe');
   const style = getComputedStyle(frame);
+  const themeStyle = getComputedStyle(document.documentElement);
   const rect = frame.getBoundingClientRect();
   return {
     theme: document.documentElement.getAttribute('data-theme'),
+    themeColor: themeStyle.color,
+    themeColorScheme: themeStyle.colorScheme,
     paneColor: getComputedStyle(document.querySelector('#res-body')).color,
     background: style.backgroundColor,
     colorScheme: style.colorScheme,
@@ -13270,7 +13273,8 @@ browserTest(
       // theme's --fg — so the frame's ground below is measured against it and
       // not against a light theme that happened to leak in.
       expect(measured.theme).toBe('dark');
-      expect(measured.paneColor).toBe('rgb(245, 239, 232)');
+      expect(measured.themeColorScheme).toBe('dark');
+      expect(measured.paneColor).toBe(measured.themeColor);
       expect(measured.sandbox).toBe('');
       expect(measured.visible).toBe(true);
       expect(measured.sized).toBe(true);
