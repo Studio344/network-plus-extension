@@ -107,7 +107,10 @@
         <h2 data-i18n="overviewWaterfall">Request waterfall</h2>
         <div class="overview-heading-actions">
           <button type="button" id="overviewClearTime" class="overview-action overview-clear-time" data-i18n="overviewClearTime" hidden>Clear time range</button>
-          <div class="overview-legend"><span class="overview-legend-errors" data-i18n="overviewErrors">HTTP 4xx/5xx</span></div>
+          <div class="overview-legend" role="group" data-i18n-aria-label="detailsInfoStatus" aria-label="Status">
+            <span data-status-class="2xx">2xx</span><span data-status-class="3xx">3xx</span>
+            <span data-status-class="4xx">4xx</span><span data-status-class="5xx">5xx</span>
+          </div>
           <div id="overviewPager" class="overview-pager" hidden>
             <span id="overviewPageCount" class="overview-muted" aria-live="polite"></span>
             <button type="button" id="overviewPreviousPage" class="overview-action" data-i18n-aria-label="overviewPreviousPage" aria-label="Previous requests">‹</button>
