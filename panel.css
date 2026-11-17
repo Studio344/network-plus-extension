@@ -350,6 +350,9 @@ input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);ou
 .ws-message-snippet{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .ws-message-payload{margin:0;padding:8px 12px 8px 26px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .ws-message-note{margin:0;padding:0 12px 8px 26px;color:var(--text-muted);font-size:11px}
+.ws-message-actions{padding:0 12px 10px 26px}
+.large-payload-notice{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:7px 9px;margin-bottom:6px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text-muted);font-size:12px}
+.large-payload-notice p{flex:1 1 160px;margin:0}
 .inspector-half{display:flex;flex-direction:column;flex:1;min-height:80px;overflow:hidden}
 /* A quiet caption row that is also the half's collapse toggle: the accent-dim fill is reserved for the active tab. */
 .inspector-label{display:block;width:100%;margin:0;border:0;border-radius:0;text-align:left;font-family:inherit;line-height:inherit;cursor:pointer;font-size:12px;font-weight:600;padding:5px 10px;background:var(--surface);color:var(--fg);border-bottom:1px solid var(--border)}

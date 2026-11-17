@@ -2233,10 +2233,10 @@ describe('outbound data-safety static contracts', () => {
     expect(js).toContain("['markdown', 'menuCopySanitizedMarkdown', 'statusCopiedSanitizedMarkdown'],");
     // The five pane toolbars that carry copy actions — Request Body, Request
     // Raw, Query, Response Body, Response Raw — read the same dictionary key
-    // as the row menu's disclosure, so the label cannot drift into a second
-    // English literal.
-    expect((js.match(/label: uiText\('menuCopySanitized'\)/g) || []).length).toBe(5);
-    expect((js.match(/label: uiText\('paneCopyFull'\)/g) || []).length).toBe(5);
+    // as the row menu's disclosure. The bounded response preview shares one
+    // alternate renderer for its two panes.
+    expect((js.match(/label: uiText\('menuCopySanitized'\)/g) || []).length).toBe(6);
+    expect((js.match(/label: uiText\('paneCopyFull'\)/g) || []).length).toBe(6);
     expect(js).not.toContain("label: 'Copy sanitized'");
     expect(js).not.toContain("label: 'Copy full...'");
   });
@@ -3459,7 +3459,7 @@ describe('search matches-only toggle contracts', () => {
 
 describe('detail pane search contracts', () => {
   test('attaches the in-pane search bar to the Body and Raw views of both inspectors', () => {
-    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyText || '', { emptyContent: !requestBodyText });");
+    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { emptyContent: !requestBodyText });");
     expect(js).toContain('attachPaneSearch(reqRawPane);');
     // The response Body pane hands its one toolbar the renderer picker too.
     expect(js).toContain('    attachPaneSearch(resBodyPane, text, {');
@@ -3586,9 +3586,11 @@ describe('detail pane search contracts', () => {
     expect(js).toContain('expandBtn.hidden = collapsedHits === 0 || treeOwnsExpansion;');
     expect(js).toContain("const treeOwnsExpansion = !!pane.querySelector('.json-tree-controls');");
     expect(js).toContain("expandBtn.addEventListener('click', expandEverything);");
-    // Both truncating panes provide their full source text for the count.
+    // Ordinary panes search their source. Large payloads search the bounded
+    // preview and explain that scope alongside the full save action.
     expect(js).toContain('    attachPaneSearch(resBodyPane, text, {');
-    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyText || '', { emptyContent: !requestBodyText });");
+    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { emptyContent: !requestBodyText });");
+    expect(js).toContain('    attachPaneSearch(body, preview, { emptyContent: !preview });');
     expect(css).toContain('.pane-search-expand');
   });
 
@@ -4102,7 +4104,7 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
 
   test('both wrappers inject through inspectedWindow.eval and survive navigation', () => {
     expect(js).toContain('chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)');
-    expect(js).toContain('inspectedEval(buildWsWrapperSource(), () => {});');
+    expect(js).toContain('inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});');
     expect(js).toContain('inspectedEval(buildSseWrapperSource(), () => {});');
     expect(js).toContain("const wsDrain = buildStreamDrainSource('__networkPlusWS__');");
     expect(js).toContain("const sseDrain = buildStreamDrainSource('__networkPlusSSE__');");
@@ -4272,11 +4274,11 @@ describe('jwt decode display contracts', () => {
     expect(css).toContain('  .kv{grid-template-columns:minmax(0,1fr) auto;gap:0}');
     expect(css).toContain('  .kv > .kv-copy-btn{grid-column:2}');
     // The row-end control writes one sanitized value and offers no unsanitized
-    // path of its own: "Copy full..." exists only in the five pane toolbars,
-    // each behind the confirmation flow requestFullClipboardAction owns.
+    // path of its own. Each full clipboard action goes through the existing
+    // confirmation, including the alternate response preview renderer.
     expect(js).toContain("    button.textContent = uiText('kvCopyValue');");
-    expect((js.match(/uiText\('paneCopyFull'\)/g) || []).length).toBe(5);
-    expect((js.match(/requestFullClipboardAction\(/g) || []).length).toBe(6);
+    expect((js.match(/uiText\('paneCopyFull'\)/g) || []).length).toBe(6);
+    expect((js.match(/requestFullClipboardAction\(/g) || []).length).toBe(7);
   });
 
   test('the row-end copies are one tab stop per grid, not one per row', () => {

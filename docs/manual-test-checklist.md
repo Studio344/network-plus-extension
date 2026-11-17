@@ -2,6 +2,8 @@
 
 DOM behavior, export contents, and theme switching are verified by loading the extension in Microsoft Edge DevTools. Run the relevant section before releasing a change that touches it. The general checklist in [.github/copilot-instructions.md](../.github/copilot-instructions.md#66-手動テストチェックリスト) applies in addition to the sections below.
 
+- [ ] Select a large single-line or dense JSON response and verify that Body and Raw stay responsive with bounded previews. Save the full response and compare it with the source. Repeat for an oversized live response, a directly selected HAR, and a long WebSocket text message followed by a short reply.
+
 - [ ] Switch between Dark, Light, and System in Settings. In Dark and System with a dark browser preference, confirm charcoal and amber across the main panel, column filters, Settings, support dialog, toolbar menu, and live recording guide. Confirm the Light selection also updates the menu and guide.
 
 Automated coverage lives in [tests/](../tests); see the test table in the [README](../README.md#tests).
