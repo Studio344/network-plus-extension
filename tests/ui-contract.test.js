@@ -4816,8 +4816,11 @@ describe('audit layout and contrast contracts', () => {
 
   test('the details pane shows one guidance line before a selection', () => {
     expect(html).toMatch(
-      /<p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open<\/p>\s*<div class="inspector-panels">/,
+      /<p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open<\/p>/,
     );
+    expect(html).toMatch(/id="ws-detail-tabs"[^>]*role="tablist"[^>]*hidden>/);
+    expect(html).toMatch(/id="ws-messages-panel"[^>]*aria-labelledby="ws-tab-messages"[^>]*hidden>/);
+    expect(html).toContain('<div class="inspector-panels" id="ws-details-panel">');
     expect(css).toContain('.inspector-empty[hidden]{display:none}');
     const clearBlock = js.slice(js.indexOf('function clearDetailsPanel()'), js.indexOf('let detailsTitlePath'));
     expect(clearBlock).toContain('setInspectorEmptyState(true);');

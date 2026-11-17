@@ -4926,28 +4926,46 @@ const _NetworkPlus = (function () {
     row._wsFrames.push(frame);
   }
 
+  function recordWsMessage(row, frame) {
+    if (!row._wsMessages) row._wsMessages = [];
+    if (row._wsMessages.length === WS_MESSAGE_HISTORY_LIMIT) {
+      row._wsMessages.shift();
+      row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + 1;
+    }
+    row._wsMessageId = (row._wsMessageId || 0) + 1;
+    row._wsMessages.push({ ...frame, id: row._wsMessageId });
+  }
+
+  function getHarWsTime(message) {
+    const input = message.time;
+    const value = typeof input === 'string' && input.trim() ? Number(input) : input;
+    if (!Number.isFinite(value)) return null;
+    // Chrome writes epoch seconds; some tools write milliseconds.
+    const time = value > 1e12 ? value : value * 1000;
+    return message.time != null && isStreamEpoch(time) ? time : null;
+  }
+
   function applyHarWebSocketMessages(row, messages) {
     if (!row || !Array.isArray(messages) || messages.length === 0) return 0;
     const usable = messages
       .filter((message) => message && typeof message === 'object' && (message.type === 'send' || message.type === 'receive'))
-      .sort((a, b) => (Number(a.time) || 0) - (Number(b.time) || 0));
+      .sort((a, b) => (getHarWsTime(a) ?? 0) - (getHarWsTime(b) ?? 0));
     if (usable.length === 0) return 0;
     const limited = usable.slice(0, HAR_WS_MESSAGE_IMPORT_LIMIT);
     let applied = 0;
     for (const message of limited) {
-      const rawTime = Number(message.time);
-      // Chrome writes epoch seconds; some tools write milliseconds.
-      const at = Number.isFinite(rawTime) ? (rawTime > 1e12 ? rawTime : rawTime * 1000) : NaN;
+      const at = getHarWsTime(message);
+      const text = normalizeImportString(message.data).slice(0, WS_FRAME_PREVIEW_CHARS);
       const preview =
         message.opcode === 2
           ? '[binary frame' + (typeof message.data === 'string' ? ', ' + message.data.length + ' base64 chars' : '') + ']'
-          : String(message.data == null ? '' : message.data).slice(0, WS_FRAME_PREVIEW_CHARS);
+          : text;
       const line = formatWsFrameLine({ kind: message.type === 'send' ? 'ws-sent' : 'ws-received', at, preview });
       recordWsFrame(row, {
         type: message.type,
         time: at,
         binary: message.opcode === 2,
-        data: message.opcode === 2 ? '' : String(message.data == null ? '' : message.data).slice(0, WS_FRAME_PREVIEW_CHARS),
+        data: message.opcode === 2 ? '' : text,
       });
       if (message.type === 'send') {
         if (!row.requestPostData || typeof row.requestPostData !== 'object') {
@@ -4968,6 +4986,20 @@ const _NetworkPlus = (function () {
       }
       applied += 1;
     }
+    const recent = usable.slice(-WS_MESSAGE_HISTORY_LIMIT);
+    for (const message of recent) {
+      const binary = message.opcode === 2;
+      const data = binary ? '' : normalizeImportString(message.data);
+      recordWsMessage(row, {
+        type: message.type,
+        time: getHarWsTime(message),
+        binary,
+        bytes: null,
+        data: data.slice(0, WS_FRAME_PREVIEW_CHARS),
+        truncated: data.length > WS_FRAME_PREVIEW_CHARS,
+      });
+    }
+    row._wsMessagesOmitted = usable.length - recent.length;
     if (usable.length > limited.length) {
       row.responseContent = appendBoundedWsText(
         typeof row.responseContent === 'string' ? row.responseContent : '',
@@ -8593,6 +8625,66 @@ const _NetworkPlus = (function () {
       en: 'Stream capture: Off',
       ja: 'ストリームキャプチャ: オフ',
     },
+    wsConnectionTabs: {
+      en: 'WebSocket connection',
+      ja: 'WebSocket 接続',
+    },
+    wsMessagesTab: {
+      en: 'Messages',
+      ja: 'メッセージ',
+    },
+    wsDetailsTab: {
+      en: 'Details',
+      ja: '詳細',
+    },
+    wsMessageSent: {
+      en: '↑ Sent',
+      ja: '↑ 送信',
+    },
+    wsMessageReceived: {
+      en: '↓ Received',
+      ja: '↓ 受信',
+    },
+    wsMessageBinary: {
+      en: 'Binary message',
+      ja: 'バイナリメッセージ',
+    },
+    wsMessageBinarySize: {
+      en: 'Binary message · {size}',
+      ja: 'バイナリメッセージ · {size}',
+    },
+    wsMessageEmpty: {
+      en: 'Empty message',
+      ja: '空のメッセージ',
+    },
+    wsMessagesEmpty: {
+      en: 'No messages recorded for this connection yet.',
+      ja: 'この接続のメッセージはまだ記録されていません。',
+    },
+    wsMessagesLoading: {
+      en: 'Loading messages…',
+      ja: 'メッセージを読み込んでいます…',
+    },
+    wsMessagesUnavailable: {
+      en: 'Message history is unavailable from the DevTools session.',
+      ja: 'DevTools セッションからメッセージ履歴を取得できません。',
+    },
+    wsMessagesOmitted: {
+      en: '{count} messages omitted from this list.',
+      ja: 'この一覧では {count} 件のメッセージが省略されています。',
+    },
+    wsMessageExpand: {
+      en: 'Show message',
+      ja: 'メッセージを表示',
+    },
+    wsMessageCollapse: {
+      en: 'Collapse message',
+      ja: 'メッセージを折りたたむ',
+    },
+    wsMessageTruncated: {
+      en: 'Only the first {limit} characters were captured.',
+      ja: '最初の {limit} 文字分を記録しました。',
+    },
     statusPendingRequest: {
       en: 'Pending',
       ja: '応答待ち',
@@ -9912,6 +10004,7 @@ const _NetworkPlus = (function () {
   // itself is never altered), and a navigation wipes it until reinjection.
   const WS_QUEUE_CAP = 5000;
   const WS_FRAME_PREVIEW_CHARS = 2048;
+  const WS_MESSAGE_HISTORY_LIMIT = 100;
   const WS_DIRECTION_TEXT_LIMIT_CHARS = 262144;
   const WS_POLL_INTERVAL_MS = 1000;
   const STREAM_CAPTURE_MEMORY_BUDGET = 32 * 1024 * 1024;
@@ -10018,14 +10111,21 @@ const _NetworkPlus = (function () {
       const nativeSend = socket.send.bind(socket);
       socket.send = function (data) {
         const result = nativeSend(data);
-        record({ kind: 'ws-sent', socketId, preview: preview(data), binary: ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob) });
+        record({
+          kind: 'ws-sent', socketId, preview: preview(data),
+          binary: ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob),
+          truncated: typeof data === 'string' && data.length > previewChars,
+        });
         return result;
       };
       socket.addEventListener('open', function () {
         record({ kind: 'ws-open', socketId });
       });
       socket.addEventListener('message', function (event) {
-        record({ kind: 'ws-received', socketId, preview: preview(event.data), binary: typeof event.data !== 'string' });
+        record({
+          kind: 'ws-received', socketId, preview: preview(event.data), binary: typeof event.data !== 'string',
+          truncated: typeof event.data === 'string' && event.data.length > previewChars,
+        });
       });
       socket.addEventListener('error', function () {
         record({ kind: 'ws-error', socketId });
@@ -10196,6 +10296,7 @@ const _NetworkPlus = (function () {
         preview: typeof event.preview === 'string' && event.preview.length <= previewChars
           ? event.preview : undefined,
         binary: typeof event.binary === 'boolean' ? event.binary : undefined,
+        truncated: typeof event.truncated === 'boolean' ? event.truncated : undefined,
         reason: typeof event.reason === 'string' && event.reason.length <= 256 ? event.reason : undefined,
         code: typeof event.code === 'number' ? event.code : undefined,
         count: typeof event.count === 'number' ? event.count : undefined,
@@ -10293,7 +10394,8 @@ const _NetworkPlus = (function () {
       case 'ws-sent':
       case 'ws-received':
         return typeof event.preview === 'string' && event.preview.length <= WS_FRAME_PREVIEW_CHARS &&
-          (event.binary === undefined || typeof event.binary === 'boolean');
+          (event.binary === undefined || typeof event.binary === 'boolean') &&
+          (event.truncated === undefined || typeof event.truncated === 'boolean');
       case 'ws-closed':
         return (event.code === undefined || Number.isInteger(event.code) && event.code >= 0 && event.code <= 65535) &&
           (event.reason === undefined || typeof event.reason === 'string' && event.reason.length <= 256);
@@ -10368,14 +10470,30 @@ const _NetworkPlus = (function () {
           }
         }
       }
-      if (hasStructuredFrame && keepTranscript) {
+      if (hasStructuredFrame) {
         const binary = event.binary === true;
-        recordWsFrame(row, {
+        const frame = {
           type: sent ? 'send' : 'receive',
           time: event.at,
           binary,
           data: binary ? '' : event.preview,
-        });
+        };
+        if (keepTranscript) recordWsFrame(row, frame);
+        // The messages pane retains the latest history, independently of
+        // the full HAR's existing first-frames retention.
+        const evicted = row._wsMessages?.length === WS_MESSAGE_HISTORY_LIMIT ? row._wsMessages[0] : null;
+        const historyBytes = evicted ? 2 * (frame.data.length - evicted.data.length) : 128 + 2 * frame.data.length;
+        if (!context.allowMessage || context.allowMessage(row, historyBytes)) {
+          const binaryLength = binary ? /^\[binary (\d+) bytes\]$/.exec(event.preview) : null;
+          const bytes = binaryLength ? Number(binaryLength[1]) : null;
+          recordWsMessage(row, {
+            ...frame,
+            bytes: Number.isSafeInteger(bytes) ? bytes : null,
+            truncated: !binary && event.truncated === true,
+          });
+        } else {
+          row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + 1;
+        }
       }
       changedRows.add(row);
     }
@@ -10427,6 +10545,32 @@ const _NetworkPlus = (function () {
     return chars;
   }
 
+  const WS_MESSAGES_UNAVAILABLE_REASON = 'WebSocket messages are unavailable from this DevTools session.';
+
+  function readWsMessagesSnapshot(revision, frames, omitted) {
+    if (!Number.isSafeInteger(revision) || revision < 0 ||
+        !Number.isSafeInteger(omitted) || omitted < 0 ||
+        !Array.isArray(frames) || frames.length > WS_MESSAGE_HISTORY_LIMIT) return null;
+    const messages = [];
+    const ids = new Set();
+    // Only bounded fields travel over the port. Even with six-character JSON
+    // escapes throughout every preview, 100 messages fit below 2 MiB.
+    for (const frame of frames) {
+      if (!isRecord(frame)) return null;
+      const { id, type, time, binary, bytes, data, truncated } = frame;
+      if (!Number.isSafeInteger(id) || id <= 0 || ids.has(id) ||
+          (type !== 'send' && type !== 'receive') ||
+          (time !== null && !isStreamEpoch(time)) ||
+          typeof binary !== 'boolean' ||
+          (bytes !== null && (!Number.isSafeInteger(bytes) || bytes < 0)) ||
+          typeof data !== 'string' || data.length > WS_FRAME_PREVIEW_CHARS ||
+          typeof truncated !== 'boolean') return null;
+      ids.add(id);
+      messages.push({ id, type, time, binary, bytes, data, truncated });
+    }
+    return { revision, frames: messages, omitted };
+  }
+
   function createMirrorHostSession({
     postMessage,
     getRows,
@@ -10465,6 +10609,7 @@ const _NetworkPlus = (function () {
         total: rows.length,
         protocolVersion: MIRROR_PROTOCOL_VERSION,
         webSocketExport: true,
+        webSocketMessages: true,
         streamHarExport: true,
       });
       let chunk = [];
@@ -10523,6 +10668,21 @@ const _NetworkPlus = (function () {
         const chunk = frames.slice(offset, offset + MIRROR_WS_EXPORT_CHUNK_SIZE).map(toHarWebSocketMessage);
         postMessage({ ...result, offset, frames: chunk, complete: offset + chunk.length === frames.length });
       }
+    };
+    const sendWsMessages = ({ requestId, viewer, rowId, session, minimumRevision }) => {
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer || viewer.length > 128 ||
+          !Number.isSafeInteger(requestId) || requestId <= 0 ||
+          !Number.isSafeInteger(rowId) || rowId <= 0 ||
+          !Number.isSafeInteger(minimumRevision) || minimumRevision < 0) return;
+      const result = { type: 'ws-messages-result', requestId, viewer, rowId, session };
+      const row = getRows().find((candidate) => candidate.id === rowId && !candidate._pendingRequest);
+      const revision = row?._streamRevision || 0;
+      if (!row || revision < minimumRevision || (row.method !== 'WS' && !Array.isArray(row._wsMessages))) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      const snapshot = readWsMessagesSnapshot(revision, row._wsMessages ?? [], row._wsMessagesOmitted ?? 0);
+      postMessage(snapshot ? { ...result, ok: true, ...snapshot } : { ...result, ok: false });
     };
     const sendStreamHar = ({ requestId, viewer, rowId, session, minimumRevision, includeBodies }) => {
       if (session !== sessionToken || typeof viewer !== 'string' || !viewer ||
@@ -10594,6 +10754,10 @@ const _NetworkPlus = (function () {
       }
       if (message.type === 'ws-export-request') {
         sendWebSocketExport(message);
+        return;
+      }
+      if (message.type === 'ws-messages-request') {
+        sendWsMessages(message);
         return;
       }
       if (message.type === 'stream-har-request') {
@@ -10783,6 +10947,7 @@ const _NetworkPlus = (function () {
     // reconciled.
     let hostSessionToken = null;
     let webSocketExportSupported = false;
+    let webSocketMessagesSupported = false;
     let streamHarExportSupported = false;
     const settleExport = (requestId, error, payload = null) => {
       const pending = pendingExportCallbacks.get(requestId);
@@ -10799,6 +10964,7 @@ const _NetworkPlus = (function () {
       const timeoutReason = {
         'body-request': 'The DevTools session did not answer the body request in time.',
         'ws-export-request': 'The DevTools session did not answer the WebSocket export request in time.',
+        'ws-messages-request': WS_MESSAGES_UNAVAILABLE_REASON,
         'stream-har-request': STREAM_HAR_UNAVAILABLE_REASON,
       }[type];
       pending.timer = setTimeout(() => settleExport(
@@ -10821,6 +10987,27 @@ const _NetworkPlus = (function () {
         return;
       }
       requestExport('ws-export-request', rowId, callback, { session, includeFrames });
+    };
+    const requestWsMessages = (rowId, session, minimumRevision, callback) => {
+      if (!webSocketMessagesSupported || pendingSnapshot || !session || session !== hostSessionToken ||
+          !Number.isSafeInteger(rowId) || rowId <= 0 ||
+          !Number.isSafeInteger(minimumRevision) || minimumRevision < 0) {
+        callback(new Error(WS_MESSAGES_UNAVAILABLE_REASON), null);
+        return;
+      }
+      requestExport('ws-messages-request', rowId, callback, { session, minimumRevision });
+    };
+    const receiveWsMessages = (message) => {
+      const { requestId, rowId, session, viewer, revision, frames, omitted } = message;
+      const pending = pendingExportCallbacks.get(requestId);
+      if (pending?.type !== 'ws-messages-request' || rowId !== pending.rowId ||
+          session !== pending.session || session !== hostSessionToken || viewer !== viewerNonce) return;
+      const snapshot = message.ok === true && readWsMessagesSnapshot(revision, frames, omitted);
+      if (!snapshot || snapshot.revision < pending.minimumRevision) {
+        settleExport(requestId, new Error(WS_MESSAGES_UNAVAILABLE_REASON));
+        return;
+      }
+      settleExport(requestId, null, snapshot);
     };
     const requestStreamHar = (rowId, session, minimumRevision, includeBodies, callback) => {
       if (!streamHarExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
@@ -11009,11 +11196,15 @@ const _NetworkPlus = (function () {
             sessionChanged,
             session,
             webSocketExport: message.webSocketExport === true,
+            webSocketMessages: message.webSocketMessages === true,
             streamHarExport: message.streamHarExport === true,
           };
           for (const [requestId, pending] of pendingExportCallbacks) {
             if (pending.type === 'ws-export-request' && (sessionChanged || !pendingSnapshot.webSocketExport)) {
               settleExport(requestId, new Error('The DevTools session changed during the WebSocket export.'));
+            }
+            if (pending.type === 'ws-messages-request' && (sessionChanged || !pendingSnapshot.webSocketMessages)) {
+              settleExport(requestId, new Error(WS_MESSAGES_UNAVAILABLE_REASON));
             }
             if (pending.type === 'stream-har-request' && (sessionChanged || !pendingSnapshot.streamHarExport)) {
               settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
@@ -11038,6 +11229,7 @@ const _NetworkPlus = (function () {
             pendingSnapshot = null;
             hostSessionToken = snapshot.session;
             webSocketExportSupported = snapshot.webSocketExport && Boolean(snapshot.session);
+            webSocketMessagesSupported = snapshot.webSocketMessages && Boolean(snapshot.session);
             streamHarExportSupported = snapshot.streamHarExport && Boolean(snapshot.session);
             applyWireSnapshot(snapshot.rows, { sessionChanged: snapshot.sessionChanged, session: snapshot.session });
           }
@@ -11077,6 +11269,10 @@ const _NetworkPlus = (function () {
           receiveWebSocketExport(message);
           break;
         }
+        case 'ws-messages-result': {
+          receiveWsMessages(message);
+          break;
+        }
         case 'stream-har-result': {
           receiveStreamHar(message);
           break;
@@ -11100,6 +11296,7 @@ const _NetworkPlus = (function () {
     const failPendingBodyRequests = (reason) => {
       pendingSnapshot = null;
       webSocketExportSupported = false;
+      webSocketMessagesSupported = false;
       streamHarExportSupported = false;
       const failures = Array.from(pendingExportCallbacks.values());
       pendingExportCallbacks.clear();
@@ -11115,7 +11312,7 @@ const _NetworkPlus = (function () {
       }
     };
     return {
-      handleMessage, requestBody, requestWebSocketExport, requestStreamHar,
+      handleMessage, requestBody, requestWebSocketExport, requestWsMessages, requestStreamHar,
       sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests,
     };
   }
@@ -13870,6 +14067,226 @@ const _NetworkPlus = (function () {
     'res-tab-preview': 'res-body',
   });
 
+  let wsDetailsChoice = 'ws-tab-messages';
+  let wsMessagesView = null;
+  let wsMessagesRequest = null;
+
+  function hasWsMessages(row) {
+    return !!row && (row.method === 'WS' || !!row._wsMessages || !!row._mirrorFetchWsMessages);
+  }
+
+  function formatWsMessageJson(text) {
+    if (!/^\s*[[{]/.test(text)) return null;
+    try {
+      JSON.parse(text);
+    } catch (_error) {
+      return null;
+    }
+    // Validation may use JSON.parse; formatting preserves wire tokens such
+    // as large numeric IDs, exponent notation and repeated property names.
+    const tokens = text.match(/"(?:\\.|[^"\\])*"|[[\]{},:]|[.\d+eE-]+|true|false|null/g);
+    let depth = 0;
+    let formatted = '';
+    const line = () => '\n' + '  '.repeat(depth);
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === '{' || token === '[') {
+        if (++depth > 32) return null;
+        formatted += token;
+        if (tokens[i + 1] !== (token === '{' ? '}' : ']')) formatted += line();
+      } else if (token === '}' || token === ']') {
+        depth--;
+        if (tokens[i - 1] !== (token === '}' ? '{' : '[')) formatted += line();
+        formatted += token;
+      } else if (token === ',' || token === ':') {
+        formatted += token + (token === ',' ? line() : ' ');
+      } else {
+        formatted += token;
+      }
+      if (formatted.length > 16 * 1024) return null;
+    }
+    return formatted;
+  }
+
+  function createWsMessage(frame) {
+    const item = document.createElement('li');
+    item.className = 'ws-message';
+    item.dataset.direction = frame.type;
+    const header = document.createElement('div');
+    header.className = 'ws-message-header';
+    const direction = document.createElement('span');
+    direction.className = 'ws-message-direction';
+    direction.textContent = uiText(frame.type === 'send' ? 'wsMessageSent' : 'wsMessageReceived');
+    const time = document.createElement('time');
+    if (isStreamEpoch(frame.time)) {
+      time.dateTime = new Date(frame.time).toISOString();
+      time.textContent = time.dateTime.slice(11, 23) + ' UTC';
+    }
+    header.append(direction, time);
+    item.appendChild(header);
+
+    const body = frame.binary
+      ? frame.bytes == null ? uiText('wsMessageBinary') : uiTextFormat('wsMessageBinarySize', { size: fmtBytes(frame.bytes) })
+      : frame.data || uiText('wsMessageEmpty');
+    const long = frame.truncated || body.length > 160 || body.split('\n', 8).length === 8;
+    const initiallyFormatted = !long && !frame.binary ? formatWsMessageJson(frame.data) : null;
+    const longJson = initiallyFormatted && initiallyFormatted.split('\n', 8).length === 8;
+    const appendPayload = (parent, formatted) => {
+      const pre = document.createElement('pre');
+      pre.className = 'ws-message-payload';
+      pre.dataset.format = formatted ? 'json' : 'text';
+      pre.textContent = formatted || body;
+      parent.appendChild(pre);
+    };
+    if (long || longJson) {
+      const disclosure = document.createElement('details');
+      disclosure.className = 'ws-message-disclosure';
+      const summary = document.createElement('summary');
+      const label = document.createElement('span');
+      label.textContent = uiText('wsMessageExpand');
+      const snippet = document.createElement('span');
+      snippet.className = 'ws-message-snippet';
+      snippet.textContent = body.slice(0, 72).replace(/\s+/g, ' ') + (body.length > 72 ? '…' : '');
+      summary.append(label, snippet);
+      disclosure.appendChild(summary);
+      disclosure.addEventListener('toggle', () => {
+        label.textContent = uiText(disclosure.open ? 'wsMessageCollapse' : 'wsMessageExpand');
+        if (!disclosure.open || disclosure.querySelector('pre')) return;
+        appendPayload(disclosure, frame.truncated ? null : initiallyFormatted || formatWsMessageJson(frame.data));
+      });
+      item.appendChild(disclosure);
+    } else {
+      appendPayload(item, initiallyFormatted);
+    }
+    if (frame.truncated) {
+      const note = document.createElement('p');
+      note.className = 'ws-message-note';
+      note.textContent = uiTextFormat('wsMessageTruncated', { limit: WS_FRAME_PREVIEW_CHARS.toLocaleString() });
+      item.appendChild(note);
+    }
+    return item;
+  }
+
+  function resetWsMessagesView() {
+    wsMessagesView = null;
+    const pane = $('#ws-messages-panel');
+    pane.querySelector('ol').replaceChildren();
+    pane.scrollTop = 0;
+  }
+
+  function renderWsMessages(row) {
+    if (wsMessagesView?.row !== row || wsMessagesView.language !== activeLanguage) {
+      resetWsMessagesView();
+      wsMessagesView = { row, language: activeLanguage, items: new Map(), requestedRevision: -1 };
+    }
+    const view = wsMessagesView;
+    const pane = $('#ws-messages-panel');
+    const list = pane.querySelector('ol');
+    const status = $('#ws-messages-status');
+    const remote = !!row._mirrorFetchWsMessages;
+    const frames = (remote ? view.snapshot?.frames : row._wsMessages) || [];
+    const omitted = (remote ? view.snapshot?.omitted : row._wsMessagesOmitted) || 0;
+    const message = remote && view.unavailable ? uiText('wsMessagesUnavailable')
+      : remote && !view.snapshot ? uiText('wsMessagesLoading')
+      : omitted > 0 ? uiTextFormat('wsMessagesOmitted', { count: omitted.toLocaleString() })
+      : frames.length === 0 ? uiText('wsMessagesEmpty') : '';
+    status.hidden = !message;
+    if (status.textContent !== message) status.textContent = message;
+    const follow = !list.contains(document.activeElement) && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
+    const ids = new Set(frames.map((frame) => frame.id));
+    for (const [id, item] of view.items) {
+      if (ids.has(id)) continue;
+      if (item.contains(document.activeElement)) pane.focus({ preventScroll: true });
+      item.remove();
+      view.items.delete(id);
+    }
+    let next = list.firstElementChild;
+    const ordered = frames.slice().sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity) || a.id - b.id);
+    for (const frame of ordered) {
+      let item = view.items.get(frame.id);
+      if (!item) {
+        item = createWsMessage(frame);
+        view.items.set(frame.id, item);
+      }
+      if (item === next) next = next.nextElementSibling;
+      else list.insertBefore(item, next);
+    }
+    if (follow) pane.scrollTop = pane.scrollHeight;
+    if (remote) requestWsMessagesForView(view);
+  }
+
+  function requestWsMessagesForView(view) {
+    const row = view.row;
+    const revision = row._mirrorStreamRevision || 0;
+    if (wsMessagesRequest || view.requestedRevision >= revision) return;
+    view.requestedRevision = revision;
+    wsMessagesRequest = view;
+    row._mirrorFetchWsMessages(revision).then((snapshot) => {
+      if (wsMessagesView !== view || snapshot.revision < (row._mirrorStreamRevision || 0)) return;
+      view.snapshot = snapshot;
+      view.requestedRevision = snapshot.revision;
+      view.unavailable = false;
+    }, () => {
+      if (wsMessagesView === view) view.unavailable = true;
+    }).finally(() => {
+      wsMessagesRequest = null;
+      if (wsMessagesView && wsMessagesView.row === state.selectedRow && !$('#details').hidden && !$('#ws-messages-panel').hidden) {
+        renderWsMessages(wsMessagesView.row);
+      }
+    });
+  }
+
+  function updateWsDetailTabs(row) {
+    const bar = $('#ws-detail-tabs');
+    const panels = $('#ws-details-panel');
+    const messages = $('#ws-messages-panel');
+    const details = $('#details');
+    const available = hasWsMessages(row);
+    const showMessages = available && wsDetailsChoice === 'ws-tab-messages';
+    const wasShowingMessages = details.classList.contains('is-ws-messages');
+    if (wsMessagesView && wsMessagesView.row !== row) resetWsMessagesView();
+    bar.hidden = !available;
+    messages.hidden = !showMessages;
+    details.classList.toggle('is-ws-messages', showMessages);
+    if (available) {
+      panels.setAttribute('role', 'tabpanel');
+      panels.setAttribute('aria-labelledby', 'ws-tab-details');
+    } else {
+      panels.removeAttribute('role');
+      panels.removeAttribute('aria-labelledby');
+    }
+    if (showMessages) panels.setAttribute('aria-hidden', 'true');
+    else if (!panels.hidden) panels.removeAttribute('aria-hidden');
+    for (const button of $all('.tab-btn', bar)) {
+      const active = button.id === wsDetailsChoice;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    if (showMessages) renderWsMessages(row);
+    else if (wasShowingMessages && row && resyncInspectorSplit) resyncInspectorSplit();
+    return showMessages;
+  }
+
+  function initializeWsDetailTabs() {
+    const bar = $('#ws-detail-tabs');
+    const tabs = $all('[role="tab"]', bar);
+    const activate = (tab, focus) => {
+      if (!tabs.includes(tab) || bar.hidden || !state.selectedRow) return;
+      wsDetailsChoice = tab.id;
+      renderRowDetails(state.selectedRow);
+      if (focus) tab.focus();
+    };
+    bar.addEventListener('click', (event) => activate(event.target.closest('[role="tab"]'), false));
+    bar.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      const index = getNextTabIndex(tabs.indexOf(event.target), tabs.length, event.key);
+      if (index < 0) return;
+      event.preventDefault();
+      activate(tabs[index], true);
+    });
+  }
+
   // An own-property check, never a bare lookup: the map is an object literal
   // with Object.prototype behind it, so a saved value of 'toString' would
   // otherwise resolve to a function instead of passing through as a tab id.
@@ -15450,6 +15867,7 @@ const _NetworkPlus = (function () {
 
   function closeDetailsPanel() {
     setDetailsPanelCollapsed(true);
+    if (wsMessagesView) resetWsMessagesView();
     const tbody = $('#tbody');
     const selectedRow = state.selectedRow
       ? tbody && tbody.querySelector('tr[data-row-id="' + state.selectedRow.id + '"]')
@@ -15466,6 +15884,7 @@ const _NetworkPlus = (function () {
   // Before any selection the pane shows one line of guidance instead of two
   // empty tab strips; the inspector halves return with the next selection.
   function setInspectorEmptyState(empty) {
+    if (empty) updateWsDetailTabs(null);
     const inspectorPanels = $('.inspector-panels');
     const emptyState = $('#inspectorEmptyState');
     if (inspectorPanels) {
@@ -17532,6 +17951,7 @@ const _NetworkPlus = (function () {
     titleParts.push(row.url || '');
     renderDetailsTitle(row, titleParts);
     const summaryPlan = renderDetailsSummary(row);
+    if (updateWsDetailTabs(row)) return;
     renderInspectorTimingOverview(row);
 
     // === REQUEST TABS ===
@@ -17930,6 +18350,7 @@ const _NetworkPlus = (function () {
   function renderComparisonPanel(rowA, rowB) {
     const panel = $('#comparePanel');
     if (!panel) return;
+    updateWsDetailTabs(null);
     panel.textContent = '';
 
     // Labelled region relationship: the h2 heading labels the panel element.
@@ -19383,6 +19804,7 @@ const _NetworkPlus = (function () {
     // Tab switching for inspector panels
     initializeInspectorTabBar('req-tab-bar');
     initializeInspectorTabBar('res-tab-bar');
+    initializeWsDetailTabs();
     // Nothing is selected at start: guidance line instead of empty tab strips.
     setInspectorEmptyState(!state.selectedRow);
 
@@ -21645,6 +22067,14 @@ const _NetworkPlus = (function () {
             );
           });
         }
+        if (wireRow.webSocket === true || row.method === 'WS') {
+          row._mirrorFetchWsMessages = (minimumRevision) => new Promise((resolve, reject) => {
+            viewerSession.requestWsMessages(
+              row.id, session, minimumRevision,
+              (error, payload) => (error ? reject(error) : resolve(payload)),
+            );
+          });
+        }
         return row;
       };
       // Dedupe by id in O(1): every id ever admitted this session. Stale
@@ -21768,6 +22198,11 @@ const _NetworkPlus = (function () {
         for (const row of pendingLiveRows) knownRowIds.add(row.id);
         render();
         refreshMirrorDetails(changedRows);
+        if (wsMessagesView && wsMessagesView.row === state.selectedRow) {
+          // Reconnecting to the same host may preserve the selected row and revision.
+          if (wsMessagesView.unavailable) wsMessagesView.requestedRevision = -1;
+          if (!$('#details').hidden && !$('#ws-messages-panel').hidden) renderWsMessages(wsMessagesView.row);
+        }
         if (state.autoScroll) scrollGridToNewest();
         updateRetentionStatus();
       };
@@ -22003,6 +22438,10 @@ const _NetworkPlus = (function () {
           viewerSession.failPendingBodyRequests(
             'The DevTools session disconnected before the response content arrived.',
           );
+          if (wsMessagesView?.row._mirrorFetchWsMessages) {
+            wsMessagesView.unavailable = true;
+            if (!$('#details').hidden && !$('#ws-messages-panel').hidden) renderWsMessages(wsMessagesView.row);
+          }
           updateMirrorStatus();
         });
         try {
@@ -22477,6 +22916,11 @@ const _NetworkPlus = (function () {
         let memoryLimited = false;
         const changedRows = ingestWsEvents(result, {
           variant,
+          allowMessage: (row, addedBytes) => {
+            if (reserveStreamMemory(row, addedBytes)) return true;
+            memoryLimited = true;
+            return false;
+          },
           allowTranscript: (row, event, addedLength, hasFrame) => {
             const frameBytes = hasFrame && (row._wsFrames?.length || 0) < HAR_WS_MESSAGE_IMPORT_LIMIT
               ? 96 + 2 * (event.binary ? 0 : event.preview.length) : 0;
@@ -23056,6 +23500,7 @@ const _NetworkPlus = (function () {
     buildSseWrapperSource,
     buildStreamDrainSource,
     formatWsFrameLine,
+    formatWsMessageJson,
     appendBoundedWsText,
     ingestWsEvents,
     escapeMarkdownTableCell,

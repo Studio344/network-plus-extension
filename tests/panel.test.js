@@ -8246,6 +8246,59 @@ describe('websocket capture pieces', () => {
     expect(text).not.toContain('line-0');
   });
 
+  test('formats WebSocket JSON without changing captured numbers, keys, or escapes', () => {
+    expect(np.formatWsMessageJson('{"id":9007199254740993,"id":-0,"nested":[{},1.2e+8,"a\\n"]}')).toBe(
+      '{\n  "id": 9007199254740993,\n  "id": -0,\n  "nested": [\n    {},\n    1.2e+8,\n    "a\\n"\n  ]\n}',
+    );
+    expect(np.formatWsMessageJson('{"unfinished":')).toBeNull();
+    expect(np.formatWsMessageJson('['.repeat(80) + '0' + ']'.repeat(80))).toBeNull();
+  });
+
+  test('the latest WebSocket history keeps recording after the full HAR frame cap', () => {
+    const at = Date.parse('2026-08-22T02:00:00.000Z');
+    const row = { method: 'WS' };
+    const count = np.HAR_WS_MESSAGE_IMPORT_LIMIT + 5;
+    np.ingestWsEvents(Array.from({ length: count }, (_, index) => ({
+      kind: index % 2 === 0 ? 'ws-sent' : 'ws-received',
+      socketId: 1,
+      at,
+      preview: String(index),
+    })), { variant: 'ws', getRow: () => row });
+    expect(row._wsFrames).toHaveLength(np.HAR_WS_MESSAGE_IMPORT_LIMIT);
+    expect(row._wsFrames.at(-1).data).toBe(String(np.HAR_WS_MESSAGE_IMPORT_LIMIT - 1));
+    expect(row._wsMessages).toHaveLength(100);
+    expect(row._wsMessages[0].id).toBe(count - 99);
+    expect(row._wsMessages.at(-1)).toMatchObject({ id: count, type: 'send', time: at, data: String(count - 1) });
+    expect(row._wsMessagesOmitted).toBe(count - 100);
+  });
+
+  test('HAR message history orders mixed epoch units and preserves the latest bounded payload', () => {
+    const start = Date.parse('2026-08-22T02:00:00.000Z');
+    const row = { method: 'GET' };
+    np.applyHarWebSocketMessages(row, [
+      { type: 'receive', time: (start + 1000) / 1000, data: 'x'.repeat(2100) },
+      { type: 'send', time: start, data: 'first' },
+      { type: 'receive', time: (start + 1000) / 1000, opcode: 2, data: 'aQ==' },
+    ]);
+    expect(row._wsMessages.map(({ type, data }) => [type, data.length])).toEqual([
+      ['send', 5], ['receive', 2048], ['receive', 0],
+    ]);
+    expect(row._wsMessages[1]).toMatchObject({ id: 2, time: start + 1000, truncated: true });
+    expect(row._wsMessages[2]).toMatchObject({ id: 3, time: start + 1000, binary: true, bytes: null });
+  });
+
+  test('malformed HAR data outside the exported frame cap cannot abort import', () => {
+    const messages = Array.from({ length: 1100 }, (_, i) => ({
+      type: 'receive', time: 1700000000 + i, data: 'record-' + i,
+    }));
+    messages.push({ type: 'receive', time: 1700002000, data: { toString: 1 } });
+    messages.push({ type: 'send', time: { toString: 1 }, data: 'no-timestamp' });
+    const row = { method: 'GET' };
+    expect(np.applyHarWebSocketMessages(row, messages)).toBe(np.HAR_WS_MESSAGE_IMPORT_LIMIT);
+    expect(row._wsMessages).toHaveLength(100);
+    expect(row._wsMessages.at(-1)).toMatchObject({ data: '', time: 1700002000000 });
+  });
+
   test('ingest creates rows on open attempts and threads frames into both directions', () => {
     const at = Date.parse('2026-08-22T02:00:00.000Z');
     const rows = new Map();
@@ -9262,6 +9315,161 @@ describe('mirror WebSocket export protocol', () => {
     expect(chunks[0].frames[0]).toEqual({ type: 'send', time: 1.234, opcode: 1, data: '\u0000'.repeat(2048) });
     expect(chunks[1].frames[0]).toEqual({ type: 'send', time: 1.298, opcode: 2 });
     expect(fetchBodyForRow).not.toHaveBeenCalled();
+  });
+});
+
+describe('mirror WebSocket Messages protocol', () => {
+  const frame = (id = 1, overrides = {}) => ({
+    id, type: 'send', time: 1755750000000, binary: false, bytes: null, data: 'message', truncated: false,
+    ...overrides,
+  });
+  const row = (overrides = {}) => ({
+    id: 7, method: 'WS', url: 'wss://example.test/stream', status: '',
+    requestHeaders: [], responseHeaders: [], _streamRevision: 3,
+    _wsMessages: [frame()], _wsMessagesOmitted: 2,
+    ...overrides,
+  });
+  const connect = (rows = [row()], capable = true) => {
+    const toHost = [];
+    const toViewer = [];
+    const host = np.createMirrorHostSession({
+      postMessage: (message) => toViewer.push(message),
+      getRows: () => rows, isPaused: () => false, fetchBodyForRow: jest.fn(),
+    });
+    const viewer = np.createMirrorViewerSession({
+      postMessage: (message) => toHost.push(message),
+      appendWireRow: jest.fn(), applyWireSnapshot: jest.fn(),
+      getLocalCount: () => rows.length, getLocalMaxId: () => rows.at(-1)?.id ?? 0,
+    });
+    host.handleMessage({ type: 'hello' });
+    const snapshot = toViewer.find(({ type }) => type === 'snapshot-start');
+    for (const message of toViewer) {
+      viewer.handleMessage(message === snapshot ? { ...snapshot, webSocketMessages: capable && snapshot.webSocketMessages } : message);
+    }
+    return { host, viewer, toHost, toViewer, snapshot };
+  };
+  const request = (pair, rowId = 7, minimumRevision = 3) => {
+    const done = jest.fn();
+    pair.viewer.requestWsMessages(rowId, pair.snapshot.session, minimumRevision, done);
+    return { done, wire: pair.toHost.at(-1) };
+  };
+  const reply = (pair, wire) => {
+    pair.host.handleMessage(wire);
+    return pair.toViewer.at(-1);
+  };
+
+  test('returns an immutable bounded message snapshot on demand without putting frames into row pushes', () => {
+    const initial = frame(1, { data: '\u0000'.repeat(2048), extra: 'never transferred' });
+    const frames = Array.from({ length: 100 }, (_unused, index) => ({
+      ...initial,
+      id: index + 1,
+    }));
+    const wsRow = row({ _wsSocketId: 3, _wsMessages: frames });
+    const pair = connect([wsRow]);
+    expect(pair.snapshot.webSocketMessages).toBe(true);
+    pair.host.pushRow(wsRow);
+    const rowPush = pair.toViewer.at(-1);
+    expect(rowPush).toMatchObject({ type: 'row', row: { streamRevision: 3, webSocket: true } });
+    expect(JSON.stringify(pair.toViewer)).not.toContain('never transferred');
+    expect(pair.toViewer.some(({ type }) => type === 'ws-messages-result')).toBe(false);
+    const { done, wire } = request(pair);
+    const result = reply(pair, wire);
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(2 * 1024 * 1024);
+    expect(result).toMatchObject({ type: 'ws-messages-result', revision: 3, omitted: 2, ok: true });
+    expect(result.frames).toHaveLength(100);
+    expect(result.frames[0].extra).toBeUndefined();
+    wsRow._wsMessages[0].data = 'new revision';
+    expect(result.frames[0].data).toHaveLength(2048);
+    pair.viewer.handleMessage(result);
+    expect(done).toHaveBeenCalledWith(null, { revision: 3, frames: result.frames, omitted: 2 });
+  });
+
+  test('serves an imported HTTP upgrade and a known empty socket at revision zero', () => {
+    const message = frame(4, { type: 'receive', time: null, binary: true, bytes: 16, data: '' });
+    const imported = row({ method: 'GET', url: 'https://example.test/stream', status: 101,
+      responseHeaders: [{ name: 'Upgrade', value: 'websocket' }], _streamRevision: undefined,
+      _wsMessages: [message], _wsMessagesOmitted: 0 });
+    const empty = row({ id: 8, _streamRevision: undefined, _wsMessages: undefined, _wsMessagesOmitted: undefined });
+    const pair = connect([imported, empty]);
+    const importRequest = request(pair, 7, 0);
+    pair.viewer.handleMessage(reply(pair, importRequest.wire));
+    expect(importRequest.done).toHaveBeenCalledWith(null, { revision: 0, frames: [message], omitted: 0 });
+    const emptyRequest = request(pair, 8, 0);
+    pair.viewer.handleMessage(reply(pair, emptyRequest.wire));
+    expect(emptyRequest.done).toHaveBeenCalledWith(null, { revision: 0, frames: [], omitted: 0 });
+  });
+
+  test('rejects another viewer, row, session or request without settling the callback', () => {
+    const pair = connect();
+    const { done, wire } = request(pair);
+    const result = reply(pair, wire);
+    pair.viewer.handleMessage({ ...result, viewer: 'different-viewer' });
+    pair.viewer.handleMessage({ ...result, rowId: 8 });
+    pair.viewer.handleMessage({ ...result, session: 'different-session' });
+    pair.viewer.handleMessage({ ...result, requestId: wire.requestId + 1 });
+    expect(done).not.toHaveBeenCalled();
+    pair.viewer.handleMessage(result);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledWith(null, { revision: 3, frames: [frame()], omitted: 2 });
+  });
+
+  test.each([
+    ['stale revision', { revision: 2 }],
+    ['too many messages', { frames: Array.from({ length: 101 }, (_unused, index) => frame(index + 1)) }],
+    ['duplicate IDs', { frames: [frame(), frame()] }],
+    ['invalid type', { frames: [frame(1, { type: 'unknown' })] }],
+    ['invalid time', { frames: [frame(1, { time: 9000000000000000 })] }],
+    ['invalid binary size', { frames: [frame(1, { binary: true, bytes: -1 })] }],
+    ['oversized preview', { frames: [frame(1, { data: 'y'.repeat(2049) })] }],
+    ['invalid omission count', { omitted: -1 }],
+  ])('fails closed for a %s reply', (_description, override) => {
+    const pair = connect();
+    const { done, wire } = request(pair);
+    pair.viewer.handleMessage({ ...reply(pair, wire), ...override });
+    expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  test('older hosts fail immediately and a replacement session clears an in-flight request', () => {
+    const legacy = connect([row()], false);
+    const unsupported = request(legacy);
+    expect(unsupported.done).toHaveBeenCalledWith(expect.any(Error), null);
+    expect(legacy.toHost).toEqual([]);
+
+    const pair = connect();
+    const { done, wire } = request(pair);
+    const oldReply = reply(pair, wire);
+    pair.viewer.handleMessage({ type: 'snapshot-start', generation: 2, session: 'next-host', webSocketMessages: true });
+    pair.viewer.handleMessage({ type: 'snapshot-end', generation: 2 });
+    expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+    pair.viewer.handleMessage(oldReply);
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  test('a timeout settles once and discards a late result', () => {
+    jest.useFakeTimers();
+    try {
+      const pair = connect();
+      const { done, wire } = request(pair);
+      jest.runOnlyPendingTimers();
+      expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+      pair.viewer.handleMessage(reply(pair, wire));
+      expect(done).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the host rejects an ordinary HTTP row and a requested revision it has not reached', () => {
+    const pair = connect([row(), row({ id: 8, method: 'GET', url: 'https://example.test/plain',
+      _wsMessages: undefined, _wsMessagesOmitted: undefined })]);
+    for (const { done, wire } of [request(pair, 8, 0), request(pair, 7, 4)]) {
+      const result = reply(pair, wire);
+      expect(result).toMatchObject({ requestId: wire.requestId, ok: false });
+      expect(result.frames).toBeUndefined();
+      pair.viewer.handleMessage(result);
+      expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+    }
   });
 });
 

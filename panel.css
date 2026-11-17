@@ -300,6 +300,23 @@ input[type="checkbox"]:not(:disabled){outline:1px solid var(--control-border);ou
 .inspector-panels{display:flex;flex-direction:column;flex:1;overflow:hidden}
 /* display:flex outranks the UA [hidden] rule — the trap that has now shipped three times. */
 .inspector-panels[hidden]{display:none}
+.ws-detail-tabs{flex:none}
+.ws-detail-tabs[hidden],.ws-messages-panel[hidden],.ws-messages-status[hidden],
+.details.is-ws-messages>.inspector-panels{display:none}
+.ws-messages-panel{flex:1;min-height:0;overflow:auto;overflow-anchor:auto;background:var(--content-bg)}
+.ws-messages-panel:focus-visible,.ws-message-disclosure>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.ws-messages-status{margin:0;padding:10px 12px;color:var(--text-muted);font-size:12px}
+.ws-message-list{list-style:none;display:grid;gap:8px;margin:0;padding:10px 12px;min-width:0}
+.ws-message-list:empty{padding:0}
+.ws-message{min-width:0;border:1px solid var(--border);border-radius:6px;background:var(--surface)}
+.ws-message-header{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:6px 9px 0;color:var(--text-muted);font-size:11px;font-variant-numeric:tabular-nums}
+.ws-message-direction{font-weight:700;color:var(--text-accent)}
+.ws-message[data-direction="receive"] .ws-message-direction{color:var(--fg)}
+.ws-message-payload{margin:0;padding:6px 9px 9px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ws-message-disclosure>summary{padding:5px 9px 8px;color:var(--fg);cursor:pointer;font-size:12px;overflow-wrap:anywhere}
+.ws-message-snippet{margin-inline-start:6px;color:var(--text-muted);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ws-message-disclosure[open] .ws-message-snippet{display:none}
+.ws-message-note{margin:0;padding:0 9px 7px;color:var(--text-muted);font-size:11px}
 .inspector-half{display:flex;flex-direction:column;flex:1;min-height:80px;overflow:hidden}
 /* A quiet caption row that is also the half's collapse toggle: the accent-dim fill is reserved for the active tab. */
 .inspector-label{display:block;width:100%;margin:0;border:0;border-radius:0;text-align:left;font-family:inherit;line-height:inherit;cursor:pointer;font-size:12px;font-weight:600;padding:5px 10px;background:var(--surface);color:var(--fg);border-bottom:1px solid var(--border)}
