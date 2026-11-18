@@ -1186,6 +1186,10 @@ test('retains the local-only skip when no browser executable is discoverable', (
     },
     {
       skipped: true,
+      title: 'failed response prefetch stays on its row and recovers only on explicit retry',
+    },
+    {
+      skipped: true,
       title: 'matches-only grid navigation and range selection exclude hidden rows and comparison Escape restores focus',
     },
     {
