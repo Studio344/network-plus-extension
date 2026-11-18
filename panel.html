@@ -77,7 +77,7 @@
     <div class="search-panel-rows" id="searchRows"></div>
     <div class="search-panel-footer">
       <button id="searchAddBtn" class="search-add-btn">+ Add keyword</button>
-      <label class="search-matches-only" title="Show only requests that match search keywords. When off, all requests stay visible with highlights." data-i18n-title="titleMatchesOnly"><input type="checkbox" id="searchMatchesOnlyToggle" role="switch" aria-label="Show only matching requests"><span class="search-toggle-track" aria-hidden="true"></span><span class="search-matches-only-label">Matches only</span></label>
+      <label class="search-matches-only" title="Show only matches in the filtered list. Search results include the entire capture." data-i18n-title="titleMatchesOnly"><input type="checkbox" id="searchMatchesOnlyToggle" role="switch" aria-label="Show only matching requests"><span class="search-toggle-track" aria-hidden="true"></span><span class="search-matches-only-label">Matches only</span></label>
       <span id="searchPanelNotice" class="search-panel-notice"></span>
       <span class="search-opt-group" role="group" aria-label="Match options">
         <button id="searchOptCaseBtn" class="search-opt-btn" aria-pressed="false" title="Match case" data-i18n-title="titleMatchCase">Aa</button>
@@ -98,6 +98,7 @@
         <button type="button" data-status-facet="other" aria-pressed="false"><span data-i18n="analysisStatusOther">Other</span><span class="analysis-count"></span></button>
         <button type="button" data-status-facet="pending" aria-pressed="false"><span data-i18n="analysisPending">Pending</span><span class="analysis-count"></span></button>
       </div>
+      <button type="button" id="responseBodyIssuesFilter" aria-pressed="false"><span data-i18n="responseBodyIssuesFilter">Body read failures</span><span class="analysis-count">0</span></button>
       <button type="button" id="analysisDomainsBtn" aria-controls="domainSummary" aria-expanded="false" data-i18n="analysisDomains">Hosts</button>
       <button type="button" id="overviewToggleBtn" aria-controls="trafficOverview" aria-expanded="false" data-i18n="overviewToggle">Timeline</button>
       <button type="button" id="analysisCompareBtn" class="analysis-compare" data-i18n="menuCompareTwo" aria-controls="comparePanel" hidden>Compare 2 requests</button>
@@ -109,7 +110,6 @@
       <div class="overview-heading">
         <h2 data-i18n="overviewWaterfall">Request waterfall</h2>
         <div class="overview-heading-actions">
-          <button type="button" id="overviewClearTime" class="overview-action overview-clear-time" data-i18n="overviewClearTime" hidden>Clear time range</button>
           <div class="overview-legend" role="group" data-i18n-aria-label="detailsInfoStatus" aria-label="Status">
             <span data-status-class="2xx">2xx</span><span data-status-class="3xx">3xx</span>
             <span data-status-class="4xx">4xx</span><span data-status-class="5xx">5xx</span>
@@ -119,6 +119,11 @@
       </div>
       <p id="overviewTimeEmpty" class="overview-muted" data-i18n="overviewNoStarts" hidden>No recorded start times in this scope.</p>
       <p id="overviewInstructions" class="overview-muted" data-i18n="overviewInstructions">Left edge = start. Bar length = duration. Drag the time ruler to filter.</p>
+      <div id="overviewRangeControls" class="overview-range-controls" hidden>
+        <p id="overviewTimeReadout" class="overview-readout" role="status" aria-atomic="true"></p>
+        <button type="button" id="overviewZoomTime" class="overview-action" aria-controls="overviewWaterfall" aria-pressed="false">Zoom to range</button>
+        <button type="button" id="overviewClearTime" class="overview-action" aria-controls="overviewWaterfall grid" data-i18n="overviewClearTime">Clear time range</button>
+      </div>
       <div id="overviewWaterfall" class="overview-waterfall" role="region" tabindex="0" aria-label="Scrollable requests" data-i18n-aria-label="overviewScrollRegion">
         <div class="overview-ruler">
           <div id="overviewTimeBounds" class="overview-time-bounds" aria-hidden="true"><span></span><span></span><span></span></div>
@@ -127,7 +132,7 @@
         <ul id="overviewRequests" class="overview-requests"></ul>
         <p id="overviewNoDisplayed" class="overview-muted" data-i18n="overviewNoDisplayed" hidden>No displayed requests with a recorded start time.</p>
       </div>
-      <p id="overviewTimeReadout" class="overview-readout"></p>
+      <p id="overviewBinReadout" class="overview-muted overview-bin-readout"></p>
       <p id="overviewTimeOmissions" class="overview-muted" hidden></p>
     </div>
     <div class="overview-latency">

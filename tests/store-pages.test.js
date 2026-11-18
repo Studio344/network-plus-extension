@@ -118,8 +118,8 @@ describe('deletion confirmation patterns', () => {
 // are placeholders, because the decisions only ever compare digests for equality.
 const screenshotFiles = [
   'screenshot-1-request-detail-1280x800.png',
-  'screenshot-2-timing-guidance-1280x800.png',
-  'screenshot-3-sample-guide-1280x800.png',
+  'screenshot-2-timeline-1280x800.png',
+  'screenshot-3-websocket-1280x800.png',
   'screenshot-4-sanitized-export-1280x800.png',
 ];
 const desired = Object.freeze({

@@ -262,6 +262,18 @@ browserTest(
       }
       expect(await evaluate(host.cdp, 'window.__bodyReadCount')).toBe(1);
 
+      await evaluate(viewer.cdp, "window.__hostListeners.disconnect.forEach((fn) => fn()); true");
+      expect(await evaluate(viewer.cdp, `(() => {
+        const retry = document.querySelector('#retryResponseBody');
+        return !retry.hidden && retry.disabled &&
+          document.querySelector('#responseBodyIssueReason').textContent.includes('Reconnect');
+      })()`)).toBe(true);
+      await evaluate(viewer.cdp, "document.querySelector('#retryResponseBody').click(); true");
+      expect(await evaluate(viewer.cdp,
+        "window.__sentToHost.filter((message) => message.type === 'body-request').length")).toBe(0);
+      await attachScriptedHostPort(viewer.cdp);
+      expect(await waitForViewer("!document.querySelector('#retryResponseBody').disabled")).toBe(true);
+
       await evaluate(viewer.cdp, "document.querySelector('#retryResponseBody').click(); true");
       const recovered = `document.querySelector('#responseBodyIssue').hidden &&
         !(${badge}) && document.querySelector('#res-body').textContent.includes('pop-out retry succeeded')`;

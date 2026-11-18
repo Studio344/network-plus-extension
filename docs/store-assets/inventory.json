@@ -1,98 +1,90 @@
 {
   "schemaVersion": 1,
-  "reviewedOn": "2026-10-12",
+  "reviewedOn": "2026-11-19",
   "assets": [
     {
       "file": "logo-300.png",
       "kind": "logo",
       "width": 300,
       "height": 300,
-      "source": "icons/icon128.png",
+      "source": "icons/network-plus.svg",
       "syntheticOnly": true,
       "containsSensitiveData": false,
-      "state": "Network+ extension mark; no traffic data"
+      "state": "Current Network+ extension mark with a mint plus on purple"
     },
     {
       "file": "chrome-small-promo-440x280.png",
       "kind": "promotional-tile",
       "width": 440,
       "height": 280,
-      "source": "Image generation using the Network+ logo and synthetic request-detail screenshot as references",
+      "source": "Composition of the current Network+ vector logo and bundled otter on a charcoal background",
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [],
-      "state": "Text-free Network+ promotional tile with an otter investigator and abstract request and timing motifs"
+      "state": "Text-free tile with the current icon and bundled otter"
     },
     {
       "file": "chrome-marquee-1400x560.png",
       "kind": "promotional-marquee",
       "width": 1400,
       "height": 560,
-      "source": "Playwright composition of the checked-in extension icon, the otter-investigator illustration cut out of the promotional tile, and the wordmark; no captured traffic",
+      "source": "Composition of the current Network+ vector logo, bundled otter, and wordmark on a charcoal background",
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [],
-      "state": "Wide indigo brand marquee: the otter investigator beside the extension icon on the left, the Network+ wordmark and feature tagline on the right; no traffic data"
+      "state": "Charcoal marquee with the current icon, bundled otter, and HTTP and WebSocket feature tagline"
     },
     {
       "file": "screenshot-1-request-detail-1280x800.png",
       "kind": "screenshot",
       "width": 1280,
       "height": 800,
-      "source": "panel.js:createSampleCaptureRequests",
+      "source": "scripts/render-store-screenshots.js:createStoreCapture",
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [
-        "api.network-plus.test",
-        "checkout.network-plus.test",
-        "static.network-plus.test"
+        "api.network-plus.test"
       ],
-      "state": "Numbered dark composition (step eyebrow, white headline, gradient-ring frame) over an unscaled current Inspector-led panel capture: synthetic request grid with color-coded methods, selected 503 response headers, and framed Query/Cookies and status-class count badges"
+      "state": "Current dark request and response inspector showing the selected synthetic HTTP 503 request"
     },
     {
-      "file": "screenshot-2-timing-guidance-1280x800.png",
+      "file": "screenshot-2-timeline-1280x800.png",
       "kind": "screenshot",
       "width": 1280,
       "height": 800,
-      "source": "panel.js:createSampleCaptureRequests",
+      "source": "scripts/render-store-screenshots.js:createStoreCapture",
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [
-        "api.network-plus.test",
-        "checkout.network-plus.test",
-        "static.network-plus.test"
+        "api.network-plus.test"
       ],
-      "state": "Numbered dark composition (step eyebrow, white headline, gradient-ring frame) over an unscaled dark-theme panel capture: synthetic 503 response Timing view with 2.45 s total, 2.20 s wait, and the browser-evidence guidance"
+      "state": "Current dark timeline with an active relative range, filtered request rows and latency distribution"
     },
     {
-      "file": "screenshot-3-sample-guide-1280x800.png",
+      "file": "screenshot-3-websocket-1280x800.png",
       "kind": "screenshot",
       "width": 1280,
       "height": 800,
-      "source": "panel.js:createSampleCaptureRequests",
+      "source": "scripts/render-store-screenshots.js:createStoreCapture",
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [
-        "api.network-plus.test",
-        "checkout.network-plus.test",
-        "static.network-plus.test"
+        "api.network-plus.test"
       ],
-      "state": "Numbered dark composition (step eyebrow, white headline, gradient-ring frame) over an unscaled dark-theme panel capture: prompt-first local Sample evidence guide before Reveal evidence"
+      "state": "Current dark WebSocket message timeline showing a synthetic search, sent and received messages, and expanded JSON"
     },
     {
       "file": "screenshot-4-sanitized-export-1280x800.png",
       "kind": "screenshot",
       "width": 1280,
       "height": 800,
-      "source": "panel.js:createSampleCaptureRequests",
+      "source": "scripts/render-store-screenshots.js:createStoreCapture",
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [
-        "api.network-plus.test",
-        "checkout.network-plus.test",
-        "static.network-plus.test"
+        "api.network-plus.test"
       ],
-      "state": "Numbered dark composition (step eyebrow, white headline, gradient-ring frame) over an unscaled dark-theme panel capture: user-initiated export dialog with the displayed-or-selected scope choice and Export sanitized HAR as the safe default"
+      "state": "Current dark export dialog showing sanitized HAR as the default action"
     }
   ]
 }

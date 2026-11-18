@@ -7176,6 +7176,8 @@ browserTest(
       })),
       count: document.querySelector('#counter').textContent,
       successful: document.querySelector('[data-status-facet="2xx"] .analysis-count').textContent,
+      bodyFailures: document.querySelector('#responseBodyIssuesFilter .analysis-count').textContent,
+      bodyFilterPressed: document.querySelector('#responseBodyIssuesFilter').getAttribute('aria-pressed'),
       issue: Boolean(document.querySelector('#responseBodyIssue')?.getClientRects().length),
       reason: document.querySelector('#responseBodyIssueReason')?.textContent.trim() || '',
       canRetry: document.querySelector('#retryResponseBody')?.disabled === false &&
@@ -7245,7 +7247,7 @@ browserTest(
         count: '2 requests', successful: '2', issue: false,
       });
       const timedOut = await waitForState('only the failed row marked after timeout',
-        ({ rows }) => rows[0]?.badges === 1, 15000);
+        ({ rows, bodyFailures }) => rows[0]?.badges === 1 && bodyFailures === '1', 15000);
       expect(timedOut).toMatchObject({
         rows: [{ id: '1', status: '200', badges: 1 }, { id: '2', status: '200', badges: 0 }],
         count: first.count, successful: first.successful, issue: false, attempts: 1,
@@ -7273,19 +7275,24 @@ browserTest(
         ({ issue, canRetry }) => issue && canRetry);
       expect(beforeRetry.attempts).toBe(1);
 
+      await evaluate(cdp, "document.querySelector('#responseBodyIssuesFilter').click()");
+      const onlyFailed = await waitForState('failed-body filter keeps the successful HTTP status',
+        ({ rows, bodyFilterPressed }) => rows.length === 1 && bodyFilterPressed === 'true');
+      expect(onlyFailed.rows).toEqual(timedOut.rows.slice(0, 1));
+      expect(onlyFailed).toMatchObject({ successful: '2', bodyFailures: '1' });
+
       await evaluate(cdp, "document.querySelector('#retryResponseBody').click()");
       const stillFailed = await waitForState('failed retry leaves the same request retryable',
         ({ attempts, issue, canRetry, reason }) => attempts === 2 && issue && canRetry && reason !== selected.reason);
-      expect(stillFailed).toMatchObject({ rows: beforeRetry.rows, count: beforeRetry.count, successful: first.successful });
+      expect(stillFailed).toMatchObject({ rows: onlyFailed.rows, successful: first.successful, bodyFailures: '1' });
       expect(stillFailed.reason).toMatch(/devtools|browser/i);
 
       await evaluate(cdp, "document.querySelector('#retryResponseBody').click()");
-      const recovered = await waitForState('successful retry restores the body and clears the warning',
-        ({ body, issue, rows }) => body.includes('Recovered response content') && !issue && rows[0]?.badges === 0);
-      expect(recovered).toMatchObject({
-        attempts: 3, rows: beforeRetry.rows.map((row) => ({ ...row, badges: 0 })),
-        count: beforeRetry.count, successful: first.successful,
-      });
+      const recovered = await waitForState('successful retry restores the body and leaves the failed-body filter empty',
+        ({ body, issue, rows, bodyFailures }) => body.includes('Recovered response content') && !issue && rows.length === 0 && bodyFailures === '0');
+      expect(recovered).toMatchObject({ attempts: 3, successful: first.successful, bodyFilterPressed: 'true' });
+      await evaluate(cdp, "document.querySelector('#responseBodyIssuesFilter').click()");
+      expect((await read()).rows).toEqual(beforeRetry.rows.map((row) => ({ ...row, badges: 0 })));
       expect(recovered.raw).toContain('Recovered response content');
       expect(await evaluate(cdp, `(() => {
         document.querySelector('#settingsBtn').click();
@@ -7294,6 +7301,155 @@ browserTest(
         return open && !document.querySelector('#settingsDialog').open;
       })()`)).toBe(true);
       expect(errors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'an old-page body becomes unavailable only after DevTools confirms it is missing',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: LIVE_CAPTURE_INIT_SCRIPT + `
+        localStorage.setItem('networkPlus.lang', 'en');
+        window.bodyNavigationListeners = [];
+        chrome.devtools.network.onNavigated = {
+          addListener(listener) { window.bodyNavigationListeners.push(listener); },
+        };
+      `,
+    });
+    const { cdp } = page;
+    const waitForState = async (predicate) => {
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        if (await evaluate(cdp, predicate)) return true;
+        await delay(30);
+      }
+      return false;
+    };
+    try {
+      await waitForLiveNetworkListener(cdp);
+      await evaluate(cdp, `(() => {
+        const counts = window.bodyNavigationReads = [0, 0];
+        const emit = (offset) => window.__networkPlusLiveListener({
+          startedDateTime: new Date(1704067200000 + offset).toISOString(),
+          time: 10,
+          request: { method: 'GET', url: 'https://example.test/body-navigation/' + offset, headers: [] },
+          response: { status: 200, headers: [], bodySize: 21, content: { size: 21, mimeType: 'text/plain' } },
+          timings: { wait: 10 },
+          getContent(callback) {
+            if (++counts[offset] === 2 && offset === 1) {
+              callback('Retained old-page body', '');
+              return;
+            }
+            chrome.runtime.lastError = { message: counts[offset] === 1
+              ? 'Temporary DevTools read failure' : 'No resource with given identifier found' };
+            try { callback(undefined, ''); }
+            finally { chrome.runtime.lastError = null; }
+          },
+        });
+        emit(0);
+        emit(1);
+      })()`);
+      expect(await waitForState("document.querySelectorAll('.response-body-issue-badge').length === 2")).toBe(true);
+      await evaluate(cdp, `window.bodyNavigationListeners.forEach(listener => listener('https://example.test/next'));
+        document.getElementById('request-row-1').click();`);
+      expect(await evaluate(cdp, "!document.getElementById('retryResponseBody').hidden")).toBe(true);
+      await evaluate(cdp, "document.getElementById('retryResponseBody').click()");
+      expect(await waitForState(`document.getElementById('retryResponseBody').hidden &&
+        document.getElementById('responseBodyIssueReason').textContent.includes('navigated')`)).toBe(true);
+      expect(await evaluate(cdp, "document.getElementById('res-body').textContent")).toContain('navigated away');
+      await evaluate(cdp, `document.getElementById('request-row-2').click();
+        document.getElementById('retryResponseBody').click();`);
+      expect(await waitForState("document.getElementById('res-body').textContent.includes('Retained old-page body')")).toBe(true);
+      expect(await evaluate(cdp, 'window.bodyNavigationReads')).toEqual([2, 2]);
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'request search finds archived response text outside the list filters and opens it without clearing them',
+  async () => {
+    const page = await launchPanelPage({ executable: browserExecutable, query: '?view=offline' });
+    try {
+      const observed = await evaluate(page.cdp, `(async () => {${WAIT_FOR_IN_PAGE}
+        const query = 'global search marker';
+        const entries = [
+          [200, 'no-match', { text: 'ordinary success' }],
+          [200, 'visible-hit', { text: query }],
+          [503, 'hidden-hit', { text: 'x'.repeat(1280 * 1024) + query }],
+          [503, 'hidden-binary', { text: 'AAECAwQF', encoding: 'base64' }],
+        ].map(([status, path, content]) => ({
+          startedDateTime: '2026-01-15T12:00:00Z', time: 1,
+          request: { method: 'GET', url: 'https://example.test/' + path, headers: [] },
+          response: { status, headers: [], content: { size: content.text.length, mimeType: 'text/plain', ...content } },
+          timings: { send: 0, wait: 1, receive: 0 },
+        }));
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([JSON.stringify({ log: { version: '1.2', entries } })], 'global-search.har'));
+        const fileInput = document.querySelector('#importFile');
+        fileInput.files = transfer.files;
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        const ids = () => [...document.querySelectorAll('#tbody tr[data-row-id]')].map((row) => row.dataset.rowId);
+        if (!await waitFor(() => ids().length === 4, 4000)) throw new Error('The HAR did not load.');
+        const facet = document.querySelector('[data-status-facet="2xx"]');
+        facet.click();
+        document.querySelector('#searchToggleBtn').click();
+        const input = document.querySelector('.search-keyword-input');
+        input.value = query;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const count = document.querySelector('#searchCount');
+        const notice = document.querySelector('#searchPanelNotice');
+        if (!await waitFor(() => count.textContent === '2 matches' && notice.textContent.includes('1 binary bodies'), 5000)) {
+          throw new Error('Unexpected global search result: ' + count.textContent + ' ' + notice.textContent);
+        }
+        const searched = {
+          ids: ids(), count: count.textContent, notice: notice.textContent,
+          footer: document.querySelector('#counter').textContent,
+        };
+        document.querySelector('#searchMatchesOnlyToggle').click();
+        const next = () => document.querySelector('[data-search-direction="1"]').click();
+        next();
+        next();
+        const picked = {
+          ids: ids(),
+          name: document.querySelector('#detailsTitle').textContent,
+          outside: !document.querySelector('#analysisOutsideView').hidden,
+          focusedGridRow: document.querySelector('#tbody tr[tabindex="0"]')?.dataset.rowId,
+          filter: facet.getAttribute('aria-pressed'),
+        };
+        document.querySelector('#exportHarBtn').click();
+        picked.displayedExportCount = document.querySelector('#dataSafetyScopeDisplayedCount').textContent;
+        document.querySelector('#dataSafetyCancelBtn').click();
+        const currentInput = document.querySelector('.search-keyword-input');
+        currentInput.value = '';
+        currentInput.dispatchEvent(new Event('input', { bubbles: true }));
+        if (!await waitFor(() => count.textContent === '' && ids().length === 2, 2000)) {
+          throw new Error('Clearing the query did not restore the filtered list.');
+        }
+        return { searched, picked, restored: { ids: ids(), filter: facet.getAttribute('aria-pressed') } };
+      })()`, true);
+      expect(observed.searched).toEqual({
+        ids: ['1', '2'],
+        count: '2 matches',
+        notice: expect.stringContaining('Matches outside list filters (1)'),
+        footer: '2 / 4 requests · 1 matching',
+      });
+      expect(observed.picked).toEqual({
+        ids: ['2'],
+        name: expect.stringContaining('/hidden-hit'),
+        outside: true,
+        focusedGridRow: '2',
+        filter: 'true',
+        displayedExportCount: '1',
+      });
+      expect(observed.restored).toEqual({ ids: ['1', '2'], filter: 'true' });
     } finally {
       await page.close();
     }
@@ -7442,6 +7598,99 @@ browserTest(
       expect(observed.copied).toContain('/match-a');
       expect(observed.copied).toContain('/match-b');
       expect(observed.copied).not.toContain('/hidden-');
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'timeline selection shares elapsed time with the ruler and zooms without changing the request filter',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      width: 320,
+      height: 800,
+      query: '?view=offline',
+      initScript: LIVE_CAPTURE_INIT_SCRIPT + "localStorage.setItem('networkPlus.lang', 'en');",
+    });
+    const { cdp } = page;
+    const readTimeline = () => evaluate(cdp, `(() => {
+      const summary = document.querySelector('#overviewTimeReadout');
+      const actions = document.querySelector('#overviewRangeControls');
+      const zoom = document.querySelector('#overviewZoomTime');
+      const clear = document.querySelector('#overviewClearTime');
+      const lane = document.querySelector('.overview-request[data-overview-request="1"] .overview-request-bar');
+      const root = actions.getBoundingClientRect();
+      return {
+        rows: [...document.querySelectorAll('#tbody tr[data-row-id]')].map(row => row.dataset.rowId),
+        times: [...document.querySelectorAll('#overviewTimeBounds span')].map(tick => tick.textContent),
+        summary: summary.textContent,
+        absolute: summary.title,
+        chip: document.querySelector('#analysisChips [data-filter-key="time"]')?.textContent || '',
+        rangeHidden: actions.hidden,
+        zoomLabel: zoom.textContent,
+        zoomPressed: zoom.getAttribute('aria-pressed'),
+        focus: document.activeElement.id || document.activeElement.dataset.overviewBin,
+        bar: lane && [lane.style.getPropertyValue('--overview-start'), lane.style.getPropertyValue('--overview-width')],
+        controlsFit: [summary, zoom, clear].every(control => {
+          const rect = control.getBoundingClientRect();
+          return rect.width > 0 && rect.left >= root.left && rect.right <= root.right + 1;
+        }),
+        width: innerWidth,
+      };
+    })()`);
+    try {
+      await evaluate(cdp, `(async () => {${WAIT_FOR_IN_PAGE}
+        const base = Date.UTC(2026, 10, 17, 23, 59, 59);
+        const entries = [[0, 60, 200], [40, 4, 503], [96, 48, 200]].map(([offset, time, status], index) => ({
+          startedDateTime: new Date(base + offset).toISOString(),
+          time,
+          request: { method: 'GET', url: 'https://timing.example.test/request-' + index, headers: [] },
+          response: { status, headers: [], content: { size: 0, mimeType: 'text/plain' } },
+          timings: { wait: time },
+        }));
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([JSON.stringify({ log: { version: '1.2', entries } })], 'timeline.har'));
+        const input = document.querySelector('#importFile');
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 3, 2000)) {
+          throw new Error('Timeline fixture did not import');
+        }
+        document.querySelector('#overviewToggleBtn').click();
+        document.querySelector('[data-overview-bin="3"]').click();
+      })()`, true);
+      expect(await readTimeline()).toMatchObject({
+        rows: ['1', '2'], times: ['0 ms', '+72 ms', '+144 ms'],
+        summary: '+36 ms – +48 ms · 2 shown',
+        absolute: '2026-11-17 23:59:59.036Z – 23:59:59.048Z',
+        chip: expect.stringContaining('+36 ms – +48 ms'), rangeHidden: false,
+        zoomLabel: 'Zoom to range', zoomPressed: 'false', bar: ['0%', '41.66666666666667%'],
+        controlsFit: true, width: 320,
+      });
+
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+      await evaluate(cdp, "document.querySelector('#overviewZoomTime').focus()");
+      await pressKey(cdp, ' ', 'Space', 32);
+      expect(await readTimeline()).toMatchObject({
+        rows: ['1', '2'], times: ['+36 ms', '+42 ms', '+48 ms'], summary: '+36 ms – +48 ms · 2 shown',
+        zoomLabel: 'Full timeline', zoomPressed: 'true', focus: 'overviewZoomTime', bar: ['0%', '100%'],
+      });
+
+      await pressKey(cdp, ' ', 'Space', 32);
+      expect(await readTimeline()).toMatchObject({
+        rows: ['1', '2'], times: ['0 ms', '+72 ms', '+144 ms'],
+        zoomLabel: 'Zoom to range', zoomPressed: 'false', focus: 'overviewZoomTime',
+      });
+      await pressKey(cdp, ' ', 'Space', 32);
+      await evaluate(cdp, "document.querySelector('#overviewClearTime').focus()");
+      await pressKey(cdp, ' ', 'Space', 32);
+      expect(await readTimeline()).toMatchObject({
+        rows: ['1', '2', '3'], times: ['0 ms', '+72 ms', '+144 ms'], chip: '',
+        rangeHidden: true, zoomPressed: 'false', focus: expect.stringMatching(/^\d+$/),
+      });
     } finally {
       await page.close();
     }
