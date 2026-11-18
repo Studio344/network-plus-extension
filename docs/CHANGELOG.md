@@ -4,7 +4,14 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- No changes have been recorded since v1.19.1.
+- No changes have been recorded since v1.20.0.
+
+## v1.20.0 - 2026-11-19
+
+- ⚡ **HAR body access** — Read indexed entries directly, search across list filters, and explain which response bodies search could not inspect.
+- 🐛 **Response body failures** — Filter failed body reads and explain why retry is unavailable.
+- ✨ **Timeline zoom** — Show selected ranges in elapsed time and zoom in without changing the active filter.
+- 🔧 **Store artwork** — Use the current logo and show timeline and WebSocket search in the listing screenshots.
 
 ## v1.19.1 - 2026-11-18
 

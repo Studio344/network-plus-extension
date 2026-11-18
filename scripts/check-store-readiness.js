@@ -11,7 +11,7 @@ const ASSET_DIRECTORY = 'docs/store-assets';
 // The synthetic store assets and the privacy notice are reviewed independently.
 // Keep the dates separate so a privacy-text change does not imply the PNG
 // inventory was re-reviewed on the same day.
-const ASSET_REVIEW_DATE = '2026-10-12';
+const ASSET_REVIEW_DATE = '2026-11-19';
 const PRIVACY_REVIEW_DATE = '2026-11-17';
 const MIN_DESCRIPTION_CHARACTERS = 250;
 const MAX_DESCRIPTION_CHARACTERS = 10000;
@@ -23,7 +23,7 @@ const EXPECTED_SUPPORT_URL = 'https://github.com/himiyosh/network-plus-extension
 const EXPECTED_PRIVACY_URL = 'https://github.com/himiyosh/network-plus-extension/blob/main/docs/privacy.md';
 const EXPECTED_REPOSITORY_URL = 'git+https://github.com/himiyosh/network-plus-extension.git';
 const EXPECTED_CSP = "script-src 'self'; object-src 'self'";
-const EXPECTED_RELEASE_SHA256 = '70cd924bd4efbb136ecce6a19a71c7861c3cf1419f98387daeb1a7da5382af08';
+const EXPECTED_RELEASE_SHA256 = '8b26aa13d5807b1b33ec26622e6d77803a00374a394f33de1bca13a6b70f9ca6';
 const EXPECTED_PERMISSION_JUSTIFICATION =
   'Stores the user-selected System, Dark, or Light theme, the language for explanatory text (System, English, or Japanese), and boolean search preferences (scope checkboxes, case / whole-word / regular-expression options, and the Matches only state) in `chrome.storage.local` so these settings persist between DevTools sessions. This permission is not used to store search keyword text, captured URLs, headers, request bodies, response bodies, cookies, or request records.';
 const EXPECTED_SEARCH_TERMS = Object.freeze([
@@ -139,51 +139,50 @@ const EXPECTED_ASSETS = Object.freeze({
     kind: 'logo',
     width: 300,
     height: 300,
-    source: 'icons/icon128.png',
+    source: 'icons/network-plus.svg',
     domains: Object.freeze([]),
   }),
   'chrome-small-promo-440x280.png': Object.freeze({
     kind: 'promotional-tile',
     width: 440,
     height: 280,
-    source: 'Image generation using the Network+ logo and synthetic request-detail screenshot as references',
+    source: 'Composition of the current Network+ vector logo and bundled otter on a charcoal background',
     domains: Object.freeze([]),
   }),
   'chrome-marquee-1400x560.png': Object.freeze({
     kind: 'promotional-marquee',
     width: 1400,
     height: 560,
-    source:
-      'Playwright composition of the checked-in extension icon, the otter-investigator illustration cut out of the promotional tile, and the wordmark; no captured traffic',
+    source: 'Composition of the current Network+ vector logo, bundled otter, and wordmark on a charcoal background',
     domains: Object.freeze([]),
   }),
   'screenshot-1-request-detail-1280x800.png': Object.freeze({
     kind: 'screenshot',
     width: 1280,
     height: 800,
-    source: 'panel.js:createSampleCaptureRequests',
-    domains: Object.freeze(['api.network-plus.test', 'checkout.network-plus.test', 'static.network-plus.test']),
+    source: 'scripts/render-store-screenshots.js:createStoreCapture',
+    domains: Object.freeze(['api.network-plus.test']),
   }),
-  'screenshot-2-timing-guidance-1280x800.png': Object.freeze({
+  'screenshot-2-timeline-1280x800.png': Object.freeze({
     kind: 'screenshot',
     width: 1280,
     height: 800,
-    source: 'panel.js:createSampleCaptureRequests',
-    domains: Object.freeze(['api.network-plus.test', 'checkout.network-plus.test', 'static.network-plus.test']),
+    source: 'scripts/render-store-screenshots.js:createStoreCapture',
+    domains: Object.freeze(['api.network-plus.test']),
   }),
-  'screenshot-3-sample-guide-1280x800.png': Object.freeze({
+  'screenshot-3-websocket-1280x800.png': Object.freeze({
     kind: 'screenshot',
     width: 1280,
     height: 800,
-    source: 'panel.js:createSampleCaptureRequests',
-    domains: Object.freeze(['api.network-plus.test', 'checkout.network-plus.test', 'static.network-plus.test']),
+    source: 'scripts/render-store-screenshots.js:createStoreCapture',
+    domains: Object.freeze(['api.network-plus.test']),
   }),
   'screenshot-4-sanitized-export-1280x800.png': Object.freeze({
     kind: 'screenshot',
     width: 1280,
     height: 800,
-    source: 'panel.js:createSampleCaptureRequests',
-    domains: Object.freeze(['api.network-plus.test', 'checkout.network-plus.test', 'static.network-plus.test']),
+    source: 'scripts/render-store-screenshots.js:createStoreCapture',
+    domains: Object.freeze(['api.network-plus.test']),
   }),
 });
 

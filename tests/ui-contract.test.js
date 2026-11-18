@@ -1452,7 +1452,8 @@ describe('capture retention static contracts', () => {
     expect(js).toContain('state.visibleBytes = Math.max(0, state.visibleBytes - evictedVisibleBytes);');
     expect(js).toContain('if (!shouldRenderSelectedRow(state.selectedRow, row)) return;');
     expect(js).toContain('renderCachedResponseContent(row);');
-    expect(js).toContain("' bodies not searched'");
+    expect(js).toContain("'payloadSearchCoverageTotal', { count: unsearchedBodies }");
+    expect(js).toContain('getUnsearchedResponseBodyReasons(state.rows, srch.fullResponses)');
     expect(js).toContain("releaseResponseContent(row, 'row-evicted', false);");
   });
 });
@@ -3421,7 +3422,8 @@ describe('search matches-only toggle contracts', () => {
     expect(css).toMatch(/\.search-panel-notice\{[^}]*overflow:hidden[^}]*text-overflow:ellipsis/);
     // The top-bar count must not carry the variable-width body-progress text.
     expect(js).not.toMatch(/searchCount\.textContent \+= ' · ' \+ unsearchedBodies/);
-    expect(js).toContain("noticeParts.push(unsearchedBodies + ' bodies not searched')");
+    expect(js).toContain("noticeParts.push(uiTextFormat('payloadSearchCoverageTotal', { count: unsearchedBodies }))");
+    expect(js).toContain('notice.title = text;');
     // The count box itself is fixed-width, so the trash/import/export icons
     // after it never move as match counts change during capture.
     expect(css).toMatch(/\.search-count\{[^}]*flex:0 0 70px[^}]*width:70px[^}]*overflow:hidden/);
@@ -3652,7 +3654,7 @@ describe('devtools-session mirror contracts', () => {
     expect(js).toContain("undoClearBtn: () => sendViewerCommand('undo-clear', {}, 'Undo clear'),");
     expect(js).toContain("wsCaptureBtn: () => sendViewerCommand('stream-toggle', {}, 'Stream capture'),");
     expect(js).toContain('retentionSaveBtn: () =>');
-    expect(js).toContain("viewerSession.sendImportFile(file.name, importBytes, reportImportResult);");
+    expect(js).toContain("viewerSession.sendImportFile(file.name, importBytes, reportImportResult, harSource?.token);");
     expect(js).toContain("mirrorViewerResendDispatch = (spec, epoch, done) => viewerSession.sendCommand('resend', { spec, epoch }, done);");
     // Same-element listeners fire in registration order, so remote control
     // must intercept at the document capture phase, ahead of any target
