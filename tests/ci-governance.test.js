@@ -1,5 +1,6 @@
 'use strict';
 
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -16,8 +17,7 @@ const REQUIRED_QUALITY_COMMANDS = [
   'npm run text:check',
   'npm run changelog:check',
   'npm ci',
-  'npx jest tests/browser-availability-policy.test.js',
-  'npm test -- --runInBand',
+  'npm test -- --no-coverage tests/browser-availability-policy.test.js',
   'npm run lint',
   'npm run version:check',
   'npm run format:check',
@@ -104,6 +104,8 @@ describe('CI governance', () => {
 
     expect(packageJson.engines.node).toBe('^22.0.0 || ^24.0.0');
     expect(workflow).toMatch(/node-version:\s*\n\s*- 22\.x\s*\n\s*- 24\.x/);
+    expect(workflow).toMatch(/^ +run: npm test$/m);
+    expect(packageJson.scripts['audit:strict']).toBe('npm audit --audit-level=high');
     for (const command of REQUIRED_QUALITY_COMMANDS) {
       expect(workflow).toContain(command);
     }
@@ -131,10 +133,14 @@ describe('CI governance', () => {
     }
   });
 
-  test('reads only this checkout: a parallel session worktree is not guidance, and jest skips its tests', () => {
-    const worktree = path.join(ROOT, '.claude', 'worktrees', 'ci-governance-fixture');
+  test('reads guidance and discovers tests only in this checkout', () => {
+    const siblingWorktrees = path.join(ROOT, '.claude', 'worktrees');
+    fs.mkdirSync(siblingWorktrees, { recursive: true });
+    const worktree = fs.mkdtempSync(path.join(siblingWorktrees, 'ci-governance-fixture-'));
     const planted = path.join(worktree, 'docs', 'CHANGELOG.md');
+    const plantedTest = path.join(worktree, 'tests', 'planted.test.js');
     fs.mkdirSync(path.dirname(planted), { recursive: true });
+    fs.mkdirSync(path.dirname(plantedTest), { recursive: true });
     try {
       // The text a sibling session's history legitimately carries, and which
       // this suite refuses to find in the current tree.
@@ -142,16 +148,19 @@ describe('CI governance', () => {
       expect(RETIRED_PROCEDURE_PATTERNS.some(({ pattern }) => pattern.test(fs.readFileSync(planted, 'utf8')))).toBe(
         true,
       );
-      expect(
-        currentGuidanceFiles().filter((file) => file.includes(path.join('worktrees', 'ci-governance-fixture'))),
-      ).toEqual([]);
+      fs.writeFileSync(plantedTest, 'throw new Error("A sibling worktree suite must not run");\n');
+      expect(currentGuidanceFiles()).not.toContain(path.relative(ROOT, planted));
+      const opts = { cwd: ROOT, encoding: 'utf8' };
+      const tracked = execFileSync('git', ['ls-files', 'tests/*.test.js'], opts).trim().split('\n').sort();
+      const discovered = execFileSync(process.execPath, ['scripts/run-tests.js', '--list'], opts)
+        .trim()
+        .split('\n')
+        .sort();
+      expect(discovered).toEqual(tracked);
+      expect(discovered).toContain('tests/ci-governance.test.js');
+      expect(discovered).not.toContain(path.relative(ROOT, plantedTest));
     } finally {
-      fs.rmSync(path.join(ROOT, '.claude', 'worktrees', 'ci-governance-fixture'), { recursive: true, force: true });
+      fs.rmSync(worktree, { recursive: true, force: true });
     }
-
-    // Those worktrees hold a copy of this suite too, so jest has to skip them
-    // by path or a run picks up every parallel session's tests as well.
-    const jestConfig = JSON.parse(readRepoFile('package.json')).jest;
-    expect(jestConfig.testPathIgnorePatterns).toContain('/\\.claude/worktrees/');
   });
 });

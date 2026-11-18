@@ -395,7 +395,7 @@ describe('accessible theme contract', () => {
 
   // Quiet GET and 2xx text sit directly on the row: the selected tint and the
   // zebra stripe composited over --bg are the grounds they must clear, and the
-  // light --selected composite (#e5e6fa) is where the old #047857 fell to 4.45.
+  // light --selected composite is a stronger tint than the plain row.
   const parseAlphaColor = (value) => {
     const match = value.match(/^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/);
     expect(match).not.toBeNull();
@@ -413,7 +413,7 @@ describe('accessible theme contract', () => {
   };
 
   test('keeps GET and 2xx text at WCAG AA on the selected and zebra row composites', () => {
-    expect(compositeOver(light.selected, light.bg)).toBe('#e5e6fa');
+    expect(compositeOver(light.selected, light.bg)).toBe('#cee1ed');
     for (const [themeName, theme] of [
       ['light', light],
       ['system dark', systemDark],
@@ -433,6 +433,34 @@ describe('accessible theme contract', () => {
     }
     expect(light['method-get-fg']).toBe('#065f46');
     expect(light['status-2xx-text']).toBe('#065f46');
+  });
+
+  test('keeps distinct Dark reading roles legible on dense and highlighted surfaces', () => {
+    const dark = systemDark;
+    expect(forcedDark['text-strong']).toBe(dark['text-strong']);
+    expect(forcedDark['overview-volume']).toBe(dark['overview-volume']);
+    const backgrounds = [dark.bg, dark.surface, compositeOver(dark.selected, dark.bg), compositeOver(dark.stripe, dark.bg)];
+    const selectedOverview = compositeOver(dark.selected, dark.surface);
+    for (const status of ['2xx', '3xx', '4xx', '5xx']) {
+      const token = 'status-' + status + '-text';
+      expect(forcedDark[token]).toBe(dark[token]);
+      for (const background of [...backgrounds, selectedOverview]) {
+        expect(contrastRatio(dark[token], background)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    for (const background of backgrounds) {
+      const supporting = contrastRatio(dark['text-muted'], background);
+      const regular = contrastRatio(dark.fg, background);
+      const strong = contrastRatio(dark['text-strong'], background);
+      expect(supporting).toBeGreaterThanOrEqual(4.5);
+      expect(regular).toBeGreaterThan(supporting);
+      expect(strong).toBeGreaterThan(regular);
+    }
+    const selected = compositeOver(dark.selected, dark.bg);
+    expect(contrastRatio(dark['overview-volume'], dark.bg)).toBeGreaterThanOrEqual(3);
+    const [red, green, blue] = hexToRgb(dark['search-yellow']);
+    const highlight = compositeOver('rgba(' + [red, green, blue, parseInt(dark['hl-primary-pct'], 10) / 100].join(',') + ')', selected);
+    expect(contrastRatio(dark['text-strong'], highlight)).toBeGreaterThanOrEqual(4.5);
   });
 });
 
@@ -545,10 +573,9 @@ describe('guided sample capture static contracts', () => {
   test('renders one local-only action only for a truly empty capture', () => {
     expect(js).toContain('const mode = getEmptyStateMode(state.rows.length, visibleRowCount);');
     expect(js).toContain("if (mode === 'filtered')");
-    expect(js).toContain("action.textContent = uiText('emptyFilteredAction');");
-    expect(js).toContain("action.addEventListener('click', clearColumnFilters);");
+    expect(js).toContain("action.textContent = uiText(hasQuickFilter ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');");
+    expect(js).toContain("action.addEventListener('click', clearRequestAnalysisFilters);");
     expect(js).toContain("action.textContent = uiText('emptyCaptureAction');");
-    expect(js).not.toContain("action.setAttribute('aria-label'");
     expect(js).toContain("action.setAttribute('aria-describedby', description.id);");
     expect(js).toContain("action.addEventListener('click', activateSampleCapture);");
     expect(js).toContain('No network request is sent.');
@@ -558,6 +585,7 @@ describe('guided sample capture static contracts', () => {
       js.indexOf('function updateEmptyState'),
       js.indexOf('function updateRetentionStatus'),
     );
+    expect(emptyStateBlock).not.toContain("action.setAttribute('aria-label'");
     expect(emptyStateBlock).not.toContain('innerHTML');
     // The sample action is DevTools-only: the mirror tab captures nothing
     // itself and its local sample ids would collide with the host's rows.
@@ -805,12 +833,7 @@ describe('guided sample capture static contracts', () => {
     expect(css).toMatch(
       /#retentionStatus\{[^}]*white-space:normal[^}]*\}\s*#statsSummary\{[^}]*white-space:normal/,
     );
-    expect(css).toMatch(
-      /\.status-summary-visual\{[^}]*display:inline-flex[^}]*flex-wrap:wrap[^}]*max-width:100%/,
-    );
-    expect(css).toMatch(
-      /\.status-summary-chips\{[^}]*display:inline-flex[^}]*flex-wrap:wrap/,
-    );
+    expect(css).toMatch(/\.analysis-status\{[^}]*flex-wrap:wrap[^}]*max-width:100%/);
     expect(css).toMatch(
       /\.status-summary-duration\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/,
     );
@@ -1689,7 +1712,7 @@ describe('settings and language contracts', () => {
     // The empty state re-renders in place on a language change: the render
     // key includes the active language and applyLanguage triggers a refresh.
     expect(js).toContain(
-      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage;",
+      "const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter + ':' + hasTimeFilter;",
     );
     expect(js).toContain('refreshEmptyStateLanguage();');
     expect(js).toContain('updateEmptyState(lastEmptyStateRowCount);');
@@ -2233,10 +2256,10 @@ describe('outbound data-safety static contracts', () => {
     expect(js).toContain("['markdown', 'menuCopySanitizedMarkdown', 'statusCopiedSanitizedMarkdown'],");
     // The five pane toolbars that carry copy actions — Request Body, Request
     // Raw, Query, Response Body, Response Raw — read the same dictionary key
-    // as the row menu's disclosure, so the label cannot drift into a second
-    // English literal.
-    expect((js.match(/label: uiText\('menuCopySanitized'\)/g) || []).length).toBe(5);
-    expect((js.match(/label: uiText\('paneCopyFull'\)/g) || []).length).toBe(5);
+    // as the row menu's disclosure. The bounded response preview shares one
+    // alternate renderer for its two panes.
+    expect((js.match(/label: uiText\('menuCopySanitized'\)/g) || []).length).toBe(6);
+    expect((js.match(/label: uiText\('paneCopyFull'\)/g) || []).length).toBe(6);
     expect(js).not.toContain("label: 'Copy sanitized'");
     expect(js).not.toContain("label: 'Copy full...'");
   });
@@ -2395,9 +2418,7 @@ describe('waterfall and stats topology', () => {
   test('statistics and waterfall helpers are exported', () => {
     const np = require('../panel.js');
     expect(typeof np.classifyStatusClass).toBe('function');
-    expect(typeof np.getStatusClassIndicators).toBe('function');
-    expect(typeof np.formatStatusClassSummary).toBe('function');
-    expect(typeof np.findFirstStatusClassRow).toBe('function');
+    expect(typeof np.classifyRequestFacet).toBe('function');
     expect(typeof np.renderStatsSummary).toBe('function');
     expect(typeof np.computeStats).toBe('function');
     expect(typeof np.computeWaterfallBar).toBe('function');
@@ -2467,50 +2488,25 @@ describe('waterfall and stats topology', () => {
     const summaryFn = js.slice(summaryFnStart, summaryFnEnd);
     expect(summaryFn).toContain("'#statsSummary'");
     expect(summaryFn).toContain('computeStats(');
-    expect(summaryFn).toContain(
-      'renderStatsSummary(statsEl, stats, inspectFirstStatusClassRequest)',
-    );
+    expect(summaryFn).toContain('renderStatsSummary(statsEl, stats)');
     expect(summaryFn).toContain('clearStatsSummary(statsEl)');
     expect(summaryFn).not.toContain('innerHTML');
   });
 
-  test('renders semantic status triage controls with a complete accessible text alternative', () => {
+  test('keeps durations in the footer and presents status controls only in the request toolbar', () => {
     const rendererStart = js.indexOf('function renderStatsSummary(');
     const rendererEnd = js.indexOf('\n  function ', rendererStart + 1);
     const renderer = js.slice(rendererStart, rendererEnd);
-    expect(renderer).toContain('getStatusClassIndicators(stats.statusClassCounts)');
-    expect(renderer).toContain('formatStatusClassSummary(stats.statusClassCounts)');
     expect(renderer).toContain('getOrCreateStatsSummaryStructure(statsElement)');
-    expect(renderer).toContain(
-      "structure.accessibleSummary.textContent = statusText + ' | ' + durationText",
-    );
-    expect(renderer).toContain(
-      'updateStatusSummaryChip(structure, indicator, onInspectStatusClass)',
-    );
-    expect(renderer).toContain("structure.duration.textContent = '| avg ' + fmtTime(stats.avgDuration)");
+    expect(renderer).toContain('structure.accessibleSummary.textContent = durationText');
+    expect(renderer).toContain("structure.duration.textContent = uiTextFormat('analysisAverageDuration'");
+    expect(renderer).not.toContain('statusClassCounts');
     expect(renderer).not.toContain("statsElement.textContent = ''");
     expect(renderer).not.toContain('innerHTML');
-  });
-
-  test('reuses keyed status chip nodes across non-empty summary updates', () => {
-    const updaterStart = js.indexOf('function updateStatusSummaryChip(');
-    const updaterEnd = js.indexOf('\n  function ', updaterStart + 1);
-    const updater = js.slice(updaterStart, updaterEnd);
-    expect(updater).toContain('structure.chipElements.get(indicator.statusClass)');
-    expect(updater).toContain("const expectedTagName = canInspect ? 'BUTTON' : 'SPAN'");
-    expect(updater).toContain('structure.chipElements.set(indicator.statusClass, replacement)');
-    expect(updater).not.toContain('innerHTML');
-  });
-
-  test('status triage selects and focuses the first matching visible sorted request', () => {
-    const triageStart = js.indexOf('function inspectFirstStatusClassRequest(');
-    const triageEnd = js.indexOf('\n  function ', triageStart + 1);
-    const triage = js.slice(triageStart, triageEnd);
-    expect(triage).toContain('getVisibleSortedRows()');
-    expect(triage).toContain('findFirstStatusClassRow(');
-    expect(triage).toContain('selectRow(targetRow, null, true)');
-    expect(triage).toContain('scrollToSelectedRow()');
-    expect(triage).not.toMatch(/filterRows|columnFilterRules|renderBody/);
+    const toolbar = html.slice(html.indexOf('<div class="analysis-status"'), html.indexOf('id="analysisDomainsBtn"'));
+    expect([...toolbar.matchAll(/data-status-facet="([^"]+)"/g)].map((result) => result[1]))
+      .toEqual(['all', '2xx', '3xx', '4xx', '5xx', 'other', 'pending']);
+    expect(html.slice(html.indexOf('<footer class="statusbar"'), html.indexOf('</footer>'))).not.toContain('data-status-facet');
   });
 
   test('waterfall CSS classes are defined: wf-track, wf-fill, wf-seg, waterfall-cell', () => {
@@ -2520,27 +2516,14 @@ describe('waterfall and stats topology', () => {
     expect(css).toContain('.waterfall-cell');
   });
 
-  test('statsSummary CSS is defined in the status bar section', () => {
+  test('uses status colors on the unified toolbar controls', () => {
     expect(css).toContain('#statsSummary');
     for (const statusClass of ['2xx', '3xx', '4xx', '5xx']) {
       expect(css).toContain(
-        `.status-summary-chip--${statusClass}{color:var(--status-${statusClass}-text)}`,
+        `[data-status-facet="${statusClass}"]{--facet-ink:var(--status-${statusClass}-text)}`,
       );
     }
-    expect(css).toContain(
-      '.status-summary-chip--other{border-color:var(--control-border);color:var(--text-muted)}',
-    );
-    expect(css).toContain(
-      '.status-summary-chip--empty{border-color:var(--control-border);color:var(--text-muted);font-weight:600}',
-    );
-    expect(css).toMatch(/\.status-summary-chip\{[^}]*min-height:24px/);
-    expect(css).toContain('.status-summary-chip--action{cursor:pointer');
-    expect(css).toContain(
-      '.status-summary-chip--action:active{border-color:var(--accent);background:var(--accent-fill);color:var(--on-accent)}',
-    );
-    expect(css).toContain(
-      '.status-summary-chip--action:focus-visible{outline:2px solid var(--accent);outline-offset:2px}',
-    );
+    expect(css).not.toContain('.status-summary-chip');
   });
 });
 
@@ -3459,8 +3442,8 @@ describe('search matches-only toggle contracts', () => {
 
 describe('detail pane search contracts', () => {
   test('attaches the in-pane search bar to the Body and Raw views of both inspectors', () => {
-    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyText || '', { emptyContent: !requestBodyText });");
-    expect(js).toContain('attachPaneSearch(reqRawPane);');
+    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { ...requestFullSearch, emptyContent: !requestBodyText });");
+    expect(js).toContain('attachPaneSearch(reqRawPane, requestBodyPreview, requestFullSearch);');
     // The response Body pane hands its one toolbar the renderer picker too.
     expect(js).toContain('    attachPaneSearch(resBodyPane, text, {');
     expect(js).toContain('      viewToggle: bodyViewToggle,');
@@ -3586,9 +3569,11 @@ describe('detail pane search contracts', () => {
     expect(js).toContain('expandBtn.hidden = collapsedHits === 0 || treeOwnsExpansion;');
     expect(js).toContain("const treeOwnsExpansion = !!pane.querySelector('.json-tree-controls');");
     expect(js).toContain("expandBtn.addEventListener('click', expandEverything);");
-    // Both truncating panes provide their full source text for the count.
+    // Large payload previews stay bounded, and source matches are rendered as excerpts.
     expect(js).toContain('    attachPaneSearch(resBodyPane, text, {');
-    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyText || '', { emptyContent: !requestBodyText });");
+    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { ...requestFullSearch, emptyContent: !requestBodyText });");
+    expect(js).toContain('    attachPaneSearch(body, preview, { ...fullSearch, emptyContent: !preview });');
+    expect(js).toContain("fullResults.className = 'pane-search-full-results';");
     expect(css).toContain('.pane-search-expand');
   });
 
@@ -3619,7 +3604,7 @@ describe('search options and preference persistence contracts', () => {
   });
 
   test('Ctrl+F prefers the focused Body/Raw pane or its selected tab', () => {
-    expect(js).toContain("focused.closest('.tab-pane')");
+    expect(js).toContain("focused.closest('.tab-pane, .ws-messages-panel')");
     expect(js).toContain("focused.matches('.tab-btn[aria-selected=\"true\"]')");
     expect(js).toContain("document.getElementById(selectedTab.getAttribute('aria-controls'))");
     expect(js).toContain("typeof activePane._paneSearchOpen === 'function'");
@@ -3859,7 +3844,7 @@ describe('export scope contracts', () => {
     expect(css).toMatch(/\.context-menu-item\{[^}]*text-overflow:ellipsis/);
     // "Only" replaces earlier inclusions so two picks never intersect to
     // zero rows; exclusions accumulate.
-    expect(js).toContain("if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== 'contains');");
+    expect(js).toContain("if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== conditionOp);");
     expect(js).toContain("state.columnFilterRules[colId] = { mode: 'multiText', conditions };");
     // The context menu and the domain summary panel still delegate to one
     // writer, so both surfaces stay behaviorally identical.
@@ -3926,7 +3911,8 @@ describe('export scope contracts', () => {
     expect(js).toContain("contentElement.insertAdjacentElement('beforebegin', domainSummaryPanel);");
     expect(js).toContain("domainToggle.id = 'domainSummaryToggle';");
     expect(js).toContain('localStorage.removeItem(DOMAIN_SUMMARY_KEY);');
-    expect(html).not.toContain('domainSummary');
+    expect(html).not.toContain('id="domainSummary"');
+    expect(html).toMatch(/id="analysisDomainsBtn"[^>]*aria-controls="domainSummary"/);
     // The flex display rule must not defeat the hidden attribute (the
     // toolbar once shipped exactly that bug).
     expect(css).toContain('#domainSummary[hidden]{display:none}');
@@ -3946,13 +3932,13 @@ describe('export scope contracts', () => {
     const panelBlock = js.slice(panelStart, panelEnd);
     expect(panelBlock).not.toContain('innerHTML');
     expect(panelBlock).toContain('state.syncDomainSummary = renderDomainSummary;');
-    expect(panelBlock).toContain("applyDomainQuickFilterTo(entry.domain, 'contains');");
+    expect(panelBlock).toContain("state.requestHostFacet = active ? '' : entry.domain;");
     // The no-host bucket is informational only: an empty-value condition
     // would be silently skipped by the filter engine.
     expect(panelBlock).toContain("if (entry.domain === '')");
     // A click on a domain that already spans every filtered row changes no
     // aggregate, so the rebuild-skip signature carries the pressed state.
-    expect(panelBlock).toContain("activeDomains.has(entry.domain) ? 1 : 0,");
+    expect(panelBlock).toContain('JSON.stringify([activeLanguage, activeHost, state.sampleCaptureActive, summary]);');
   });
 
   test('the configurable header column rides the shared column pipeline', () => {
@@ -4078,35 +4064,40 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain('webSocketFramesOmitted: webSocket.count');
   });
 
-  test('capture is an explicit statusbar opt-in that names its own limits', () => {
+  test('WebSocket capture defaults on in live DevTools while SSE remains a separate opt-in', () => {
     expect(html).toContain('id="wsCaptureBtn"');
-    expect(html).toContain('only connections created while capture is on are seen, and traffic is never altered');
+    expect(html).toContain('Record WebSocket messages in the inspected tab while live recording is running');
+    expect(html).toMatch(/id="wsReloadBtn"[^>]*hidden/);
+    expect(html).toMatch(/id="wsMessagesReloadBtn"[^>]*hidden/);
     expect(html).toMatch(/id="wsCaptureBtn"[^>]*aria-pressed="false"[^>]*hidden/);
-    expect(html).toContain('>Stream capture: Off</button>');
+    expect(html).toContain('>WebSocket capture: Off</button>');
+    expect(html).toMatch(/id="sseCaptureSettings"[^>]*hidden/);
+    expect(js).toContain("preference === 'on' || (preference === undefined && nativeWebSockets)");
+    expect(js).toContain("chrome.storage.local.set({ [WS_CAPTURE_KEY]: enabled ? 'on' : 'off' }");
     expect(css).toContain('.ws-capture-btn[aria-pressed="true"]{');
     expect(js).toContain(
       "wsCaptureBtn.textContent = uiText(streamCapture.enabled ? 'wsCaptureOn' : 'wsCaptureOff');",
     );
     // The sentence still has a home, and a language switch repaints the label
     // the toggle writes for itself.
-    expect(js).toContain("      en: 'Stream capture: On',");
-    expect(js).toContain("      en: 'Stream capture: Off',");
+    expect(js).toContain("      en: 'WebSocket capture: On',");
+    expect(js).toContain("      en: 'WebSocket capture: Off',");
     expect(js).toContain('    if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();');
-    expect(js).toContain("setStatus(uiText('statusStreamCaptureOn'));");
+    expect(js).toContain("nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'");
     expect(js).toContain("setStatus(uiText('statusStreamCaptureOff'));");
-    expect(js).toContain(
-      "      en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',",
-    );
-    expect(js).toContain("      en: 'Stream capture off; recorded connections stay in the table.',");
+    expect(js).toContain("      en: 'WebSocket capture is off. Recorded messages stay in the table.',");
   });
 
-  test('both wrappers inject through inspectedWindow.eval and survive navigation', () => {
+  test('uses the existing HAR poll and finish event, with the page wrapper as a fallback', () => {
     expect(js).toContain('chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)');
-    expect(js).toContain('inspectedEval(buildWsWrapperSource(), () => {});');
+    expect(js).toContain('const injectWsWrapper = () => inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});');
+    expect(js).toContain('readNativeWebSocketSnapshot(log?.entries);');
+    expect(js).toContain('if (finishNativeWebSocket(request)) return;');
     expect(js).toContain('inspectedEval(buildSseWrapperSource(), () => {});');
     expect(js).toContain("const wsDrain = buildStreamDrainSource('__networkPlusWS__');");
     expect(js).toContain("const sseDrain = buildStreamDrainSource('__networkPlusSSE__');");
-    expect(js).toContain('if (streamCapture.enabled) injectStreamWrappers();');
+    expect(js).toContain('if (streamCapture.enabled && !nativeWebSockets) injectWsWrapper();');
+    expect(js).toContain('if (streamCapture.sseEnabled) inspectedEval(buildSseWrapperSource(), () => {});');
     // Recording discipline matches live capture: paused and sample sessions
     // drop drained events instead of recording them.
     expect(js).toContain('if (state.paused || state.sampleCaptureActive) return;');
@@ -4272,11 +4263,11 @@ describe('jwt decode display contracts', () => {
     expect(css).toContain('  .kv{grid-template-columns:minmax(0,1fr) auto;gap:0}');
     expect(css).toContain('  .kv > .kv-copy-btn{grid-column:2}');
     // The row-end control writes one sanitized value and offers no unsanitized
-    // path of its own: "Copy full..." exists only in the five pane toolbars,
-    // each behind the confirmation flow requestFullClipboardAction owns.
+    // path of its own. Each full clipboard action goes through the existing
+    // confirmation, including the alternate response preview renderer.
     expect(js).toContain("    button.textContent = uiText('kvCopyValue');");
-    expect((js.match(/uiText\('paneCopyFull'\)/g) || []).length).toBe(5);
-    expect((js.match(/requestFullClipboardAction\(/g) || []).length).toBe(6);
+    expect((js.match(/uiText\('paneCopyFull'\)/g) || []).length).toBe(6);
+    expect((js.match(/requestFullClipboardAction\(/g) || []).length).toBe(7);
   });
 
   test('the row-end copies are one tab stop per grid, not one per row', () => {
@@ -4586,7 +4577,7 @@ describe('audit layout and contrast contracts', () => {
     // viewport, never from its content, so containing it costs nothing and is
     // what makes a max-height query possible at all.
     expect(css).toContain('overflow:hidden;border-left:1px solid var(--separator);container-type:size}');
-    expect(css).not.toContain('container-type:inline-size');
+    expect(css).not.toMatch(/\.details\s*\{[^}]*\bcontainer-type\s*:\s*inline-size\b/);
     const columnBlockStart = css.indexOf('@container (max-height:480px){');
     expect(columnBlockStart).toBeGreaterThan(-1);
     const columnBlock = css.slice(columnBlockStart, css.indexOf('\n}\n', columnBlockStart));
@@ -4816,8 +4807,11 @@ describe('audit layout and contrast contracts', () => {
 
   test('the details pane shows one guidance line before a selection', () => {
     expect(html).toMatch(
-      /<p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open<\/p>\s*<div class="inspector-panels">/,
+      /<p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open<\/p>/,
     );
+    expect(html).toMatch(/id="ws-detail-tabs"[^>]*role="tablist"[^>]*hidden>/);
+    expect(html).toMatch(/id="ws-messages-panel"[^>]*aria-labelledby="ws-tab-messages"[^>]*hidden>/);
+    expect(html).toContain('<div class="inspector-panels" id="ws-details-panel">');
     expect(css).toContain('.inspector-empty[hidden]{display:none}');
     const clearBlock = js.slice(js.indexOf('function clearDetailsPanel()'), js.indexOf('let detailsTitlePath'));
     expect(clearBlock).toContain('setInspectorEmptyState(true);');

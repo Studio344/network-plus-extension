@@ -402,7 +402,17 @@ browserTest(
         throw new Error('Combined stream/export fixture did not reach: ' + expression);
       };
       await relay();
-      await evaluate(host.cdp, "document.querySelector('#wsCaptureBtn').click(); true");
+      const capture = await evaluate(host.cdp, `(() => {
+        const filter = document.querySelector('#webSocketOnlyBtn');
+        const prompt = document.querySelector('#wsCapturePrompt');
+        const capture = document.querySelector('#wsCaptureBtn');
+        const initiallyHidden = prompt.hidden;
+        filter.click();
+        const canEnable = !prompt.hidden && capture.getAttribute('aria-pressed') === 'false';
+        document.querySelector('#wsCapturePromptBtn').click();
+        return { initiallyHidden, canEnable, enabled: capture.getAttribute('aria-pressed'), hiddenWhenEnabled: prompt.hidden };
+      })()`);
+      expect(capture).toEqual({ initiallyHidden: true, canEnable: true, enabled: 'true', hiddenWhenEnabled: true });
       const wrapper = await evaluate(host.cdp, "window.__evals.find((source) => source.startsWith('(function pageWebSocketWrapper('))");
       expect(typeof wrapper).toBe('string');
       // Execute the production page wrapper against a wholly synthetic socket.
@@ -426,7 +436,10 @@ browserTest(
       })()`)).toBe('accepted');
       const opened = await wait(viewer, `(() => { const row = ${rowState}; return row?.status === 'Open' && row; })()`);
       expect(opened.id).toBe(initial.id);
-      await evaluate(viewer.cdp, "document.querySelector('#tbody tr').click(); document.querySelector('#res-tab-raw').click(); true");
+      await evaluate(viewer.cdp, `
+        document.querySelector('#tbody tr').click();
+        document.querySelector('#ws-tab-details').click();
+        document.querySelector('#res-tab-raw').click(); true`);
       await wait(viewer, "document.querySelector('#res-raw').textContent.includes('first-private')");
       await evaluate(host.cdp, "window.__socket.emit('message', { data: 'later-private' }); true");
       await wait(viewer, "document.querySelector('#res-raw').textContent.includes('later-private')");
@@ -540,6 +553,7 @@ browserTest(
       await viewer.cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
       await handshake();
       await drive({ type: 'command', commandId: 1, name: 'stream-toggle', args: {} });
+      await drive({ type: 'command', commandId: 2, name: 'sse-toggle', args: { enabled: true } });
       await add([openAttempt('wss://capture.example.test/ws')], [openAttempt('https://capture.example.test/sse')]);
       const initial = await awaitStates(host, ['Connecting', 'Connecting']);
       expect(initial?.map((row) => row.method)).toEqual(['WS', 'SSE']);
@@ -561,7 +575,10 @@ browserTest(
         type: 'body-result', requestId: request.requestId, viewer: request.viewer, ok: true, content, encoding: '',
       }]);
       const lastBodyRequest = () => evaluate(viewer.cdp, `window.__sentToHost.filter((m) => m.type === 'body-request').at(-1)`);
-      await evaluate(viewer.cdp, "document.querySelector('#tbody tr').click();document.querySelector('#res-tab-raw').click();true");
+      await evaluate(viewer.cdp, `
+        document.querySelector('#tbody tr').click();
+        document.querySelector('#ws-tab-details').click();
+        document.querySelector('#res-tab-raw').click(); true`);
       const firstBody = await waitForImportResult(viewer.cdp, `window.__sentToHost.find((m) => m.type === 'body-request')`);
       expect(firstBody).toBeTruthy();
       await answerBody(firstBody, 'synthetic frame');
@@ -645,12 +662,22 @@ browserTest(
       await evaluate(host.cdp, `(() => {
         const har = ${MINI_HAR};
         const entry = har.log.entries[0];
+        const messageJson = '{"id":9007199254740993,"id":-0,"param":"<img src=x>","ready":true,"cursor":null}';
         entry.request.url = 'wss://synthetic.invalid/imported';
         entry.response.status = 101;
         entry.response.content = { mimeType: 'websocket', size: 0, text: '' };
+        const customPayloads = {
+          1: 'AP8=',
+          996: '{"boundedJson":{"approved":true},"body":"' + 'X'.repeat(2400) + '","tail":"uncaptured"}',
+          997: 'retained-from-original-har ' + '日本語'.repeat(1000) + ' end-of-original-frame',
+          998: 'a'.repeat(180) + ' HiddenMarker[',
+          999: 'b'.repeat(180) + ' hiddenmarker[',
+          1000: messageJson,
+        };
         entry._webSocketMessages = Array.from({ length: 1002 }, (_, index) => ({
           type: index % 2 ? 'receive' : 'send', time: 1700000000 + index / 1000,
-          opcode: index === 1 ? 2 : 1, data: index === 1 ? 'AP8=' : 'private-frame-' + index,
+          opcode: index === 1 ? 2 : 1,
+          data: customPayloads[index] ?? 'private-frame-' + index,
         }));
         const files = new DataTransfer();
         files.items.add(new File([JSON.stringify(har)], 'websocket.har'));
@@ -724,6 +751,26 @@ browserTest(
       });
       expect(viewerImported._webSocketMessages[0]).toEqual({ type: 'send', time: 1700000000, opcode: 1, data: 'private-frame-0' });
       expect(viewerImported._webSocketMessages[1]).toEqual({ type: 'receive', time: 1700000000.001, opcode: 2 });
+
+      const importedFrameSelector = '.ws-message-snippet';
+      await evaluate(host.cdp, `(() => {
+        document.querySelector('#tbody tr[data-row-id]').click();
+        const preview = [...document.querySelectorAll('${importedFrameSelector}')]
+          .find((element) => element.textContent.startsWith('retained-from-original-har '));
+        preview.closest('summary').click();
+        return true;
+      })()`);
+      expect(await waitWithRelay(host, "Boolean(document.querySelector('.ws-message-save-full'))")).toBe(true);
+      const savedIndex = await evaluate(host.cdp, `(() => {
+        document.querySelector('.ws-message-save-full').click();
+        return window.__harExports.length;
+      })()`);
+      expect(await evaluate(host.cdp, "document.querySelector('#dataSafetyDialog').open")).toBe(true);
+      await evaluate(host.cdp, "document.querySelector('#dataSafetyConfirmBtn').click(); true");
+      expect(await waitWithRelay(host, `window.__harExports.length === ${savedIndex + 1}`)).toBe(true);
+      expect(await evaluate(host.cdp, `window.__harExports[${savedIndex}].text()`, true))
+        .toBe('retained-from-original-har ' + '日本語'.repeat(1000) + ' end-of-original-frame');
+
       const sanitizedStart = traffic.length;
       const sanitized = (await exportHar(viewer, 'sanitized')).log.entries[0];
       expect(sanitized._webSocketMessages).toBeUndefined();
@@ -734,6 +781,86 @@ browserTest(
         expect.objectContaining({ count: 1000, complete: true }),
       ]);
       expect(sanitizedTraffic.some((message) => 'frames' in message || message.type === 'body-request')).toBe(false);
+
+      await evaluate(viewer.cdp, "document.querySelector('#tbody tr[data-row-id]').click(); true");
+      const hasImportedHistory = `!document.querySelector('#ws-messages-panel').hidden &&
+        document.querySelector('#ws-messages-panel .ws-message:last-child .ws-message-snippet')?.textContent === 'private-frame-1001' &&
+        document.querySelector('#ws-messages-status').textContent.includes('902')`;
+      expect(await waitWithRelay(viewer, hasImportedHistory)).toBe(true);
+      expect(await evaluate(viewer.cdp, `document.querySelector('#ws-timeline-header').hidden === false &&
+        !document.querySelector('#ws-messages-panel details[open], #ws-messages-panel pre')`)).toBe(true);
+      const visibleMessages = '#ws-messages-panel .ws-message:not([hidden])';
+      await evaluate(viewer.cdp, "document.querySelector('#ws-message-search-toggle').click(); true");
+      const searchFor = (text) => evaluate(viewer.cdp, `(() => {
+        const input = document.querySelector('#ws-message-query');
+        input.value = ${JSON.stringify(text)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await searchFor('HIDDENMARKER[');
+      expect(await evaluate(viewer.cdp, `[...document.querySelectorAll('${visibleMessages}')].map((item) => [
+        item.dataset.direction, item.querySelector('details').open, item.textContent.includes('Marker['),
+      ])`)).toEqual([['send', false, false], ['receive', false, false]]);
+      await evaluate(viewer.cdp, 'document.querySelector(\'[data-ws-direction="receive"]\').click(); true');
+      expect(await evaluate(viewer.cdp, `[...document.querySelectorAll('${visibleMessages}')].map((item) => item.dataset.direction)`)).toEqual(['receive']);
+      await searchFor('end-of-original-frame');
+      expect(await waitWithRelay(viewer, `(() => {
+        const rows = [...document.querySelectorAll('${visibleMessages}')];
+        return rows.length === 1 && rows[0].dataset.direction === 'receive' &&
+          rows[0].querySelector('.ws-message-search-excerpt mark')?.textContent === 'end-of-original-frame' &&
+          !rows[0].querySelector('details[open],pre');
+      })()`)).toBe(true);
+      await searchFor('not present in any message');
+      expect(await waitWithRelay(viewer, "!document.querySelector('#ws-message-empty').hidden")).toBe(true);
+      await evaluate(viewer.cdp, "document.querySelector('#ws-message-reset').click(); true");
+      expect(await evaluate(viewer.cdp, `({
+        query: document.querySelector('#ws-message-query').value,
+        direction: document.querySelector('[data-ws-direction][aria-pressed="true"]').dataset.wsDirection,
+        visible: document.querySelectorAll('${visibleMessages}').length,
+        empty: document.querySelector('#ws-message-empty').hidden,
+      })`)).toEqual({ query: '', direction: 'all', visible: 100, empty: true });
+      await evaluate(viewer.cdp, "document.querySelector('#ws-message-search-toggle').click(); true");
+      await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child summary').click(); true");
+      expect(await waitWithRelay(viewer, `document.querySelector('#ws-messages-panel .ws-message:last-child details[open] pre')?.textContent === 'private-frame-1001'`)).toBe(true);
+      expect(await evaluate(viewer.cdp, "document.querySelector('#ws-messages-panel .ws-message:last-child pre').childElementCount")).toBe(0);
+      const jsonMessage = '#ws-messages-panel .ws-message:nth-last-child(2)';
+      await evaluate(viewer.cdp, `document.querySelector('${jsonMessage} summary').click(); true`);
+      expect(await waitWithRelay(viewer, `(() => {
+        const pre = document.querySelector('${jsonMessage} pre[data-format="json"]');
+        return pre && {
+          text: pre.textContent,
+          markup: !!pre.querySelector('img'),
+          syntax: [...pre.children].map((span) => [span.className, span.textContent]),
+        };
+      })()`)).toEqual({
+        text: '{\n  "id": 9007199254740993,\n  "id": -0,\n  "param": "<img src=x>",\n  "ready": true,\n  "cursor": null\n}',
+        markup: false,
+        syntax: [
+          ['syn-key', '"id"'], ['syn-num', '9007199254740993'], ['syn-key', '"id"'], ['syn-num', '-0'],
+          ['syn-key', '"param"'], ['syn-str', '"<img src=x>"'], ['syn-key', '"ready"'], ['syn-bool', 'true'],
+          ['syn-key', '"cursor"'], ['syn-null', 'null'],
+        ],
+      });
+      const firstMessagesRequest = traffic.find((message) => message.type === 'ws-messages-request');
+      await evaluate(viewer.cdp, `(() => {
+        const preview = [...document.querySelectorAll('.ws-message-snippet')]
+          .find((element) => element.textContent.startsWith('{"boundedJson":'));
+        preview.closest('summary').click();
+        return true;
+      })()`);
+      expect(await waitWithRelay(viewer, `(() => {
+        const key = [...document.querySelectorAll('.ws-message-payload[data-format="json"] .syn-key')]
+          .find((element) => element.textContent === '"boundedJson"');
+        if (!key) return null;
+        const payload = key.closest('pre');
+        return {
+          indented: payload.textContent.includes('\\n    "approved": true'),
+          partialString: payload.lastChild.textContent.startsWith('"XXX') && payload.textContent.endsWith('X'),
+          fullAction: !!payload.closest('details').querySelector('.ws-message-show-full'),
+        };
+      })()`)).toEqual({ indented: true, partialString: true, fullAction: false });
+      expect(firstMessagesRequest).toMatchObject({ minimumRevision: 0 });
+      await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').click(); true");
 
       await evaluate(host.cdp, `(() => {
         document.querySelector('#pauseBtn').click();
@@ -766,9 +893,19 @@ browserTest(
       ]);
 
       // A same-session reconnect supplies the same IDs and transcripts again.
+      const reconnectStart = traffic.length;
       await evaluate(viewer.cdp, 'window.__hostListeners.disconnect.forEach((fn) => fn()); true');
       await attachScriptedHostPort(viewer.cdp);
       await relay();
+      expect(await evaluate(viewer.cdp, "document.querySelector('#ws-tab-details').getAttribute('aria-selected')")).toBe('true');
+      expect(traffic.slice(reconnectStart).some((message) => message.type === 'ws-messages-request')).toBe(false);
+      await evaluate(viewer.cdp, "document.querySelector('#ws-tab-messages').click(); true");
+      expect(await waitWithRelay(viewer, hasImportedHistory)).toBe(true);
+      const refreshedMessages = traffic.slice(reconnectStart).filter((message) => message.type === 'ws-messages-request');
+      expect(refreshedMessages).toEqual([
+        expect.objectContaining({ rowId: firstMessagesRequest.rowId, session: firstMessagesRequest.session, minimumRevision: 0 }),
+      ]);
+      expect(refreshedMessages[0].requestId).not.toBe(firstMessagesRequest.requestId);
       const reconnected = await exportHar(viewer, 'full');
       expect(reconnected.log.entries).toHaveLength(2);
       expect(liveEntry(reconnected)._webSocketMessages).toEqual(laterLive._webSocketMessages);
@@ -936,8 +1073,13 @@ browserTest(
       expect(await waitForImportResult(page.cdp, "document.querySelector('#tbody tr[data-row-id=\"1\"] [data-col-id=status]')?.textContent === 'Pending'")).toBe(true);
       await evaluate(page.cdp, "document.querySelector('#tbody tr[data-row-id=\"1\"]').click(); true");
       expect(await evaluate(page.cdp, "window.__sentToHost.filter((m) => m.type === 'body-request').length")).toBe(0);
+      await evaluate(page.cdp, "document.querySelector('[data-status-facet=pending]').click(); true");
+      expect(await states()).toEqual([['1', 'Pending']]);
       await evaluate(page.cdp, `window.__send({ type: 'row', row: ${JSON.stringify(done(1, 201))} }); true`);
       expect(await waitForImportResult(page.cdp, "document.querySelector('.details-summary-status')?.textContent.includes('201')")).toBe(true);
+      expect(await states()).toEqual([]);
+      expect(await evaluate(page.cdp, "document.getElementById('analysisOutsideView').hidden")).toBe(false);
+      await evaluate(page.cdp, "document.querySelector('[data-status-facet=all]').click(); true");
       expect(await states()).toEqual([['1', '201'], ['2', '200']]);
       expect(await evaluate(page.cdp, "document.querySelector('#tbody tr[data-row-id=\"1\"]').getAttribute('aria-selected')")).toBe('true');
       // A delayed provisional push must never regress a finished row.
@@ -981,6 +1123,8 @@ browserTest(
     const page = await launchPanelPage({
       executable: browserExecutable,
       initScript: HOST_STUB + `
+        // Isolate pending HTTP requests from native WebSocket polling.
+        chrome.storage.local.get = (keys, cb) => setTimeout(() => cb({ 'networkPlus.webSocketCapture': 'off' }), 0);
         window.__testHidden = true;
         window.__harEntries = [];
         window.__harPolls = 0;
@@ -997,6 +1141,7 @@ browserTest(
       return evaluate(page.cdp, "window.__fromHost.filter((m) => m.type === 'snapshot-rows').flatMap((m) => m.rows)");
     };
     try {
+      expect(await waitForImportResult(page.cdp, "document.querySelector('#wsCaptureBtn:not([hidden])[aria-pressed=false]') !== null")).toBe(true);
       await drive({ type: 'hello', protocolVersion: 2 });
       await drive({ type: 'poll-pending' });
       await delay(1100);
@@ -1431,11 +1576,30 @@ browserTest(
       messages = await fromHost();
       expect(messages.find((m) => m.type === 'command-result' && m.commandId === 15).ok).toBe(true);
       expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').textContent")).toBe(
-        'Stream capture: On',
+        'WebSocket capture: On',
       );
       expect(
         await evaluate(page.cdp, "window.__evals.some((s) => s.startsWith('(function pageWebSocketWrapper('))"),
       ).toBe(true);
+
+      await drive({ type: 'command', commandId: 115, name: 'stream-toggle', args: { enabled: true } });
+      messages = await fromHost();
+      expect(messages.find((m) => m.type === 'command-result' && m.commandId === 115).ok).toBe(true);
+      expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').getAttribute('aria-pressed')")).toBe('true');
+
+      await evaluate(page.cdp, `(() => {
+        chrome.storage.local.set = (_data, callback) => setTimeout(() => {
+          chrome.runtime.lastError = { message: 'Storage unavailable' };
+          callback();
+          chrome.runtime.lastError = null;
+        }, 0);
+        return true;
+      })()`);
+      await drive({ type: 'command', commandId: 116, name: 'stream-toggle', args: {} });
+      const commandResult = await waitForImportResult(page.cdp,
+        "window.__fromHost.find((m) => m.type === 'command-result' && m.commandId === 116)");
+      expect(commandResult).toMatchObject({ ok: false, error: 'Could not save the WebSocket preference for the next session.' });
+      expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').getAttribute('aria-pressed')")).toBe('false');
 
       await drive({
         type: 'command',
@@ -1548,7 +1712,9 @@ browserTest(
     try {
       const result = await evaluate(page.cdp, `(async () => {
         const file = document.querySelector('#importFile');
-        const body = 'x'.repeat(2000) + 'Y'.repeat(200000);
+        // Fit within the inspector preview budget and exceed both the
+        // single-line fold length and the pane search match limit.
+        const body = 'x'.repeat(2000) + 'Y'.repeat(12000);
         const har = ${MINI_HAR};
         har.log.entries[0].response.content.text = body;
         const files = new DataTransfer();
@@ -1590,7 +1756,7 @@ browserTest(
         return { hidden, rawDense, rawExact, rawTextIntact };
       })()`, true);
       expect(result).toEqual({
-        hidden: { count: 'No matches (+200000 collapsed)', marks: 0 },
+        hidden: { count: 'No matches (+12000 collapsed)', marks: 0 },
         rawDense: { count: '1 / 1500+', marks: 1500 },
         rawExact: { count: '1 / 1500', marks: 1500 },
         rawTextIntact: true,
@@ -1891,17 +2057,16 @@ browserTest(
         await evaluate(page.cdp, "document.querySelectorAll('#domainSummary .domain-summary-row').length"),
       ).toBe(3);
 
-      // Click-to-filter feeds the same multiText rules the Filters popup
-      // edits; clicking the pressed entry clears it again.
+      // Host focus keeps the alternatives available and can be cleared
+      // directly from its chip or the pressed host button.
       await evaluate(
         page.cdp,
         `document.querySelector('#domainSummary button[data-domain="api.example.test"]').click(); true`,
       );
       await delay(200);
       expect(await evaluate(page.cdp, "document.querySelectorAll('#tbody tr[data-row-id]').length")).toBe(3);
-      expect(await evaluate(page.cdp, "document.getElementById('filterBtn').textContent")).toContain(
-        'Filters (1)',
-      );
+      expect(await evaluate(page.cdp, `document.querySelector('[data-filter-key="host"]').textContent`)).toContain('api.example.test');
+      expect(await evaluate(page.cdp, `document.querySelectorAll('#domainSummary button[data-domain]').length`)).toBe(3);
       expect(
         await evaluate(
           page.cdp,
