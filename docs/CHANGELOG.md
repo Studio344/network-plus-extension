@@ -2,6 +2,10 @@
 
 All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/himiyosh/network-plus-extension/releases).
 
+## Unreleased
+
+- No changes have been recorded since v1.20.0.
+
 ## v1.20.0 - 2026-11-19
 
 - ⚡ **HAR body access** — Read indexed entries directly, search across list filters, and explain which response bodies search could not inspect.
