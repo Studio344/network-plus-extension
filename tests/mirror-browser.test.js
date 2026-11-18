@@ -553,6 +553,7 @@ browserTest(
       await viewer.cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
       await handshake();
       await drive({ type: 'command', commandId: 1, name: 'stream-toggle', args: {} });
+      await drive({ type: 'command', commandId: 2, name: 'sse-toggle', args: { enabled: true } });
       await add([openAttempt('wss://capture.example.test/ws')], [openAttempt('https://capture.example.test/sse')]);
       const initial = await awaitStates(host, ['Connecting', 'Connecting']);
       expect(initial?.map((row) => row.method)).toEqual(['WS', 'SSE']);
@@ -802,8 +803,15 @@ browserTest(
       ])`)).toEqual([['send', false, false], ['receive', false, false]]);
       await evaluate(viewer.cdp, 'document.querySelector(\'[data-ws-direction="receive"]\').click(); true');
       expect(await evaluate(viewer.cdp, `[...document.querySelectorAll('${visibleMessages}')].map((item) => item.dataset.direction)`)).toEqual(['receive']);
+      await searchFor('end-of-original-frame');
+      expect(await waitWithRelay(viewer, `(() => {
+        const rows = [...document.querySelectorAll('${visibleMessages}')];
+        return rows.length === 1 && rows[0].dataset.direction === 'receive' &&
+          rows[0].querySelector('.ws-message-search-excerpt mark')?.textContent === 'end-of-original-frame' &&
+          !rows[0].querySelector('details[open],pre');
+      })()`)).toBe(true);
       await searchFor('not present in any message');
-      expect(await evaluate(viewer.cdp, "!document.querySelector('#ws-message-empty').hidden")).toBe(true);
+      expect(await waitWithRelay(viewer, "!document.querySelector('#ws-message-empty').hidden")).toBe(true);
       await evaluate(viewer.cdp, "document.querySelector('#ws-message-reset').click(); true");
       expect(await evaluate(viewer.cdp, `({
         query: document.querySelector('#ws-message-query').value,
@@ -1115,6 +1123,8 @@ browserTest(
     const page = await launchPanelPage({
       executable: browserExecutable,
       initScript: HOST_STUB + `
+        // Isolate pending HTTP requests from native WebSocket polling.
+        chrome.storage.local.get = (keys, cb) => setTimeout(() => cb({ 'networkPlus.webSocketCapture': 'off' }), 0);
         window.__testHidden = true;
         window.__harEntries = [];
         window.__harPolls = 0;
@@ -1131,6 +1141,7 @@ browserTest(
       return evaluate(page.cdp, "window.__fromHost.filter((m) => m.type === 'snapshot-rows').flatMap((m) => m.rows)");
     };
     try {
+      expect(await waitForImportResult(page.cdp, "document.querySelector('#wsCaptureBtn:not([hidden])[aria-pressed=false]') !== null")).toBe(true);
       await drive({ type: 'hello', protocolVersion: 2 });
       await drive({ type: 'poll-pending' });
       await delay(1100);
@@ -1565,7 +1576,7 @@ browserTest(
       messages = await fromHost();
       expect(messages.find((m) => m.type === 'command-result' && m.commandId === 15).ok).toBe(true);
       expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').textContent")).toBe(
-        'Stream capture: On',
+        'WebSocket capture: On',
       );
       expect(
         await evaluate(page.cdp, "window.__evals.some((s) => s.startsWith('(function pageWebSocketWrapper('))"),
@@ -1575,6 +1586,20 @@ browserTest(
       messages = await fromHost();
       expect(messages.find((m) => m.type === 'command-result' && m.commandId === 115).ok).toBe(true);
       expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').getAttribute('aria-pressed')")).toBe('true');
+
+      await evaluate(page.cdp, `(() => {
+        chrome.storage.local.set = (_data, callback) => setTimeout(() => {
+          chrome.runtime.lastError = { message: 'Storage unavailable' };
+          callback();
+          chrome.runtime.lastError = null;
+        }, 0);
+        return true;
+      })()`);
+      await drive({ type: 'command', commandId: 116, name: 'stream-toggle', args: {} });
+      const commandResult = await waitForImportResult(page.cdp,
+        "window.__fromHost.find((m) => m.type === 'command-result' && m.commandId === 116)");
+      expect(commandResult).toMatchObject({ ok: false, error: 'Could not save the WebSocket preference for the next session.' });
+      expect(await evaluate(page.cdp, "document.getElementById('wsCaptureBtn').getAttribute('aria-pressed')")).toBe('false');
 
       await drive({
         type: 'command',

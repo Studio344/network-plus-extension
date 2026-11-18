@@ -486,7 +486,7 @@ function auditVisiblePanel() {
     text.push({ value: value.slice(0, 50), ratio: Number(ratio.toFixed(2)) });
   }
   const controls = [...document.querySelectorAll(
-    '.topbar button, .details-close-btn, .statusbar button, .status-summary-chip, .tab-btn, #resizer, .inspector-divider',
+    '.topbar button, .details-close-btn, .statusbar button, .analysis-status button, .tab-btn, #resizer, .inspector-divider',
   )].filter(visible);
   const borders = [];
   for (const control of controls) {

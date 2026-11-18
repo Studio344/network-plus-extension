@@ -2,6 +2,8 @@
 /* istanbul ignore next */
 const _NetworkPlus = (function () {
   'use strict';
+  const { splitWsJsonRecord, decodeWsJsonDisplayEscapes } = typeof module !== 'undefined' && module.exports
+    ? module.require('./payload-search.js') : globalThis.NetworkPlusPayloadSearch;
 
   // ============================================================
   // Section 1: Constants
@@ -56,6 +58,7 @@ const _NetworkPlus = (function () {
   const HAR_MAX_ENTRY_NODES = 65536;
   const HAR_MAX_ENTRY_CHARS = 16 * 1024 * 1024;
   const HAR_MAX_RESPONSE_TEXT_CHARS = 8 * 1024 * 1024;
+  const HAR_REREAD_RESPONSE_TEXT_CHARS = HAR_MAX_ENTRY_CHARS - 65536;
   const HAR_MAX_RETAINED_METADATA_BYTES = 256 * 1024 * 1024;
   const HAR_OVERSIZED_BODY_REASON = 'The imported HAR response body exceeds the parser’s per-body memory budget.';
   const AUTOMATIC_RESPONSE_PREFETCH_FAILURE_DEBOUNCE_MS = 750;
@@ -124,6 +127,7 @@ const _NetworkPlus = (function () {
 
   const THEME_KEY = 'networkPlus.theme';
   const LANG_KEY = 'networkPlus.lang';
+  const WS_CAPTURE_KEY = 'networkPlus.webSocketCapture';
   const SEARCH_PREFS_KEY = 'networkPlus.searchPrefs';
   const RETENTION_KEY = 'networkPlus.retention.v1';
   const THEMES = ['system', 'dark', 'light'];
@@ -3280,7 +3284,8 @@ const _NetworkPlus = (function () {
       return rule.include ? HTTP_METHODS.some((method) => rule.include[method] !== true) : false;
     }
     if (rule.mode === 'statusSet') {
-      return rule.include ? Object.values(rule.include).some((value) => value === false) : false;
+      return (Array.isArray(rule.excludedFamilies) && rule.excludedFamilies.some((key) => STATUS_CLASS_KEYS.includes(key))) ||
+        Object.values(rule.include || {}).some((value) => value === false);
     }
     if (rule.mode === 'urlAdvanced') {
       return [rule.includeAny, rule.includeAll, rule.excludeAny].some(
@@ -3498,6 +3503,81 @@ const _NetworkPlus = (function () {
   function countPaneSearchHits(text, query, options) {
     const { regex } = compileSearchQuery(query, options);
     return regex ? scanPaneSearchMatches(text, regex, Infinity) : 0;
+  }
+
+  const PAYLOAD_SEARCH_MAX_CHARS = 16 * 1024 * 1024;
+  const PAYLOAD_SEARCH_TIMEOUT_MS = 4000;
+
+  function createPayloadSearcher(signal) {
+    let worker = null;
+    let cancel = null;
+    const close = () => {
+      cancel?.();
+      worker?.terminate();
+      worker = null;
+      signal?.removeEventListener('abort', close);
+    };
+    signal?.addEventListener('abort', close, { once: true });
+    const scan = (text, regexes, after = null, webSocketAliases = false) => {
+      if (signal?.aborted || typeof text !== 'string' || text.length > PAYLOAD_SEARCH_MAX_CHARS) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        const finish = (value) => {
+          clearTimeout(timeout);
+          cancel = null;
+          if (worker) {
+            worker.onmessage = null;
+            worker.onerror = null;
+            if (value === null) {
+              worker.terminate();
+              worker = null;
+            }
+          }
+          resolve(value);
+        };
+        const timeout = setTimeout(() => finish(null), PAYLOAD_SEARCH_TIMEOUT_MS);
+        cancel = () => finish(null);
+        try {
+          if (!worker) worker = new Worker('payload-search.js');
+          worker.onmessage = ({ data }) => finish(data);
+          worker.onerror = (event) => {
+            event.preventDefault();
+            finish(null);
+          };
+          worker.postMessage({ text, after, webSocketAliases, rules: regexes.map(({ source, flags }) => ({ source, flags })) });
+        } catch (_error) {
+          finish(null);
+        }
+      });
+    };
+    return { scan, close };
+  }
+
+  function isPayloadSearchHit(hit) {
+    return isRecord(hit) && Number.isSafeInteger(hit.offset) && hit.offset >= 0 &&
+      typeof hit.before === 'string' && hit.before.length <= 80 &&
+      typeof hit.match === 'string' && hit.match.length > 0 && hit.match.length <= 160 &&
+      typeof hit.after === 'string' && hit.after.length <= 80;
+  }
+
+  function validateMirrorSearchResult(result, pending) {
+    if (Array.isArray(pending.frameIds)) {
+      const ids = new Set(pending.frameIds);
+      if (!Array.isArray(result?.checked) || !Array.isArray(result.matches) ||
+          result.checked.length > ids.size || result.matches.length > ids.size ||
+          result.checked.some(id => !ids.has(id)) ||
+          result.matches.some(entry => !Array.isArray(entry) || !isPayloadSearchHit(entry[1]))) return null;
+      const checked = new Set(result.checked);
+      const matched = new Set(result.matches.map(([id]) => id));
+      if (checked.size !== result.checked.length || matched.size !== result.matches.length ||
+          Array.from(matched).some(id => !checked.has(id))) return null;
+      return result;
+    }
+    if (!Array.isArray(result) || result.length !== pending.queries.length) return null;
+    if (pending.after === null) return result.every(value => typeof value === 'boolean') ? result : null;
+    return result.every(value => isRecord(value) && typeof value.more === 'boolean' &&
+      Array.isArray(value.hits) && value.hits.length <= 100 && value.hits.every(isPayloadSearchHit)) ? result : null;
   }
 
   // Rows to render given the matches-only toggle: with an active search and the
@@ -3865,7 +3945,7 @@ const _NetworkPlus = (function () {
     return data.log.entries;
   }
 
-  async function readHarEntries(byteStream, onEntry) {
+  async function readHarEntries(byteStream, onEntry, responseTextLimit = HAR_MAX_RESPONSE_TEXT_CHARS) {
     const decoder = new TextDecoder();
     const stack = [{ kind: 'root', state: 'value', role: '' }];
     // JSON forbids all unescaped control characters in strings.
@@ -3913,7 +3993,7 @@ const _NetworkPlus = (function () {
     const appendBodyPart = (part) => {
       if (body.omitted) return;
       body.chars += part.length;
-      if (body.chars > HAR_MAX_RESPONSE_TEXT_CHARS) {
+      if (body.chars > body.limit) {
         body.omitted = true;
         body.parts.length = 0;
       } else if (part) body.parts.push(part);
@@ -4001,7 +4081,8 @@ const _NetworkPlus = (function () {
           // Keep parsing the whole string for JSON validity even when its
           // payload cannot be retained. Preserve the other entry fields.
           appendEntryPart(text.slice(entryStart, index));
-          body = { start: index, chars: 0, parts: [], omitted: false };
+          const limit = typeof responseTextLimit === 'function' ? responseTextLimit(count) : responseTextLimit;
+          body = { start: index, chars: 0, parts: [], omitted: false, limit };
         }
         token = 'string';
         stringIsKey = false;
@@ -4165,7 +4246,7 @@ const _NetworkPlus = (function () {
         if (index++ !== entryIndex) return;
         entry = candidate;
         throw found;
-      });
+      }, (index) => index === entryIndex ? HAR_REREAD_RESPONSE_TEXT_CHARS : 0);
     } catch (error) {
       if (error !== found) throw error;
     }
@@ -4829,9 +4910,9 @@ const _NetworkPlus = (function () {
     return false;
   }
 
-  function countUnsearchedResponseBodies(rows) {
+  function countUnsearchedResponseBodies(rows, search) {
     return (rows || []).filter(
-      (row) => row && row.responseContentState !== 'cached',
+      (row) => row && row.responseContentState !== 'cached' && !search?.searched.has(row),
     ).length;
   }
 
@@ -5214,7 +5295,9 @@ const _NetworkPlus = (function () {
   }
 
   const TRAFFIC_TIMELINE_BINS = 12;
-  const OVERVIEW_PAGE_SIZE = 6;
+  const OVERVIEW_ROW_HEIGHT = 25;
+  const OVERVIEW_ROW_POOL = 16;
+  const OVERVIEW_OVERSCAN = 3;
   const MAX_OVERVIEW_EPOCH = 8640000000000000;
   const LATENCY_BANDS = [100, 300, 1000, 3000, Infinity];
 
@@ -5270,25 +5353,23 @@ const _NetworkPlus = (function () {
     return { bins, untimed, peak, range: { start: first, end } };
   }
 
-  function planOverviewWaterfallPage(rows, range, page) {
-    const timed = rows.filter((row) => getOverviewStart(row) !== null)
-      .sort((a, b) => a.clientStartEpoch - b.clientStartEpoch);
-    const lastPage = Math.max(0, Math.ceil(timed.length / OVERVIEW_PAGE_SIZE) - 1);
-    page = Math.min(page, lastPage);
-    const offset = page * OVERVIEW_PAGE_SIZE;
+  function planOverviewRequestWindow(total, scrollTop) {
+    const first = Math.max(0, Math.min(total - 1, Math.floor(scrollTop / OVERVIEW_ROW_HEIGHT)));
+    const start = Math.max(0, first - OVERVIEW_OVERSCAN);
+    return { start, end: Math.min(total, start + OVERVIEW_ROW_POOL) };
+  }
+
+  function buildOverviewRequestEntry(row, range) {
     const span = range.end - range.start;
-    const entries = timed.slice(offset, offset + OVERVIEW_PAGE_SIZE).map((row) => {
-      const start = getOverviewStart(row);
-      const duration = getOverviewDuration(row);
-      return {
-        row,
-        startsAt: (start - range.start) / span,
-        width: Math.min(duration ?? 0, range.end - start) / span,
-        duration,
-        statusClass: row._pendingRequest ? 'pending' : classifyStatusClass(row.status),
-      };
-    });
-    return { entries, total: timed.length, page, lastPage, offset };
+    const start = getOverviewStart(row);
+    const duration = getOverviewDuration(row);
+    return {
+      row,
+      startsAt: (start - range.start) / span,
+      width: Math.min(duration ?? 0, range.end - start) / span,
+      duration,
+      statusClass: row._pendingRequest ? 'pending' : classifyStatusClass(row.status),
+    };
   }
 
   function computeLatencyDistribution(rows) {
@@ -5309,34 +5390,6 @@ const _NetworkPlus = (function () {
       if (!slowest || row.duration > slowest.duration) slowest = row;
     }
     return { bands, measured, slowest, pending, unmeasured: rows.length - measured - pending };
-  }
-
-  function getStatusClassIndicators(statusClassCounts) {
-    const counts =
-      statusClassCounts && typeof statusClassCounts === 'object' ? statusClassCounts : {};
-    return STATUS_CLASS_KEYS.map((statusClass) => {
-      const sourceCount = counts[statusClass];
-      const count = Number.isInteger(sourceCount) && sourceCount >= 0 ? sourceCount : 0;
-      return { statusClass, count, text: statusClass + ' ' + count };
-    });
-  }
-
-  function formatStatusClassSummary(statusClassCounts) {
-    return (
-      'status ' +
-      getStatusClassIndicators(statusClassCounts)
-        .map((indicator) => indicator.text)
-        .join(' · ')
-    );
-  }
-
-  function findFirstStatusClassRow(rows, statusClass) {
-    if (!Array.isArray(rows) || !STATUS_CLASS_KEYS.includes(statusClass)) return null;
-    for (const row of rows) {
-      if (!row || typeof row !== 'object') continue;
-      if (classifyStatusClass(row.status) === statusClass) return row;
-    }
-    return null;
   }
 
   /**
@@ -6089,6 +6142,7 @@ const _NetworkPlus = (function () {
       row._liveRawResponsePromise = null;
       row._readImportedHarEntry = null;
       row._readWsHarEntry = null;
+      row._responseSearchSource = null;
       row._retentionDisposed = true;
       state.retainedRows.delete(row);
       state.activeRows.delete(row);
@@ -6247,6 +6301,8 @@ const _NetworkPlus = (function () {
   }
 
   function clearStoredRows() {
+    state.search.fullResponses?.controller.abort();
+    state.search.fullResponses = null;
     removeRowsFromState(state.rows.slice(), false);
     state.filteredRows = [];
     state.requestScopeRows = null;
@@ -6307,6 +6363,8 @@ const _NetworkPlus = (function () {
   }
 
   function detachStoredRowsForClearUndo() {
+    state.search.fullResponses?.controller.abort();
+    state.search.fullResponses = null;
     cancelAutomaticResponsePrefetchRows(state.rows, true);
     for (const row of state.rows) state.activeRows.delete(row);
     state.rows = [];
@@ -6595,17 +6653,13 @@ const _NetworkPlus = (function () {
       en: 'No displayed requests with a recorded start time.',
       ja: '表示中の通信に開始時刻の記録がありません。',
     },
-    overviewPageCount: {
-      en: '{first}–{last} of {total}',
-      ja: '{total}件中 {first}–{last}件',
+    overviewRequestCount: {
+      en: '{total} shown',
+      ja: '{total}件表示',
     },
-    overviewPreviousPage: {
-      en: 'Previous requests',
-      ja: '前の通信',
-    },
-    overviewNextPage: {
-      en: 'Next requests',
-      ja: '次の通信',
+    overviewScrollRegion: {
+      en: 'Scrollable requests. Use arrow keys to move and Enter to inspect.',
+      ja: '通信一覧。矢印キーで移動し、Enterで詳細を表示します。',
     },
     overviewUnknownDuration: {
       en: 'Duration unavailable',
@@ -6675,6 +6729,18 @@ const _NetworkPlus = (function () {
       en: 'Filter by request status. Counts before text search.',
       ja: '通信の状態で絞り込む。件数はテキスト検索前の値です。',
     },
+    analysisStatusFacetCount: {
+      en: '{label}: {count}',
+      ja: '{label}、{count}件',
+    },
+    analysisAverageDuration: {
+      en: 'avg {average}',
+      ja: '平均 {average}',
+    },
+    analysisDurationRange: {
+      en: 'avg {average} · min {minimum} · max {maximum}',
+      ja: '平均 {average} · 最短 {minimum} · 最長 {maximum}',
+    },
     analysisAll: {
       en: 'All',
       ja: 'すべて',
@@ -6728,32 +6794,56 @@ const _NetworkPlus = (function () {
       ja: 'HTTPエラー {count}件',
     },
     analysisColumnFilters: {
-      en: 'Column Filters ({count} active)',
-      ja: '列フィルター（{count}件適用中）',
+      en: 'Column filters',
+      ja: '列フィルター',
+    },
+    analysisColumnFilterCount: {
+      en: '{count} active',
+      ja: '{count}件適用中',
+    },
+    analysisSingleColumnFilter: {
+      en: '{column} filter',
+      ja: '{column}のフィルター',
     },
     analysisColumnFilterActive: {
       en: 'Active',
       ja: '適用中',
     },
     analysisStatusSuccess: {
-      en: '2xx Success',
-      ja: '2xx 成功',
+      en: 'Success',
+      ja: '成功',
     },
     analysisStatusRedirect: {
-      en: '3xx Redirect',
-      ja: '3xx リダイレクト',
+      en: 'Redirect',
+      ja: 'リダイレクト',
     },
     analysisStatusClientError: {
-      en: '4xx Client error',
-      ja: '4xx クライアントエラー',
+      en: 'Client error',
+      ja: 'クライアントエラー',
     },
     analysisStatusServerError: {
-      en: '5xx Server error',
-      ja: '5xx サーバーエラー',
+      en: 'Server error',
+      ja: 'サーバーエラー',
     },
     analysisStatusOther: {
       en: 'Other',
       ja: 'その他',
+    },
+    filterSelectAll: {
+      en: 'Select all',
+      ja: '全選択',
+    },
+    filterDeselectAll: {
+      en: 'Clear all',
+      ja: '全解除',
+    },
+    filterSelectFamily: {
+      en: 'Select all in {family}',
+      ja: '{family}をすべて選択',
+    },
+    filterDeselectFamily: {
+      en: 'Clear all in {family}',
+      ja: '{family}をすべて解除',
     },
     undockHintTitle: {
       en: '🪟 Keep DevTools open',
@@ -7467,8 +7557,16 @@ const _NetworkPlus = (function () {
       ja: 'ローカルサンプル一式を削除し、以前の記録状態と列フィルターを復元',
     },
     titleWsCapture: {
-      en: 'Record WebSocket and Server-Sent Events while stream capture is on',
-      ja: 'ストリーム記録をオンにしている間のWebSocketとServer-Sent Eventsを記録します',
+      en: 'Record WebSocket messages in the inspected tab while live recording is running',
+      ja: 'ライブ記録中に、検査中のタブのWebSocketメッセージを記録します',
+    },
+    settingsSseSection: {
+      en: 'Server-Sent Events (SSE)',
+      ja: 'Server-Sent Events（SSE）',
+    },
+    settingsSseCapture: {
+      en: 'Record SSE in this session',
+      ja: 'このセッションでSSEを記録',
     },
     emptyFilteredTitle: {
       en: 'No requests match the current filters.',
@@ -7698,8 +7796,8 @@ const _NetworkPlus = (function () {
       ja: 'キャッシュされたボディ全体を表示（{size}）',
     },
     largePayloadPreview: {
-      en: 'This payload exceeds the 16 KiB inspector preview budget. Search here covers the preview.',
-      ja: 'このペイロードはインスペクターのプレビュー上限（16 KiB）を超えています。ここでの検索はプレビューが対象です。',
+      en: 'Showing the first 16 KiB. Search also checks available text past the preview.',
+      ja: '先頭 16 KiB を表示しています。検索では、取得できる本文をプレビューの先まで調べます。',
     },
     largePayloadBinary: {
       en: 'This payload exceeds the 16 KiB inspector preview budget. Raw bytes are available as a file.',
@@ -8376,6 +8474,22 @@ const _NetworkPlus = (function () {
       en: 'No matches',
       ja: '一致なし',
     },
+    payloadSearchRunning: {
+      en: 'Searching full text…',
+      ja: '全文を検索中…',
+    },
+    payloadSearchPartial: {
+      en: 'Some text could not be searched',
+      ja: '一部の本文を検索できませんでした',
+    },
+    payloadSearchExcerpts: {
+      en: 'Matches outside the preview',
+      ja: 'プレビュー外の一致箇所',
+    },
+    payloadSearchOffset: {
+      en: 'Position {offset}',
+      ja: '{offset} 文字目',
+    },
     paneSearchCollapsedSuffix: {
       en: ' (+{count} collapsed)',
       ja: ' (+{count} 件は折りたたみ内)',
@@ -9040,20 +9154,20 @@ const _NetworkPlus = (function () {
     },
     // The stream-capture toggle paints its own state; both writers read these.
     wsCaptureOn: {
-      en: 'Stream capture: On',
-      ja: 'ストリームキャプチャ: オン',
+      en: 'WebSocket capture: On',
+      ja: 'WebSocket記録: オン',
     },
     wsCaptureOff: {
-      en: 'Stream capture: Off',
-      ja: 'ストリームキャプチャ: オフ',
+      en: 'WebSocket capture: Off',
+      ja: 'WebSocket記録: オフ',
     },
     wsCapturePromptHelp: {
-      en: 'Enable stream capture before opening a new WebSocket connection.',
-      ja: '新しい WebSocket 接続を開く前に、ストリーム記録をオンにしてください。',
+      en: 'WebSocket capture is off. Turn it on to record new messages.',
+      ja: 'WebSocket記録はオフです。新しいメッセージを記録するにはオンにしてください。',
     },
     wsCapturePromptBtn: {
-      en: 'Enable stream capture',
-      ja: 'ストリーム記録をオンにする',
+      en: 'Enable WebSocket capture',
+      ja: 'WebSocket記録をオンにする',
     },
     wsReloadCapture: {
       en: 'Reload and record',
@@ -9492,16 +9606,16 @@ const _NetworkPlus = (function () {
       ja: 'ストリーム記録がメモリ上限に達したため、一部のストリームやフレームを省略しました。',
     },
     statusStreamCaptureOn: {
-      en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',
-      ja: 'ストリームキャプチャをオンにしました。以後に作成される WebSocket と SSE の接続を記録します。',
+      en: 'WebSocket capture is on for new connections.',
+      ja: '新しいWebSocket接続の記録をオンにしました。',
     },
     statusStreamCaptureOnPaused: {
-      en: 'Stream capture is on. Resume recording before opening a new WebSocket connection.',
-      ja: 'ストリーム記録をオンにしました。新しい WebSocket 接続を開く前に、ライブ記録を再開してください。',
+      en: 'WebSocket capture is on. Resume live recording to collect messages.',
+      ja: 'WebSocket記録はオンです。メッセージを取得するにはライブ記録を再開してください。',
     },
     statusStreamCaptureNativeOn: {
-      en: 'Recording WebSocket and SSE. Use Reload and record if the page connected before DevTools opened.',
-      ja: 'WebSocketとSSEを記録中です。DevToolsを開く前に接続していた場合は「再読み込みして記録」を使ってください。',
+      en: 'Recording WebSocket messages. Use Reload and record if DevTools missed the connection.',
+      ja: 'WebSocketを記録中です。DevToolsが接続を取得できていない場合は「再読み込みして記録」を使ってください。',
     },
     statusStreamCaptureReload: {
       en: 'Reloading the inspected page to record its connections.',
@@ -9512,8 +9626,16 @@ const _NetworkPlus = (function () {
       ja: '検査中のページを再読み込みできませんでした。',
     },
     statusStreamCaptureOff: {
-      en: 'Stream capture off; recorded connections stay in the table.',
-      ja: 'ストリームキャプチャをオフにしました。記録済みの接続はテーブルに残ります。',
+      en: 'WebSocket capture is off. Recorded messages stay in the table.',
+      ja: 'WebSocket記録をオフにしました。記録済みのメッセージは一覧に残ります。',
+    },
+    statusWsCapturePrefUnavailable: {
+      en: 'Could not load the WebSocket preference. Capture is off.',
+      ja: 'WebSocketの記録設定を読み込めなかったため、記録はオフです。',
+    },
+    statusWsCapturePrefNotSaved: {
+      en: 'Could not save the WebSocket preference for the next session.',
+      ja: '次回のためのWebSocket記録設定を保存できませんでした。',
     },
   };
 
@@ -9669,6 +9791,9 @@ const _NetworkPlus = (function () {
     if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();
     if (state.syncDomainSummary) state.syncDomainSummary();
     renderAnalysisBar();
+    const statsElement = $('#statsSummary');
+    const currentStats = statsSummaryStructures.get(statsElement)?.stats;
+    if (currentStats) renderStatsSummary(statsElement, currentStats);
     state.syncTrafficOverview?.();
     setStatus(uiTextFormat('statusLanguageApplied', { language: normalized }));
   }
@@ -10076,9 +10201,9 @@ const _NetworkPlus = (function () {
     }
 
     if (rule && rule.mode === 'statusSet') {
-      // If no codes are unchecked, show all
-      if (!rule.include || Object.keys(rule.include).length === 0) return true;
-      return rule.include[value] !== false;
+      const override = rule.include?.[value];
+      if (typeof override === 'boolean') return override;
+      return !Array.isArray(rule.excludedFamilies) || !rule.excludedFamilies.includes(classifyStatusClass(Number(value)));
     }
 
     if (rule && rule.mode === 'urlAdvanced') {
@@ -10199,9 +10324,7 @@ const _NetworkPlus = (function () {
   }
 
   function classifyRequestFacet(row) {
-    if (row._pendingRequest === true) return 'pending';
-    const statusClass = classifyStatusClass(row.status);
-    return statusClass === '4xx' || statusClass === '5xx' ? statusClass : 'all';
+    return row._pendingRequest === true ? 'pending' : classifyStatusClass(row.status);
   }
 
   function hasRequestFacets() {
@@ -11320,6 +11443,7 @@ const _NetworkPlus = (function () {
     let pendingRowsEnabled = false;
     const getMirroredRows = () => getRows().filter((row) => pendingRowsEnabled || !row._pendingRequest);
     const importTransfers = new Map();
+    const fullSearches = new Map();
     // Row ids restart at 1 in every DevTools session, and a mirror tab keeps
     // its rows after a disconnect. Without a session identity, a reattached
     // tab would alias the old session's rows onto the new session's ids and
@@ -11345,6 +11469,7 @@ const _NetworkPlus = (function () {
         protocolVersion: MIRROR_PROTOCOL_VERSION,
         webSocketExport: true,
         webSocketMessages: true,
+        fullPayloadSearch: true,
         streamHarExport: true,
       });
       let chunk = [];
@@ -11418,6 +11543,58 @@ const _NetworkPlus = (function () {
       }
       const snapshot = readWsMessagesSnapshot(revision, row._wsMessages ?? [], row._wsMessagesOmitted ?? 0);
       postMessage(snapshot ? { ...result, ok: true, ...snapshot } : { ...result, ok: false });
+    };
+    const fullSearchKey = ({ viewer, requestId }) => viewer + ':' + requestId;
+    const sendFullSearch = async (message) => {
+      const { requestId, viewer, rowId, session, queries, options, after, frameIds } = message;
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer || viewer.length > 128 ||
+          !Number.isSafeInteger(requestId) || requestId <= 0 || !Number.isSafeInteger(rowId) || rowId <= 0) return;
+      const result = { type: 'full-search-result', requestId, viewer, rowId, session };
+      if (!Array.isArray(queries) || queries.length === 0 || queries.length > 16 ||
+          queries.some(query => typeof query !== 'string' || !query.trim() || query.length > 2048) || fullSearches.size >= 8) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      const row = getRows().find(candidate => candidate.id === rowId && !candidate._pendingRequest);
+      if (!row || row._retentionDisposed) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      const key = fullSearchKey(message);
+      if (fullSearches.has(key)) return;
+      const controller = new AbortController();
+      fullSearches.set(key, controller);
+      const current = () => !controller.signal.aborted && !row._retentionDisposed;
+      try {
+        let hits = null;
+        if (Array.isArray(frameIds) && queries.length === 1 && frameIds.length <= WS_MESSAGE_HISTORY_LIMIT &&
+            frameIds.every(id => Number.isSafeInteger(id) && id > 0)) {
+          const ids = new Set(frameIds);
+          const frames = (row._wsMessages || []).filter(frame => !frame.binary && frame.truncated && ids.has(frame.id));
+          const found = await findFullWsMatches(row, frames, queries[0], current, controller.signal);
+          hits = { checked: Array.from(found.checked), matches: Array.from(found.matches) };
+        } else if (frameIds === null && (after === null || Number.isSafeInteger(after) && after >= 0 && queries.length === 1)) {
+          const queryOptions = {
+            caseSensitive: options?.caseSensitive === true,
+            wholeWord: options?.wholeWord === true,
+            regex: options?.regex === true,
+          };
+          const rules = queries.map(query => compileSearchQuery(query, queryOptions).regex);
+          if (rules.every(Boolean)) {
+            const search = createPayloadSearcher(controller.signal);
+            try {
+              hits = await search.scan(await readSearchableResponse(row, current), rules, after);
+            } finally {
+              search.close();
+            }
+          }
+        }
+        if (current()) postMessage({ ...result, ok: hits !== null, hits });
+      } catch (_error) {
+        if (current()) postMessage({ ...result, ok: false });
+      } finally {
+        fullSearches.delete(key);
+      }
     };
     const sendStreamHar = ({ requestId, viewer, rowId, session, minimumRevision, includeBodies }) => {
       if (session !== sessionToken || typeof viewer !== 'string' || !viewer ||
@@ -11493,6 +11670,14 @@ const _NetworkPlus = (function () {
       }
       if (message.type === 'ws-messages-request') {
         sendWsMessages(message);
+        return;
+      }
+      if (message.type === 'full-search-request') {
+        sendFullSearch(message);
+        return;
+      }
+      if (message.type === 'full-search-cancel') {
+        if (message.session === sessionToken) fullSearches.get(fullSearchKey(message))?.abort();
         return;
       }
       if (message.type === 'stream-har-request') {
@@ -11647,10 +11832,14 @@ const _NetworkPlus = (function () {
         }
         postMessage({ type: 'row', session: sessionToken, row: serializeRowForMirror(row) });
       },
-      resetPeer: () => { pendingRowsEnabled = false; },
+      resetPeer: () => {
+        pendingRowsEnabled = false;
+        for (const search of fullSearches.values()) search.abort();
+      },
       // A viewer that disconnects mid-transfer would otherwise leave its
       // accumulated chunks parked in this map forever.
       dropImportTransfers: () => {
+        for (const search of fullSearches.values()) search.abort();
         for (const [key, transfer] of importTransfers) failImport(key, transfer, 'The import transfer was interrupted.');
       },
     };
@@ -11683,6 +11872,7 @@ const _NetworkPlus = (function () {
     let hostSessionToken = null;
     let webSocketExportSupported = false;
     let webSocketMessagesSupported = false;
+    let fullPayloadSearchSupported = false;
     let streamHarExportSupported = false;
     const settleExport = (requestId, error, payload = null) => {
       const pending = pendingExportCallbacks.get(requestId);
@@ -11700,11 +11890,19 @@ const _NetworkPlus = (function () {
         'body-request': 'The DevTools session did not answer the body request in time.',
         'ws-export-request': 'The DevTools session did not answer the WebSocket export request in time.',
         'ws-messages-request': WS_MESSAGES_UNAVAILABLE_REASON,
+        'full-search-request': 'The DevTools session did not answer the full text search in time.',
         'stream-har-request': STREAM_HAR_UNAVAILABLE_REASON,
       }[type];
-      pending.timer = setTimeout(() => settleExport(
-        requestId, new Error(timeoutReason),
-      ), RESPONSE_CONTENT_TIMEOUT_MS);
+      pending.timer = setTimeout(() => {
+        if (type === 'full-search-request') {
+          try {
+            postMessage({ type: 'full-search-cancel', requestId, viewer: viewerNonce, session: pending.session });
+          } catch (_error) {
+            // The peer may already be gone.
+          }
+        }
+        settleExport(requestId, new Error(timeoutReason));
+      }, type === 'full-search-request' ? WS_FULL_TEXT_READ_TIMEOUT_MS : RESPONSE_CONTENT_TIMEOUT_MS);
       pendingExportCallbacks.set(requestId, pending);
       if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
       try {
@@ -11714,8 +11912,29 @@ const _NetworkPlus = (function () {
         pendingExportCallbacks.delete(requestId);
         throw error;
       }
+      return requestId;
     };
     const requestBody = (rowId, callback) => requestExport('body-request', rowId, callback);
+    const requestFullSearch = (rowId, session, queries, options, after, frameIds, signal) => {
+      if (!fullPayloadSearchSupported || pendingSnapshot || !session || session !== hostSessionToken || signal?.aborted) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        const abort = () => {
+          try {
+            postMessage({ type: 'full-search-cancel', requestId, viewer: viewerNonce, session });
+          } catch (_error) {
+            // Disconnect also expires host work.
+          }
+          settleExport(requestId, null, null);
+        };
+        const requestId = requestExport('full-search-request', rowId, (_error, result) => {
+          signal?.removeEventListener('abort', abort);
+          resolve(result);
+        }, { session, queries, options, after, frameIds });
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+    };
     const requestWebSocketExport = (rowId, session, includeFrames, callback) => {
       if (!webSocketExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
         callback(new Error('WebSocket frames are unavailable from this DevTools session.'), null);
@@ -11932,6 +12151,7 @@ const _NetworkPlus = (function () {
             session,
             webSocketExport: message.webSocketExport === true,
             webSocketMessages: message.webSocketMessages === true,
+            fullPayloadSearch: message.fullPayloadSearch === true,
             streamHarExport: message.streamHarExport === true,
           };
           for (const [requestId, pending] of pendingExportCallbacks) {
@@ -11940,6 +12160,9 @@ const _NetworkPlus = (function () {
             }
             if (pending.type === 'ws-messages-request' && (sessionChanged || !pendingSnapshot.webSocketMessages)) {
               settleExport(requestId, new Error(WS_MESSAGES_UNAVAILABLE_REASON));
+            }
+            if (pending.type === 'full-search-request' && (sessionChanged || !pendingSnapshot.fullPayloadSearch)) {
+              settleExport(requestId, null, null);
             }
             if (pending.type === 'stream-har-request' && (sessionChanged || !pendingSnapshot.streamHarExport)) {
               settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
@@ -11965,6 +12188,7 @@ const _NetworkPlus = (function () {
             hostSessionToken = snapshot.session;
             webSocketExportSupported = snapshot.webSocketExport && Boolean(snapshot.session);
             webSocketMessagesSupported = snapshot.webSocketMessages && Boolean(snapshot.session);
+            fullPayloadSearchSupported = snapshot.fullPayloadSearch && Boolean(snapshot.session);
             streamHarExportSupported = snapshot.streamHarExport && Boolean(snapshot.session);
             applyWireSnapshot(snapshot.rows, { sessionChanged: snapshot.sessionChanged, session: snapshot.session });
           }
@@ -12000,6 +12224,15 @@ const _NetworkPlus = (function () {
           else settleExport(message.requestId, new Error(message.error || 'Response content is unavailable.'));
           break;
         }
+        case 'full-search-result': {
+          const pending = pendingExportCallbacks.get(message.requestId);
+          if (pending?.type === 'full-search-request' && message.viewer === viewerNonce &&
+              message.session === hostSessionToken && message.session === pending.session && message.rowId === pending.rowId) {
+            const hits = message.ok === true ? validateMirrorSearchResult(message.hits, pending) : null;
+            settleExport(message.requestId, null, hits);
+          }
+          break;
+        }
         case 'ws-export-result': {
           receiveWebSocketExport(message);
           break;
@@ -12032,6 +12265,7 @@ const _NetworkPlus = (function () {
       pendingSnapshot = null;
       webSocketExportSupported = false;
       webSocketMessagesSupported = false;
+      fullPayloadSearchSupported = false;
       streamHarExportSupported = false;
       const failures = Array.from(pendingExportCallbacks.values());
       pendingExportCallbacks.clear();
@@ -12047,7 +12281,8 @@ const _NetworkPlus = (function () {
       }
     };
     return {
-      handleMessage, requestBody, requestWebSocketExport, requestWsMessages, requestStreamHar,
+      handleMessage, requestBody, requestFullSearch, requestWebSocketExport, requestWsMessages, requestStreamHar,
+      supportsFullSearch: () => fullPayloadSearchSupported,
       sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests,
     };
   }
@@ -13025,7 +13260,6 @@ const _NetworkPlus = (function () {
   // Section 9: Safe DOM Rendering [S1][S2][S3] — NO innerHTML with user data
   // ============================================================
   const statsSummaryStructures = new WeakMap();
-  const statusSummaryInspectHandlers = new WeakMap();
 
   // Appends text with a <wbr> after every & ; / when the value has no
   // whitespace of its own. <wbr> adds nothing to textContent, so what the
@@ -13750,31 +13984,12 @@ const _NetworkPlus = (function () {
     accessibleSummary.className = 'sr-only status-summary-accessible';
     statsElement.appendChild(accessibleSummary);
 
-    const visualSummary = document.createElement('span');
-    visualSummary.className = 'status-summary-visual';
-
-    const statusLabel = document.createElement('span');
-    statusLabel.className = 'status-summary-label';
-    statusLabel.textContent = 'Status';
-    statusLabel.setAttribute('aria-hidden', 'true');
-    visualSummary.appendChild(statusLabel);
-
-    const chips = document.createElement('span');
-    chips.className = 'status-summary-chips';
-    visualSummary.appendChild(chips);
-
     const duration = document.createElement('span');
     duration.className = 'status-summary-duration';
     duration.setAttribute('aria-hidden', 'true');
-    visualSummary.appendChild(duration);
-    statsElement.appendChild(visualSummary);
+    statsElement.appendChild(duration);
 
-    const structure = {
-      accessibleSummary,
-      chips,
-      duration,
-      chipElements: new Map(),
-    };
+    const structure = { accessibleSummary, duration };
     statsSummaryStructures.set(statsElement, structure);
     return structure;
   }
@@ -13788,84 +14003,15 @@ const _NetworkPlus = (function () {
     statsSummaryStructures.delete(statsElement);
   }
 
-  function createStatusSummaryChip(statusClass, canInspect) {
-    const chip = document.createElement(canInspect ? 'button' : 'span');
-    chip.dataset.statusClass = statusClass;
-    if (canInspect) {
-      chip.type = 'button';
-      chip.addEventListener('click', () => {
-        const handler = statusSummaryInspectHandlers.get(chip);
-        if (typeof handler === 'function') handler(statusClass);
-      });
-    }
-    const label = document.createElement('span');
-    label.className = 'status-summary-chip-label';
-    label.textContent = statusClass;
-    const count = document.createElement('span');
-    count.className = 'status-summary-chip-count';
-    chip.appendChild(label);
-    chip.appendChild(document.createTextNode(' '));
-    chip.appendChild(count);
-    return chip;
-  }
-
-  function updateStatusSummaryChip(structure, indicator, onInspectStatusClass) {
-    const canInspect = indicator.count > 0 && typeof onInspectStatusClass === 'function';
-    const expectedTagName = canInspect ? 'BUTTON' : 'SPAN';
-    let chip = structure.chipElements.get(indicator.statusClass);
-    if (!chip || chip.tagName !== expectedTagName) {
-      const replacement = createStatusSummaryChip(indicator.statusClass, canInspect);
-      if (chip) {
-        chip.replaceWith(replacement);
-      } else {
-        structure.chips.appendChild(replacement);
-      }
-      structure.chipElements.set(indicator.statusClass, replacement);
-      chip = replacement;
-    }
-
-    chip.className =
-      'status-summary-chip status-summary-chip--' +
-      indicator.statusClass +
-      (canInspect ? ' status-summary-chip--action' : ' status-summary-chip--empty');
-    chip.querySelector('.status-summary-chip-count').textContent = String(indicator.count);
-    if (canInspect) {
-      const statusClassLabel =
-        indicator.statusClass === 'other' ? 'other-status' : indicator.statusClass;
-      const inspectLabel =
-        'Inspect first visible ' +
-        statusClassLabel +
-        ' request (' +
-        indicator.count +
-        ' matching)';
-      chip.setAttribute('aria-label', inspectLabel);
-      chip.removeAttribute('aria-hidden');
-      chip.title = inspectLabel;
-      statusSummaryInspectHandlers.set(chip, onInspectStatusClass);
-    } else {
-      chip.setAttribute('aria-hidden', 'true');
-      chip.removeAttribute('aria-label');
-      chip.removeAttribute('title');
-      statusSummaryInspectHandlers.delete(chip);
-    }
-  }
-
-  function renderStatsSummary(statsElement, stats, onInspectStatusClass) {
-    const indicators = getStatusClassIndicators(stats.statusClassCounts);
-    const statusText = formatStatusClassSummary(stats.statusClassCounts);
-    const durationText =
-      'avg ' +
-      fmtTime(stats.avgDuration) +
-      ' · min ' +
-      fmtTime(stats.minDuration) +
-      ' · max ' +
-      fmtTime(stats.maxDuration);
+  function renderStatsSummary(statsElement, stats) {
+    const average = fmtTime(stats.avgDuration);
+    const durationText = uiTextFormat('analysisDurationRange', {
+      average, minimum: fmtTime(stats.minDuration), maximum: fmtTime(stats.maxDuration),
+    });
     const structure = getOrCreateStatsSummaryStructure(statsElement);
-    structure.accessibleSummary.textContent = statusText + ' | ' + durationText;
-    for (const indicator of indicators) {
-      updateStatusSummaryChip(structure, indicator, onInspectStatusClass);
-    }
-    structure.duration.textContent = '| avg ' + fmtTime(stats.avgDuration);
+    structure.stats = stats;
+    structure.accessibleSummary.textContent = durationText;
+    structure.duration.textContent = uiTextFormat('analysisAverageDuration', { average });
     structure.duration.title = durationText;
   }
 
@@ -14406,9 +14552,8 @@ const _NetworkPlus = (function () {
 
       // All / None sit inline with the checkboxes so the whole rule is one row.
       const allBtn = document.createElement('button');
-      allBtn.textContent = 'All';
+      allBtn.textContent = uiText('filterSelectAll');
       allBtn.className = 'filter-clear-btn filter-inline-action';
-      allBtn.setAttribute('aria-label', 'Select all Method filter values');
       allBtn.addEventListener('click', () => {
         HTTP_METHODS.forEach((m) => { include[m] = true; });
         state.columnFilterRules[colId] = { mode: 'methodSet', include: Object.assign({}, include) };
@@ -14418,9 +14563,8 @@ const _NetworkPlus = (function () {
         renderMethodCheckboxes();
       });
       const noneBtn = document.createElement('button');
-      noneBtn.textContent = 'None';
+      noneBtn.textContent = uiText('filterDeselectAll');
       noneBtn.className = 'filter-clear-btn filter-inline-action';
-      noneBtn.setAttribute('aria-label', 'Deselect all Method filter values');
       noneBtn.addEventListener('click', () => {
         HTTP_METHODS.forEach((m) => { include[m] = false; });
         state.columnFilterRules[colId] = { mode: 'methodSet', include: Object.assign({}, include) };
@@ -14454,8 +14598,9 @@ const _NetworkPlus = (function () {
       return wrap;
     }
 
-    // --- Status column: checkbox set by category (horizontal) ---
+    // --- Status column: checkbox set by category ---
     if (colId === 'status') {
+      wrap.classList.add('filter-status-rule');
       const STATUS_CATEGORIES = [
         { label: 'analysisStatusSuccess', family: 2, codes: [200, 201, 202, 204, 206] },
         { label: 'analysisStatusRedirect', family: 3, codes: [301, 302, 303, 304, 307, 308] },
@@ -14465,23 +14610,45 @@ const _NetworkPlus = (function () {
       const rule = state.columnFilterRules[colId];
       const isStatusSet = rule && rule.mode === 'statusSet';
       const include = isStatusSet ? Object.assign({}, rule.include) : {};
+      const draft = { mode: 'statusSet', include, excludedFamilies: isStatusSet && Array.isArray(rule.excludedFamilies)
+        ? rule.excludedFamilies.filter((family) => STATUS_CLASS_KEYS.includes(family)) : [] };
+      const save = () => {
+        state.columnFilterRules[colId] = { ...draft, include: { ...include } };
+        onChange();
+      };
       const observedCodes = new Set(Object.keys(include).map(Number));
       for (const row of state.rows) {
         if (Number.isInteger(row.status) && row.status >= 0 && row.status < 600) observedCodes.add(row.status);
       }
       const otherCodes = [...observedCodes].filter((code) => code >= 0 && code < 200).sort((a, b) => a - b);
-      if (otherCodes.length) STATUS_CATEGORIES.push({ label: 'analysisStatusOther', codes: otherCodes });
+      if (otherCodes.length || draft.excludedFamilies.includes('other')) {
+        STATUS_CATEGORIES.push({ label: 'analysisStatusOther', codes: otherCodes });
+      }
       // Default: all enabled (empty = show all)
 
       for (const cat of STATUS_CATEGORIES) {
-        // Category label and its codes share one row so the rule stays compact.
         const row = document.createElement('div');
-        row.className = 'filter-inline-row';
+        row.className = 'filter-status-row';
+        row.dataset.family = cat.family || 'other';
+        row.setAttribute('role', 'group');
+        const familyKey = cat.family ? cat.family + 'xx' : 'other';
+        const heading = document.createElement('div');
+        heading.className = 'filter-status-heading';
 
         const catLabel = document.createElement('div');
         catLabel.className = 'filter-status-category';
-        catLabel.textContent = uiText(cat.label);
-        row.appendChild(catLabel);
+        catLabel.id = 'filter-status-family-' + row.dataset.family;
+        row.setAttribute('aria-labelledby', catLabel.id);
+        const family = document.createElement('span');
+        family.className = 'filter-status-family';
+        family.textContent = cat.family ? cat.family + 'xx' : '—';
+        if (!cat.family) family.setAttribute('aria-hidden', 'true');
+        catLabel.append(family, ' ');
+        const description = document.createElement('span');
+        description.textContent = uiText(cat.label);
+        catLabel.appendChild(description);
+        heading.appendChild(catLabel);
+        row.appendChild(heading);
 
         const grid = document.createElement('div');
         grid.className = 'filter-checkbox-grid';
@@ -14491,16 +14658,40 @@ const _NetworkPlus = (function () {
         }
         for (const code of [...codes].sort((a, b) => a - b)) {
           const codeStr = String(code);
-          const checked = include[codeStr] !== false;
+          const checked = evaluateFilterRule(codeStr, draft, true);
           const cb = createCheckboxItem(codeStr, checked, (event) => {
-            if (event.currentTarget.checked) delete include[codeStr];
-            else include[codeStr] = false;
-            state.columnFilterRules[colId] = { mode: 'statusSet', include: Object.assign({}, include) };
-            onChange();
+            const checkedByDefault = !draft.excludedFamilies.includes(familyKey);
+            if (event.currentTarget.checked === checkedByDefault) delete include[codeStr];
+            else include[codeStr] = event.currentTarget.checked;
+            save();
           });
           cb.className = 'filter-checkbox-inline';
           grid.appendChild(cb);
         }
+        const actions = document.createElement('div');
+        actions.className = 'filter-status-actions';
+        const categoryName = cat.family ? familyKey + ' ' + description.textContent : description.textContent;
+        for (const checked of [true, false]) {
+          const action = document.createElement('button');
+          action.type = 'button';
+          action.className = 'filter-clear-btn filter-status-action';
+          action.dataset.statusBulk = checked ? 'all' : 'none';
+          action.textContent = uiText(checked ? 'filterSelectAll' : 'filterDeselectAll');
+          action.setAttribute('aria-label', uiTextFormat(checked ? 'filterSelectFamily' : 'filterDeselectFamily', {
+            family: categoryName,
+          }));
+          action.addEventListener('click', () => {
+            draft.excludedFamilies = draft.excludedFamilies.filter((key) => key !== familyKey);
+            if (!checked) draft.excludedFamilies.push(familyKey);
+            for (const value of Object.keys(include)) {
+              if (classifyStatusClass(Number(value)) === familyKey) delete include[value];
+            }
+            for (const checkbox of grid.querySelectorAll('input[type="checkbox"]')) checkbox.checked = checked;
+            save();
+          });
+          actions.appendChild(action);
+        }
+        heading.appendChild(actions);
         row.appendChild(grid);
         wrap.appendChild(row);
       }
@@ -14717,21 +14908,35 @@ const _NetworkPlus = (function () {
     return countActiveColumnFilters(state.columnFilterRules);
   }
 
+  function createFilterPopupHeader(title) {
+    const header = document.createElement('div');
+    header.className = 'filter-popup-header';
+    const heading = document.createElement('h2');
+    heading.id = 'columnFilterTitle';
+    heading.textContent = title;
+    header.appendChild(heading);
+    return header;
+  }
+
   function createFilterPopupContent(onChange) {
     const root = document.createElement('div');
     root.className = 'filter-popup-body';
 
-    const header = document.createElement('div');
-    header.className = 'filter-popup-header';
-    header.textContent = uiTextFormat('analysisColumnFilters', { count: getActiveFilterCount() });
+    const header = createFilterPopupHeader(uiText('analysisColumnFilters'));
+    const counter = document.createElement('span');
+    counter.className = 'filter-popup-count';
+    header.appendChild(counter);
     root.appendChild(header);
 
     const list = document.createElement('div');
     list.className = 'filter-popup-list';
 
     const refreshHeader = () => {
-      header.textContent = uiTextFormat('analysisColumnFilters', { count: getActiveFilterCount() });
+      const count = getActiveFilterCount();
+      counter.textContent = uiTextFormat('analysisColumnFilterCount', { count });
+      counter.classList.toggle('is-active', count > 0);
     };
+    refreshHeader();
     const debouncedOnChange = debounce(onChange, FILTER_DEBOUNCE_MS);
     for (const col of state.columns) {
       if (isVisualOnlyColumn(col.id)) continue;
@@ -14743,7 +14948,6 @@ const _NetworkPlus = (function () {
       toggle.className = 'filter-section-toggle';
       const caret = document.createElement('span');
       caret.className = 'filter-section-caret';
-      caret.textContent = '▸';
       caret.setAttribute('aria-hidden', 'true');
       const name = document.createElement('span');
       name.className = 'filter-section-name';
@@ -14755,7 +14959,9 @@ const _NetworkPlus = (function () {
       toggle.appendChild(activeBadge);
 
       const body = document.createElement('div');
+      body.id = 'filter-section-' + col.id;
       body.className = 'filter-section-body';
+      toggle.setAttribute('aria-controls', body.id);
 
       const refreshBadge = () => {
         activeBadge.textContent = isRuleActive(state.columnFilterRules[col.id]) ? uiText('analysisColumnFilterActive') : '';
@@ -14797,15 +15003,16 @@ const _NetworkPlus = (function () {
     const col = state.columns.find((c) => c.id === colId);
     if (!col || isVisualOnlyColumn(colId)) return root;
 
-    const header = document.createElement('div');
-    header.className = 'filter-popup-header';
-    header.textContent = col.label + ' Filter';
-    root.appendChild(header);
+    root.appendChild(createFilterPopupHeader(
+      uiTextFormat('analysisSingleColumnFilter', { column: menuColumnLabel(col.id, col.label) }),
+    ));
 
     const debouncedOnChange = debounce(onChange, FILTER_DEBOUNCE_MS);
     const control = createColumnFilterControl(colId, debouncedOnChange);
-    control.style.marginTop = '8px';
-    root.appendChild(control);
+    const body = document.createElement('div');
+    body.className = 'filter-popup-single-rule';
+    body.appendChild(control);
+    root.appendChild(body);
 
     return root;
   }
@@ -14864,12 +15071,32 @@ const _NetworkPlus = (function () {
 
   function planWsMessageJson(text, truncated = false) {
     if (text.length > WS_INLINE_JSON_LIMIT) return null;
-    let payload = text.trimStart();
-    // Engine.IO's message marker plus Socket.IO event/acknowledgement,
-    // optionally followed by a namespace and acknowledgement ID.
-    const envelope = /^4[23](?:\/[^,\r\n]*,)?\d*(?=\[)/.exec(payload)?.[0] || '';
-    if (envelope) payload = payload.slice(envelope.length);
-    if (!/^[[{]/.test(payload) || (!truncated && !isWsJson(payload))) return null;
+    const separator = '\u001e';
+    if (!text.includes(separator)) return planWsJsonRecord(text, truncated);
+    const records = text.split(separator);
+    if (records.length > 17 || (!truncated && records.at(-1) !== '')) return null;
+    if (records.at(-1) === '') records.pop();
+    const formatted = [];
+    let length = 0;
+    let tail = '';
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      if (!record.trimStart().startsWith('{')) return null;
+      const recordTruncated = truncated && index === records.length - 1 && !text.endsWith(separator);
+      const json = planWsJsonRecord(record, recordTruncated);
+      if (!json) return null;
+      tail = json.tail;
+      length += json.formatted.length + tail.length + (index ? 2 : 0);
+      if (length > WS_INLINE_JSON_LIMIT) return null;
+      formatted.push(json.formatted);
+    }
+    return { envelope: '', formatted: formatted.join('\n\n'), tail };
+  }
+
+  function planWsJsonRecord(text, truncated) {
+    const json = splitWsJsonRecord(text);
+    if (!json || (!truncated && !isWsJson(json.payload))) return null;
+    const { payload, envelope } = json;
 
     // JSON strings exclude unescaped U+0000–U+001F, even in a partial token.
     // eslint-disable-next-line no-control-regex
@@ -14935,22 +15162,29 @@ const _NetworkPlus = (function () {
     return { envelope, formatted, tail };
   }
 
+  function getWsMessageDisplayText(text, truncated) {
+    if (!text.includes('\\u')) return text;
+    const json = planWsMessageJson(text, truncated);
+    if (!json) return text;
+    const start = text.length - text.trimStart().length + json.envelope.length;
+    return text.slice(0, start) + decodeWsJsonDisplayEscapes(text.slice(start));
+  }
+
   function renderWsMessageJson(target, json) {
     target.replaceChildren();
     target.dataset.format = 'json';
     if (json.envelope) target.append(document.createTextNode(json.envelope + '\n'));
-    appendJsonHighlight(target, json.formatted);
-    if (json.tail) target.append(document.createTextNode(json.tail));
+    appendJsonHighlight(target, decodeWsJsonDisplayEscapes(json.formatted));
+    if (json.tail) target.append(document.createTextNode(decodeWsJsonDisplayEscapes(json.tail)));
   }
 
   let wsFullSavePending = false;
   let wsFullViewPending = false;
-  async function readWsFullMessage(row, frame, isOpen = () => true) {
-    const isCurrent = () => state.selectedRow === row && !row._retentionDisposed && isOpen();
+  async function readWsCapturedText(row, frame, isCurrent, entry) {
     const deadline = Date.now() + WS_FULL_TEXT_READ_TIMEOUT_MS;
     if (Number.isInteger(frame.fullIndex)) {
       const readEntry = row._readWsHarEntry || row._readImportedHarEntry;
-      const entry = await readEntry(() => isCurrent() && Date.now() < deadline, frame);
+      if (!entry) entry = await readEntry(() => isCurrent() && Date.now() < deadline, frame);
       const message = entry._webSocketMessages?.[frame.fullIndex];
       const content = message?.data;
       if (!isCurrent() || message?.type !== frame.type || getHarWsTime(message) !== frame.time ||
@@ -14974,6 +15208,102 @@ const _NetworkPlus = (function () {
     // Join before UTF-8 encoding so that a surrogate pair split across two
     // bounded chunks still becomes the original character.
     return parts.join('');
+  }
+
+  function readWsFullMessage(row, frame, isOpen = () => true) {
+    return readWsCapturedText(row, frame, () => state.selectedRow === row && !row._retentionDisposed && isOpen());
+  }
+
+  async function findFullWsMatches(row, frames, query, current, signal) {
+    const matches = new Map();
+    const checked = new Set();
+    const search = createPayloadSearcher(signal);
+    const { regex } = compileSearchQuery(query);
+    const aliases = Array.from(query).some(character => character.charCodeAt(0) > 127);
+    const readEntry = row._readWsHarEntry || row._readImportedHarEntry;
+    let entry = null;
+    let generation = null;
+    try {
+      const anchor = frames.findLast(frame => Number.isInteger(frame.fullIndex));
+      if (anchor && readEntry) {
+        try {
+          entry = await readEntry(current, anchor);
+          generation = anchor.fullGeneration;
+        } catch (_error) {
+          // A navigation or a replaced archive can expire all references.
+        }
+      }
+      for (const frame of frames) {
+        if (!current()) break;
+        if (Number.isInteger(frame.fullIndex) ? !entry || frame.fullGeneration !== generation : !frame.fullId || !row._readWsFullFrame) continue;
+        try {
+          const raw = await readWsCapturedText(row, frame, current, entry);
+          if (!current()) break;
+          const hit = (await search.scan(raw, [regex], frame.data.length, aliases))?.[0];
+          if (!current() || !hit) continue;
+          checked.add(frame.id);
+          if (hit.hits.length) matches.set(frame.id, hit.hits[0]);
+        } catch (_error) {
+          // Leave this frame counted as only partially searchable.
+        }
+      }
+      return { matches, checked };
+    } finally {
+      search.close();
+    }
+  }
+
+  function wsFrameMatchesPreview(frame, displayText, query) {
+    return !frame.binary && (frame.data.toLowerCase().includes(query) ||
+      (displayText !== frame.data && displayText.toLowerCase().includes(query)));
+  }
+
+  function syncWsFullSearch(view, frames, query, remote) {
+    const key = query && view.direction + '\n' + query;
+    if (view.fullSearch?.key !== key) {
+      view.fullSearch?.controller.abort();
+      view.fullSearch = key ? {
+        key, controller: new AbortController(), checked: new Set(), attempted: new Set(), matches: new Map(), running: false,
+      } : null;
+    }
+    const job = view.fullSearch;
+    if (!job) return;
+    const ids = new Set(frames.map(frame => frame.id));
+    for (const id of job.attempted) {
+      if (ids.has(id)) continue;
+      job.attempted.delete(id);
+      job.checked.delete(id);
+      job.matches.delete(id);
+    }
+    const candidates = frames.filter(frame => frame.truncated &&
+      (view.direction === 'all' || frame.type === view.direction) &&
+      !wsFrameMatchesPreview(frame, view.items.get(frame.id)?.displayText ?? frame.data, query));
+    view.searchPartial = candidates.some(frame => !job.checked.has(frame.id));
+    const unsearched = candidates.filter(frame => !job.attempted.has(frame.id));
+    if ((remote && !view.row._mirrorSearchWs) || job.running || !unsearched.length) return;
+    const current = () => wsMessagesView === view && view.fullSearch === job && !job.controller.signal.aborted &&
+      $('#ws-message-query').value.trim().toLowerCase() === query && !view.row._retentionDisposed;
+    job.running = true;
+    const run = async () => {
+      try {
+        if (!current()) return;
+        const result = remote
+          ? await view.row._mirrorSearchWs(query, unsearched.map(frame => frame.id), job.controller.signal)
+          : await findFullWsMatches(view.row, unsearched, query, current, job.controller.signal);
+        if (!current()) return;
+        for (const id of result?.checked || []) job.checked.add(id);
+        for (const [id, hit] of result?.matches || []) job.matches.set(id, hit);
+      } catch (_error) {
+        // Preserve all preview matches even if the full source is unavailable.
+      } finally {
+        job.running = false;
+        if (current()) {
+          for (const frame of unsearched) job.attempted.add(frame.id);
+          renderWsMessages(view.row);
+        }
+      }
+    };
+    setTimeout(run, FILTER_DEBOUNCE_MS);
   }
 
   function requestWsFullMessageSave(row, frame, trigger) {
@@ -15001,7 +15331,7 @@ const _NetworkPlus = (function () {
     });
   }
 
-  function createWsMessage(frame, row) {
+  function createWsMessage(frame, row, displayText) {
     const item = document.createElement('li');
     item.className = 'ws-message';
     item.dataset.direction = frame.type;
@@ -15023,7 +15353,7 @@ const _NetworkPlus = (function () {
     const body = frame.binary
       ? frame.bytes == null ? uiText('wsMessageBinary') : uiTextFormat('wsMessageBinarySize', { size: fmtBytes(frame.bytes) })
       : frame.data || uiText('wsMessageEmpty');
-    const preview = body.replace(/\s+/g, ' ').trim();
+    const preview = (displayText || body).replace(/\s+/g, ' ').trim();
     const excerpt = preview.match(/^.{0,120}/u)[0];
     const snippet = document.createElement('span');
     snippet.className = 'ws-message-snippet';
@@ -15122,6 +15452,7 @@ const _NetworkPlus = (function () {
   }
 
   function resetWsMessagesView() {
+    wsMessagesView?.fullSearch?.controller.abort();
     wsMessagesView = null;
     const pane = $('#ws-timeline-scroll');
     pane.querySelector('ol').replaceChildren();
@@ -15146,9 +15477,12 @@ const _NetworkPlus = (function () {
     const currentIndex = view.matches.indexOf(view.currentMatch);
     const results = $('#ws-message-results');
     const text = !view.searchReady || !hasQuery ? ''
+      : view.fullSearch?.running && !count ? uiText('payloadSearchRunning')
       : currentIndex < 0 ? uiTextFormat('wsSearchResultCount', { count })
       : uiTextFormat('wsSearchResultPosition', { position: currentIndex + 1, count });
-    if (results.textContent !== text) results.textContent = text;
+    const notice = hasQuery && !view.fullSearch?.running && view.searchPartial ? uiText('payloadSearchPartial') : '';
+    const displayed = [text, notice].filter(Boolean).join(' · ');
+    if (results.textContent !== displayed) results.textContent = displayed;
     $('#ws-message-prev').disabled = $('#ws-message-next').disabled = !view.searchReady || !hasQuery || count === 0;
   }
 
@@ -15190,23 +15524,44 @@ const _NetworkPlus = (function () {
       button.setAttribute('aria-pressed', String(button.dataset.wsDirection === view.direction));
     }
     const ids = new Set(frames.map((frame) => frame.id));
-    for (const [id, item] of view.items) {
+    for (const [id, { item }] of view.items) {
       if (ids.has(id)) continue;
       if (item.contains(document.activeElement)) panel.focus({ preventScroll: true });
       item.remove();
       view.items.delete(id);
     }
-    view.matches = [];
-    let next = list.firstElementChild;
     const ordered = frames.slice().sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity) || a.id - b.id);
     for (const frame of ordered) {
-      let item = view.items.get(frame.id);
-      if (!item) {
-        item = createWsMessage(frame, row);
-        view.items.set(frame.id, item);
+      if (!view.items.has(frame.id)) {
+        const displayText = frame.binary ? '' : getWsMessageDisplayText(frame.data, frame.truncated);
+        view.items.set(frame.id, { item: createWsMessage(frame, row, displayText), displayText });
+      }
+    }
+    view.searchPartial = false;
+    syncWsFullSearch(view, ordered, query, remote);
+    view.matches = [];
+    let next = list.firstElementChild;
+    for (const frame of ordered) {
+      const rendered = view.items.get(frame.id);
+      const { item, displayText } = rendered;
+      const hit = view.fullSearch?.matches.get(frame.id);
+      if (rendered.fullHit !== hit) {
+        rendered.fullHit = hit;
+        rendered.excerpt?.remove();
+        rendered.excerpt = null;
+        if (hit) {
+          const excerpt = document.createElement('p');
+          excerpt.className = 'ws-message-search-excerpt';
+          const mark = document.createElement('mark');
+          mark.textContent = hit.match;
+          excerpt.append(uiTextFormat('payloadSearchOffset', { offset: (hit.offset + 1).toLocaleString(activeLanguage) }) + ' — ',
+            hit.before, mark, hit.after);
+          item.querySelector('details').appendChild(excerpt);
+          rendered.excerpt = excerpt;
+        }
       }
       const matches = (view.direction === 'all' || frame.type === view.direction) &&
-        (!query || (!frame.binary && frame.data.toLowerCase().includes(query)));
+        (!query || hit || wsFrameMatchesPreview(frame, displayText, query));
       if (!matches && item.contains(document.activeElement)) panel.focus({ preventScroll: true });
       item.hidden = !matches;
       if (matches) view.matches.push(item);
@@ -15217,7 +15572,7 @@ const _NetworkPlus = (function () {
     $('#ws-timeline-header').hidden = view.matches.length === 0;
     const empty = $('#ws-message-empty');
     const restoreFocus = empty.contains(document.activeElement);
-    empty.hidden = !view.searchReady || !hasFilters || view.matches.length > 0;
+    empty.hidden = !view.searchReady || !hasFilters || view.fullSearch?.running || view.matches.length > 0;
     if (empty.hidden && restoreFocus) {
       const target = $('#ws-message-find-row').hidden ? directions.find((button) => button.dataset.wsDirection === view.direction) : input;
       target?.focus({ preventScroll: true });
@@ -15355,7 +15710,13 @@ const _NetworkPlus = (function () {
       button.tabIndex = active ? 0 : -1;
     }
     if (showMessages) renderWsMessages(row);
-    else if (wasShowingMessages && row && resyncInspectorSplit) resyncInspectorSplit();
+    else if (wasShowingMessages) {
+      if (wsMessagesView?.fullSearch?.running) {
+        wsMessagesView.fullSearch.controller.abort();
+        wsMessagesView.fullSearch = null;
+      }
+      if (row && resyncInspectorSplit) resyncInspectorSplit();
+    }
     return showMessages;
   }
 
@@ -16272,8 +16633,126 @@ const _NetworkPlus = (function () {
 
   // Update search match state without triggering re-render.
   // Called from renderBody() so new rows are included in search.
+  function syncFullResponseSearch(srch) {
+    const queries = srch.keywords.map((kw) => isApplicableSearchKeyword(kw, srch.options) ? kw.query : '');
+    const key = srch.scope.resBody && queries.some(Boolean) ? JSON.stringify([queries, srch.options]) : '';
+    if (srch.fullResponses?.key !== key) {
+      srch.fullResponses?.controller.abort();
+      srch.fullResponses = key ? {
+        key, controller: new AbortController(), attempted: new WeakSet(), searched: new WeakSet(), matches: new WeakMap(),
+        running: false,
+      } : null;
+    }
+    const job = srch.fullResponses;
+    if (!job || job.running) return;
+    const rows = state.filteredRows.filter((row) => !job.attempted.has(row) &&
+      !row._pendingRequest && row.responseContentState !== 'cached' &&
+      (row._responseSearchSource || typeof row._reqObj?.getContent === 'function' || row._mirrorSearchResponse));
+    if (!rows.length) return;
+    const options = { ...srch.options };
+    const rules = queries.filter(Boolean).map(query => compileSearchQuery(query, options).regex);
+    const current = () => srch.fullResponses === job && !job.controller.signal.aborted &&
+      srch.scope.resBody && srch.keywords.every((kw, i) =>
+        (isApplicableSearchKeyword(kw, srch.options) ? kw.query : '') === queries[i]) &&
+      srch.keywords.length === queries.length && JSON.stringify(srch.options) === JSON.stringify(options);
+    job.running = true;
+    // Batch archive lookups by File. Re-reading from byte zero per request is
+    // quadratic for large captures, especially when the body cache has evicted rows.
+    const run = async () => {
+      const search = createPayloadSearcher(job.controller.signal);
+      const applyResult = (row, result) => {
+        if (!current() || row._retentionDisposed) return;
+        job.attempted.add(row);
+        if (!result) return;
+        job.searched.add(row);
+        let index = 0;
+        const matches = new Set();
+        for (let i = 0; i < queries.length; i++) {
+          if (queries[i] && result[index++]) matches.add(i);
+        }
+        if (matches.size) job.matches.set(row, matches);
+      };
+      const scan = async (row, payload) => {
+        if (!current() || row._retentionDisposed) return;
+        try {
+          const result = row._mirrorSearchResponse
+            ? await row._mirrorSearchResponse(queries.filter(Boolean), options, null, job.controller.signal)
+            : await search.scan(payload ? getSearchableResponseText(row, payload) : await readSearchableResponse(row, current), rules);
+          applyResult(row, result);
+        } catch (_error) {
+          applyResult(row, null);
+        }
+      };
+      const archives = new Map();
+      try {
+        for (const row of rows) {
+          if (!current()) return;
+          const source = row._responseSearchSource;
+          if (source) {
+            if (!archives.has(source.file)) archives.set(source.file, []);
+            archives.get(source.file).push(row);
+          } else {
+            await scan(row);
+          }
+        }
+        for (const [file, group] of archives) {
+          if (!current()) return;
+          try {
+            if (group[0]._responseSearchSource.id) {
+              const entries = await extractBoundedSazEntries(window.fflate, new Uint8Array(await file.arrayBuffer()));
+              for (const row of group) {
+                if (!current()) return;
+                const { id } = row._responseSearchSource;
+                const entry = createSazHarEntry(entries.get('raw/' + id + '_c.txt'), entries.get('raw/' + id + '_s.txt'), row.startedDateTime);
+                await scan(row, { content: entry.response.content?.text, encoding: entry.response.content?.encoding });
+              }
+            } else {
+              const wanted = new Map(group.map(row => [row._responseSearchSource.index, row]));
+              const queued = [];
+              let index = 0;
+              async function* chunks() {
+                for await (const chunk of file.stream()) {
+                  if (!current() || !wanted.size) return;
+                  yield chunk;
+                  for (const [row, content] of queued.splice(0)) {
+                    await scan(row, { content: content?.text, encoding: content?.encoding });
+                  }
+                }
+              }
+              await readHarEntries(chunks(), (entry) => {
+                const at = index++;
+                const row = wanted.get(at);
+                if (row) {
+                  wanted.delete(at);
+                  queued.push([row, entry.response.content]);
+                }
+              }, (index) => wanted.has(index) ? HAR_REREAD_RESPONSE_TEXT_CHARS : 0).catch((error) => {
+                if (current() && wanted.size) throw error;
+              });
+              for (const [row, content] of queued) {
+                await scan(row, { content: content?.text, encoding: content?.encoding });
+              }
+            }
+          } catch (_error) {
+            for (const row of group) job.attempted.add(row);
+          }
+          for (const row of group) job.attempted.add(row);
+        }
+      } finally {
+        search.close();
+        job.running = false;
+        if (current()) {
+          renderBody();
+          syncSearchUIAfterRender();
+        }
+      }
+    };
+    setTimeout(run, 0);
+  }
+
   function refreshSearchMatches() {
     const srch = state.search;
+    syncFullResponseSearch(srch);
     const activeKws = srch.keywords.filter((kw) => isApplicableSearchKeyword(kw, srch.options));
     const previousMatches = srch.matches;
     const previousIndex = srch.currentIndex;
@@ -16298,7 +16777,7 @@ const _NetworkPlus = (function () {
       }
       const kwMatches = [];
       for (const row of sorted) {
-        if (deepSearchMatch(row, kw.query, srch.scope, srch.options)) {
+        if (deepSearchMatch(row, kw.query, srch.scope, srch.options) || srch.fullResponses?.matches.get(row)?.has(ki)) {
           matchSet.add(row);
           if (!srch.rowColors.has(row)) srch.rowColors.set(row, new Set());
           if (!srch.rowKeywords.has(row)) srch.rowKeywords.set(row, new Set());
@@ -16646,6 +17125,17 @@ const _NetworkPlus = (function () {
       return [operator?.label || op, value].filter(Boolean).join(' ');
     };
     if (rule.conditions) return rule.conditions.map(describeCondition).filter(Boolean).join(' · ');
+    if (rule.mode === 'statusSet') {
+      const families = Array.isArray(rule.excludedFamilies)
+        ? rule.excludedFamilies.filter((key) => STATUS_CLASS_KEYS.includes(key)) : [];
+      const entries = Object.entries(rule.include || {});
+      const excluded = families.map((key) => key === 'other' ? uiText('analysisStatusOther') : key)
+        .concat(entries.filter(([, included]) => included === false).map(([code]) => code));
+      const restored = entries.filter(([code, included]) => included === true && families.includes(classifyStatusClass(Number(code))))
+        .map(([code]) => code);
+      return [excluded.length && '≠ ' + excluded.join(', '), restored.length && '+ ' + restored.join(', ')]
+        .filter(Boolean).join(' · ');
+    }
     if (rule.include) {
       const excluded = Object.keys(rule.include).filter((key) => rule.include[key] === false);
       return excluded.length ? '≠ ' + excluded.join(', ') : '';
@@ -16679,9 +17169,9 @@ const _NetworkPlus = (function () {
     const timeline = $('#overviewTimeline');
     const waterfall = $('#overviewWaterfall');
     const requests = $('#overviewRequests');
-    const pager = $('#overviewPager');
-    const previousPage = $('#overviewPreviousPage');
-    const nextPage = $('#overviewNextPage');
+    const ruler = waterfall.querySelector('.overview-ruler');
+    const requestCount = $('#overviewRequestCount');
+    const noDisplayedRequests = $('#overviewNoDisplayed');
     const timeBounds = $('#overviewTimeBounds');
     const instructions = $('#overviewInstructions');
     const readout = $('#overviewTimeReadout');
@@ -16698,9 +17188,9 @@ const _NetworkPlus = (function () {
     let anchor = null;
     let chart = null;
     let distribution = null;
-    let requestPage = 0;
-    let lastPage = 0;
-    let visibleRequests = [];
+    let requestRows = [];
+    let requestScale = null;
+    let requestFrame = null;
     let drag = null;
     let ignorePointerClick = false;
     let drawnRange = null;
@@ -16715,11 +17205,12 @@ const _NetworkPlus = (function () {
       timeline.appendChild(button);
       return button;
     });
-    const lanes = Array.from({ length: OVERVIEW_PAGE_SIZE }, (_, index) => {
+    const lanes = Array.from({ length: OVERVIEW_ROW_POOL }, () => {
       const item = document.createElement('li');
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'overview-request';
+      button.tabIndex = -1;
       const name = document.createElement('span');
       name.className = 'overview-request-name';
       const track = document.createElement('span');
@@ -16737,13 +17228,16 @@ const _NetworkPlus = (function () {
       button.append(name, track, info);
       item.append(button);
       requests.append(item);
-      button.addEventListener('click', () => {
-        const row = visibleRequests[index]?.row;
-        if (!row || !getVisibleRows().includes(row)) return;
-        selectRow(row, null, true);
+      const lane = { item, button, name, bar, status, time, row: null, index: 0 };
+      let pressedRow = null;
+      button.addEventListener('pointerdown', () => { pressedRow = lane.row; });
+      button.addEventListener('click', (event) => {
+        const { row } = lane;
+        if (!row || (event.detail && pressedRow && pressedRow !== row) || !getVisibleRows().includes(row)) return;
+        selectRow(row, null, false);
         scrollToSelectedRow();
       });
-      return { item, button, name, bar, status, time };
+      return lane;
     });
     const latencyBands = ['<100 ms', '100–300 ms', '300 ms–1 s', '1–3 s', '≥3 s'].map((label, index) => {
       const band = document.createElement('div');
@@ -16774,25 +17268,27 @@ const _NetworkPlus = (function () {
       waterfall.style.setProperty('--overview-selection-width', (end - start) + '%');
     };
 
-    const paintRequests = (rows, range) => {
-      const page = planOverviewWaterfallPage(rows, range, requestPage);
-      requestPage = page.page;
-      lastPage = page.lastPage;
-      visibleRequests = page.entries;
-      $('#overviewNoDisplayed').hidden = page.total > 0;
-      pager.hidden = lastPage === 0;
-      previousPage.setAttribute('aria-disabled', String(requestPage === 0));
-      nextPage.setAttribute('aria-disabled', String(requestPage === lastPage));
-      const pageCount = uiTextFormat('overviewPageCount', {
-        first: page.offset + 1, last: page.offset + visibleRequests.length, total: page.total,
-      });
-      if ($('#overviewPageCount').textContent !== pageCount) $('#overviewPageCount').textContent = pageCount;
+    const focusedLane = () => lanes.find((lane) => lane.button === document.activeElement);
+    const paintRequestWindow = (scrollTop, focusId = focusedLane()?.row?.id) => {
+      const { start, end } = planOverviewRequestWindow(requestRows.length, scrollTop);
+      requests.style.paddingTop = (start * OVERVIEW_ROW_HEIGHT) + 'px';
+      requests.style.paddingBottom = ((requestRows.length - end) * OVERVIEW_ROW_HEIGHT) + 'px';
       for (let index = 0; index < lanes.length; index += 1) {
-        const { item, button, name, bar, status, time } = lanes[index];
-        const entry = visibleRequests[index];
-        item.hidden = !entry;
-        if (!entry) continue;
-        const { row, duration, statusClass } = entry;
+        const lane = lanes[index];
+        const { item, button, name, bar, status, time } = lane;
+        const rowIndex = start + index;
+        const row = requestRows[rowIndex] || null;
+        lane.row = row;
+        lane.index = rowIndex;
+        item.hidden = !row;
+        if (!row) {
+          delete button.dataset.overviewRequest;
+          continue;
+        }
+        item.setAttribute('aria-posinset', String(rowIndex + 1));
+        item.setAttribute('aria-setsize', String(requestRows.length));
+        const entry = buildOverviewRequestEntry(row, requestScale);
+        const { duration, statusClass } = entry;
         const measured = duration !== null;
         const timing = measured ? formatTimingDuration(duration) :
           uiText(row._pendingRequest ? 'analysisPending' : 'overviewUnknownDuration');
@@ -16812,6 +17308,30 @@ const _NetworkPlus = (function () {
         bar.style.setProperty('--overview-start', (entry.startsAt * 100) + '%');
         bar.style.setProperty('--overview-width', (entry.width * 100) + '%');
       }
+      if (focusId != null) {
+        const target = lanes.find((lane) => lane.row?.id === focusId)?.button || waterfall;
+        if (target !== document.activeElement) target.focus({ preventScroll: true });
+      }
+    };
+
+    const paintRequests = (rows, range, reset) => {
+      const previousTop = waterfall.scrollTop;
+      const previousIndex = Math.floor(previousTop / OVERVIEW_ROW_HEIGHT);
+      const previousOffset = previousTop - previousIndex * OVERVIEW_ROW_HEIGHT;
+      const previousRow = reset ? null : requestRows[previousIndex];
+      requestScale = range;
+      requestRows = rows.filter((row) => getOverviewStart(row) !== null)
+        .sort((first, second) => first.clientStartEpoch - second.clientStartEpoch);
+      const newIndex = previousRow ? requestRows.indexOf(previousRow) : -1;
+      const scrollTop = reset ? 0 : newIndex >= 0 ? newIndex * OVERVIEW_ROW_HEIGHT + previousOffset : previousTop;
+      const hasRequests = requestRows.length > 0;
+      noDisplayedRequests.hidden = hasRequests;
+      requestCount.hidden = !hasRequests;
+      requestCount.textContent = uiTextFormat('overviewRequestCount', { total: requestRows.length.toLocaleString() });
+      waterfall.tabIndex = hasRequests ? 0 : -1;
+      paintRequestWindow(scrollTop);
+      waterfall.scrollTop = scrollTop;
+      if (waterfall.scrollTop !== scrollTop) paintRequestWindow(waterfall.scrollTop);
     };
 
     const paint = () => {
@@ -16820,7 +17340,11 @@ const _NetworkPlus = (function () {
       toggle.disabled = state.sampleCaptureActive;
       panel.hidden = !expanded || toggle.disabled || state.rows.length === 0;
       toggle.setAttribute('aria-expanded', String(!panel.hidden));
-      if (panel.hidden) return;
+      if (panel.hidden) {
+        requestRows = [];
+        for (const lane of lanes) lane.row = null;
+        return;
+      }
 
       const focusedControl = document.activeElement;
       const focusedBin = timeline.contains(focusedControl) ? focusedControl : null;
@@ -16833,7 +17357,7 @@ const _NetworkPlus = (function () {
       distribution = computeLatencyDistribution(visible);
       const range = state.requestTimeFacet;
       if (!range) anchor = null;
-      if (range !== drawnRange) requestPage = 0;
+      const resetRequests = range !== drawnRange;
       drawnRange = range;
 
       const hasTimes = !!chart.range;
@@ -16841,7 +17365,11 @@ const _NetworkPlus = (function () {
       activeIndex = focusIndex >= 0 ? focusIndex : Math.max(0, Math.min(activeIndex, chart.bins.length - 1));
       waterfall.hidden = instructions.hidden = !hasTimes;
       $('#overviewTimeEmpty').hidden = hasTimes;
-      if (!hasTimes) pager.hidden = true;
+      if (!hasTimes) {
+        requestRows = [];
+        requestCount.hidden = true;
+        paintRequestWindow(0);
+      }
       instructions.textContent = uiText('overviewInstructions') +
         (state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options)
           ? ' ' + uiText('overviewSearchScope') : '');
@@ -16869,7 +17397,7 @@ const _NetworkPlus = (function () {
         timeBounds.children[1].textContent = formatTimingDuration(span / 2);
         timeBounds.lastElementChild.textContent = formatTimingDuration(span);
         paintSelection(range, chart.range);
-        paintRequests(visible, chart.range);
+        paintRequests(visible, chart.range, resetRequests);
       }
       const currentBin = focusedBin && hasTimes ? bins[activeIndex] : null;
       if (focusedBin && focusedBin !== currentBin) (currentBin || toggle).focus({ preventScroll: true });
@@ -16906,7 +17434,8 @@ const _NetworkPlus = (function () {
       if ([clearButton, peakButton, slowestButton].includes(focusedControl) && focusedControl.hidden) {
         (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
       }
-      if ((requests.contains(focusedControl) || pager.contains(focusedControl)) && focusedControl.closest('[hidden]')) {
+      if ((requests.contains(focusedControl) || focusedControl === waterfall) &&
+          (!hasTimes || !requestRows.length)) {
         (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
       }
     };
@@ -16919,15 +17448,30 @@ const _NetworkPlus = (function () {
       if (!extend || !anchor) anchor = { start: bin.start, end: bin.end };
       applyOverviewRange({ start: Math.min(bin.start, anchor.start), end: Math.max(bin.end, anchor.end) });
     };
-    previousPage.addEventListener('click', () => {
-      if (requestPage === 0) return;
-      requestPage -= 1;
-      repaint();
+    waterfall.addEventListener('scroll', () => {
+      if (requestFrame !== null) return;
+      requestFrame = requestAnimationFrame(() => {
+        requestFrame = null;
+        if (!panel.hidden && !waterfall.hidden) paintRequestWindow(waterfall.scrollTop);
+      });
     });
-    nextPage.addEventListener('click', () => {
-      if (requestPage === lastPage) return;
-      requestPage += 1;
-      repaint();
+    waterfall.addEventListener('keydown', (event) => {
+      if ((event.target !== waterfall && !requests.contains(event.target)) || requestRows.length === 0) return;
+      const height = Math.max(OVERVIEW_ROW_HEIGHT, waterfall.clientHeight - ruler.offsetHeight);
+      const pageSize = Math.max(1, Math.floor(height / OVERVIEW_ROW_HEIGHT));
+      const current = focusedLane();
+      const index = current?.index ?? Math.floor(waterfall.scrollTop / OVERVIEW_ROW_HEIGHT);
+      const next = {
+        ArrowUp: index - (current ? 1 : 0), ArrowDown: index + (current ? 1 : 0),
+        PageUp: index - pageSize, PageDown: index + pageSize, Home: 0, End: requestRows.length - 1,
+      }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      const destination = Math.max(0, Math.min(next, requestRows.length - 1));
+      const top = destination * OVERVIEW_ROW_HEIGHT;
+      const scrollTop = Math.min(top, Math.max(waterfall.scrollTop, top + OVERVIEW_ROW_HEIGHT - height));
+      waterfall.scrollTop = scrollTop;
+      paintRequestWindow(waterfall.scrollTop, requestRows[destination].id);
     });
     toggle.addEventListener('click', () => {
       expanded = !expanded;
@@ -17064,12 +17608,11 @@ const _NetworkPlus = (function () {
 
     const hasSample = state.sampleCaptureActive;
     const hasSearchRestriction = state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options);
-    const counts = { all: 0, '4xx': 0, '5xx': 0, pending: 0 };
+    const counts = { all: 0, '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, other: 0, pending: 0 };
     for (const row of state.requestScopeRows || state.filteredRows) {
       if (!hasSample && (!matchesRequestHostFacet(row) || !requestOverlapsRange(row, state.requestTimeFacet))) continue;
       counts.all += 1;
-      const facet = classifyRequestFacet(row);
-      if (facet !== 'all') counts[facet] += 1;
+      counts[classifyRequestFacet(row)] += 1;
     }
     for (const button of bar.querySelectorAll('[data-status-facet]')) {
       const facet = button.dataset.statusFacet;
@@ -17077,6 +17620,8 @@ const _NetworkPlus = (function () {
       button.setAttribute('aria-pressed', String(facet === (hasSample ? 'all' : state.requestStatusFacet)));
       const count = button.querySelector('.analysis-count');
       if (count.textContent !== String(counts[facet])) count.textContent = counts[facet];
+      const label = uiTextFormat('analysisStatusFacetCount', { label: button.firstElementChild.textContent, count: counts[facet] });
+      if (button.getAttribute('aria-label') !== label) button.setAttribute('aria-label', label);
     }
 
     const compare = $('#analysisCompareBtn');
@@ -17213,34 +17758,13 @@ const _NetworkPlus = (function () {
         selectedSizeEl.textContent = '';
       }
     }
-    const srch = state.search;
-    const activeKeywords = srch.keywords.filter((keyword) => isApplicableSearchKeyword(keyword, srch.options));
-    const countEl = $('#searchCount');
-    if (countEl) {
-      if (srch.matches.length === 0 && activeKeywords.length > 0) {
-        countEl.textContent = 'No matches';
-        countEl.style.color = 'var(--status-5xx-text)';
-      } else if (srch.matches.length > 0 && activeKeywords.length > 0) {
-        countEl.textContent = srch.matches.length + ' matches';
-        countEl.style.color = '';
-      } else {
-        countEl.textContent = '';
-        countEl.style.color = '';
-      }
-      const unsearchedBodies = srch.scope.resBody && activeKeywords.length > 0
-        ? countUnsearchedResponseBodies(state.filteredRows)
-        : 0;
-      if (unsearchedBodies > 0) {
-        countEl.textContent += ' · ' + unsearchedBodies + ' bodies not searched';
-      }
-      queueSearchCountAnnouncement(countEl.textContent);
-    }
+    updateListSearchStatus();
     const statsEl = $('#statsSummary');
     if (statsEl) {
       const visibleRows = getVisibleRows();
       if (visibleRows.length > 0) {
         const stats = computeStats(visibleRows);
-        renderStatsSummary(statsEl, stats, inspectFirstStatusClassRequest);
+        renderStatsSummary(statsEl, stats);
       } else {
         clearStatsSummary(statsEl);
       }
@@ -17250,6 +17774,30 @@ const _NetworkPlus = (function () {
     if (state.syncDomainSummary) state.syncDomainSummary();
     renderAnalysisBar();
     state.syncTrafficOverview?.();
+  }
+
+  function updateListSearchStatus() {
+    const srch = state.search;
+    const active = srch.keywords.some((keyword) => isApplicableSearchKeyword(keyword, srch.options));
+    const running = active && srch.fullResponses?.running;
+    const noMatches = active && !srch.matches.length;
+    const countText = !active ? '' : noMatches ? (running ? '…' : 'No matches') : srch.matches.length + ' matches';
+    const count = $('#searchCount');
+    if (count) {
+      count.textContent = countText;
+      count.style.color = noMatches && !running ? 'var(--status-5xx-text)' : '';
+    }
+    // Keep progress and incomplete-search notes out of the fixed-width count.
+    const noticeParts = [];
+    if (srch.matchesOnly && active) noticeParts.push('Showing matches only');
+    if (running) noticeParts.push(uiText('payloadSearchRunning'));
+    const unsearchedBodies = active && srch.scope.resBody
+      ? countUnsearchedResponseBodies(state.filteredRows, srch.fullResponses)
+      : 0;
+    if (unsearchedBodies > 0) noticeParts.push(unsearchedBodies + ' bodies not searched');
+    const notice = $('#searchPanelNotice');
+    if (notice) notice.textContent = noticeParts.join(' · ');
+    queueSearchCountAnnouncement([running && noMatches ? '' : countText, ...noticeParts].filter(Boolean).join(' · '));
   }
 
   function appendIncrementalRows(liveRows) {
@@ -17435,13 +17983,6 @@ const _NetworkPlus = (function () {
       'tr[data-row-id="' + state.selectedRow.id + '"]',
     );
     if (selectedTr) selectedTr.scrollIntoView({ block: 'nearest' });
-  }
-
-  function inspectFirstStatusClassRequest(statusClass) {
-    const targetRow = findFirstStatusClassRow(getVisibleSortedRows(), statusClass);
-    if (!targetRow) return;
-    selectRow(targetRow, null, true);
-    scrollToSelectedRow();
   }
 
   function render() {
@@ -18325,6 +18866,7 @@ const _NetworkPlus = (function () {
   // prose that was not captured from the network.
   function attachPaneSearch(pane, fullText, options) {
     if (!pane) return;
+    pane._cancelFullPaneSearch?.();
     const paneId = pane.id;
     const paneLabel = paneSearchLabel(paneId);
     const hiddenSource = !!(options && options.hiddenSource);
@@ -18416,6 +18958,14 @@ const _NetworkPlus = (function () {
     let truncated = false;
 
     let collapsedHits = 0;
+    let fullSearch = null;
+    let fullStatus = '';
+    let fullResults = null;
+    const cancelFullSearch = () => {
+      fullSearch?.abort();
+      fullSearch = null;
+    };
+    pane._cancelFullPaneSearch = cancelFullSearch;
 
     const updateCount = () => {
       const query = input.value.trim();
@@ -18430,6 +18980,9 @@ const _NetworkPlus = (function () {
               : '';
       if (collapsedHits > 0) {
         count.textContent += uiTextFormat('paneSearchCollapsedSuffix', { count: collapsedHits });
+      }
+      if (fullStatus && query && !errorMessage.textContent) {
+        count.textContent = [marks.length ? count.textContent : '', fullStatus].filter(Boolean).join(' · ');
       }
       expandBtn.hidden = collapsedHits === 0 || treeOwnsExpansion;
       const disabled = marks.length === 0;
@@ -18459,6 +19012,10 @@ const _NetworkPlus = (function () {
     };
 
     const runHighlight = () => {
+      cancelFullSearch();
+      fullResults?.remove();
+      fullResults = null;
+      fullStatus = '';
       searchState.query = input.value;
       clearPaneSearchHits(pane);
       marks = [];
@@ -18507,6 +19064,56 @@ const _NetworkPlus = (function () {
       } else {
         updateCount();
       }
+      if (query.trim() && !compiledError && (options?.loadFullText || options?.searchFullText)) {
+        const controller = new AbortController();
+        const current = () => !controller.signal.aborted && bar.isConnected && input.value === query;
+        fullSearch = controller;
+        fullStatus = uiText('payloadSearchRunning');
+        updateCount();
+        const search = createPayloadSearcher(controller.signal);
+        const finishFullSearch = async () => {
+          try {
+            const { regex } = compileSearchQuery(query, searchOptions);
+            const after = options.previewLength || 0;
+            const result = (options.searchFullText
+              ? await options.searchFullText([query], searchOptions, after, controller.signal)
+              : await search.scan(await options.loadFullText(current), [regex], after))?.[0];
+            if (!current()) return;
+            fullStatus = result ? '' : uiText('payloadSearchPartial');
+            if (result?.hits.length) {
+              fullResults = document.createElement('ol');
+              fullResults.className = 'pane-search-full-results';
+              fullResults.setAttribute('aria-label', uiText('payloadSearchExcerpts'));
+              for (const hit of result.hits) {
+                const entry = document.createElement('li');
+                const offset = document.createElement('span');
+                offset.className = 'pane-search-offset';
+                offset.textContent = uiTextFormat('payloadSearchOffset', { offset: (hit.offset + 1).toLocaleString(activeLanguage) });
+                const code = document.createElement('code');
+                const mark = document.createElement('mark');
+                mark.className = 'pane-search-hit';
+                mark.textContent = hit.match;
+                code.append(hit.before, mark, hit.after);
+                entry.append(offset, code);
+                fullResults.appendChild(entry);
+                marks.push(mark);
+              }
+              bar.after(fullResults);
+              truncated = truncated || result.more;
+              if (currentIndex < 0) setCurrent(0, false);
+            }
+            updateCount();
+          } catch (_error) {
+            if (current()) {
+              fullStatus = uiText('payloadSearchPartial');
+              updateCount();
+            }
+          } finally {
+            search.close();
+          }
+        };
+        finishFullSearch();
+      }
     };
     pane._paneSearchRefresh = () => {
       if (searchState.open) runHighlight();
@@ -18519,7 +19126,10 @@ const _NetworkPlus = (function () {
     };
 
     const debouncedHighlight = debounce(runHighlight, FILTER_DEBOUNCE_MS);
-    input.addEventListener('input', debouncedHighlight);
+    input.addEventListener('input', () => {
+      cancelFullSearch();
+      debouncedHighlight();
+    });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -19175,10 +19785,12 @@ const _NetworkPlus = (function () {
 
   function setResponsePaneMessage(message) {
     const body = $('#res-body');
+    body._cancelFullPaneSearch?.();
     body.textContent = '';
     body.appendChild(createResponsePreviewHeading());
     renderPaneEmptyMessage(body, message);
     const raw = $('#res-raw');
+    raw._cancelFullPaneSearch?.();
     raw.textContent = '';
     renderPaneEmptyMessage(raw, message);
   }
@@ -19355,7 +19967,26 @@ const _NetworkPlus = (function () {
       const entry = await row._readImportedHarEntry(isCurrent);
       return { content: entry.response.content?.text, encoding: entry.response.content?.encoding };
     }
+    if (row._responseSearchSource?.id) {
+      const { file, id } = row._responseSearchSource;
+      const entries = await extractBoundedSazEntries(window.fflate, new Uint8Array(await file.arrayBuffer()));
+      if (!isCurrent()) return {};
+      const entry = createSazHarEntry(entries.get('raw/' + id + '_c.txt'), entries.get('raw/' + id + '_s.txt'), row.startedDateTime);
+      return { content: entry.response.content?.text, encoding: entry.response.content?.encoding };
+    }
     return fetchRawLiveResponsePayload(row);
+  }
+
+  function getSearchableResponseText(row, { content, encoding }) {
+    if (typeof content !== 'string' || content.length > PAYLOAD_SEARCH_MAX_CHARS) return null;
+    const text = decodeResponseContent(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
+    return encoding === 'base64' && content && (!text || isUndecodableBodyText(text)) ? null : text;
+  }
+
+  async function readSearchableResponse(row, isCurrent) {
+    if (typeof row.responseContentText === 'string' && row.responseContentState === 'cached') return row.responseContentText;
+    const payload = await readFullResponseDownload(row, isCurrent);
+    return isCurrent() ? getSearchableResponseText(row, payload) : null;
   }
 
   function appendLargePayloadNotice(pane, row, messageKey, side) {
@@ -19413,10 +20044,17 @@ const _NetworkPlus = (function () {
     const canSave = canSaveLive || canSaveImported;
     const mirrorLimit = typeof row._mirrorFetchBody === 'function' &&
       (display.label === 'omitted' || /per-body cache limit/.test(display.reason));
-    if (canSave || mirrorLimit) {
+    const canSearch = typeof row._reqObj?.getContent === 'function' || canSaveImported || row._responseSearchSource?.id;
+    const canSearchViaMirror = !row._pendingRequest && row._mirrorSearchResponse;
+    if (canSearch || mirrorLimit || canSearchViaMirror) {
       for (const pane of [$('#res-body'), $('#res-raw')]) {
         const message = canSaveImported ? 'largePayloadImported' : canSaveLive ? 'largePayloadLive' : 'largePayloadMirror';
-        appendLargePayloadNotice(pane, row, message, canSave ? 'response' : '');
+        if (canSave || mirrorLimit) appendLargePayloadNotice(pane, row, message, canSave ? 'response' : '');
+        if (canSearch) {
+          attachPaneSearch(pane, '', { emptyContent: true, loadFullText: (isCurrent) => readSearchableResponse(row, isCurrent) });
+        } else if (canSearchViaMirror) {
+          attachPaneSearch(pane, '', { emptyContent: true, searchFullText: canSearchViaMirror });
+        }
       }
     }
     applyResponseTabSignals({ 'res-body': canSave || mirrorLimit ? 1 : 0, 'res-raw': canSave || mirrorLimit ? 1 : 0 });
@@ -19449,8 +20087,9 @@ const _NetworkPlus = (function () {
         { label: uiText('paneCopyFull'), onClick: (button) => requestFullClipboardAction(action, row, row.responseContent, button, labelKey) },
       ]);
     }
-    attachPaneSearch(body, preview, { emptyContent: !preview });
-    attachPaneSearch(raw);
+    const fullSearch = binary ? null : { loadFullText: () => text, previewLength: preview.length };
+    attachPaneSearch(body, preview, { ...fullSearch, emptyContent: !preview });
+    attachPaneSearch(raw, preview, fullSearch);
     applyResponseTabSignals({ 'res-body': 1, 'res-raw': 1 });
   }
 
@@ -19835,7 +20474,9 @@ const _NetworkPlus = (function () {
     } else {
       renderPaneEmptyMessage(reqBodyPane, uiText('emptyRequestBody'));
     }
-    attachPaneSearch(reqBodyPane, requestBodyPreview, { emptyContent: !requestBodyText });
+    const requestFullSearch = largeRequestBody
+      ? { loadFullText: () => requestBodyText, previewLength: requestBodyPreview.length } : null;
+    attachPaneSearch(reqBodyPane, requestBodyPreview, { ...requestFullSearch, emptyContent: !requestBodyText });
     const hasRequestBody = !!requestBodyText;
 
     // Request > Query
@@ -19928,7 +20569,7 @@ const _NetworkPlus = (function () {
     ]);
     reqRawPane.appendChild(rawReqPre);
     if (largeRequestBody) appendLargePayloadNotice(reqRawPane, row, 'largePayloadPreview', 'request');
-    attachPaneSearch(reqRawPane);
+    attachPaneSearch(reqRawPane, requestBodyPreview, requestFullSearch);
 
     // === RESPONSE TABS ===
 
@@ -21129,12 +21770,13 @@ const _NetworkPlus = (function () {
     filterPopup.style.position = 'fixed';
     filterPopup.style.display = 'none';
     filterPopup.setAttribute('role', 'dialog');
-    filterPopup.setAttribute('aria-label', 'Column filters');
+    filterPopup.setAttribute('aria-labelledby', 'columnFilterTitle');
     installPopupKeyboardSupport(filterPopup);
     document.body.appendChild(filterPopup);
 
     const openFilterPopup = (x, y, focusColId, trigger) => {
       filterPopup.textContent = '';
+      filterPopup.classList.toggle('filter-popup-compact', !!focusColId && focusColId !== 'status');
       if (focusColId) {
         filterPopup.appendChild(createSingleColumnFilterContent(focusColId, renderBody));
       } else {
@@ -21485,6 +22127,8 @@ const _NetworkPlus = (function () {
     const filterBtn = $('#filterBtn');
     let enableWsCapture = () => $('#wsCaptureBtn').click();
     let reloadWsCapture = () => {};
+    let setWsCapturePreference;
+    let setSseCapture = () => false;
     $('#wsCapturePromptBtn').addEventListener('click', () => {
       if (!$('#wsCapturePrompt').hidden) enableWsCapture();
     });
@@ -22816,7 +23460,6 @@ const _NetworkPlus = (function () {
     // ---- Unified Search Feature (multi-keyword, multi-row with per-keyword colors) ----
     const searchPanel = $('#searchPanel');
     const searchRows = $('#searchRows');
-    const searchCount = $('#searchCount');
     const searchToggleBtn = $('#searchToggleBtn');
     const searchAddBtn = $('#searchAddBtn');
     const searchScopeBtn = $('#searchScopeBtn');
@@ -23177,34 +23820,11 @@ const _NetworkPlus = (function () {
 
     function updateSearchUI() {
       const srch = state.search;
-      const activeKws = srch.keywords.filter((kw) => isApplicableSearchKeyword(kw, srch.options));
-      if (srch.matches.length === 0 && activeKws.length > 0) {
-        searchCount.textContent = 'No matches';
-        searchCount.style.color = 'var(--status-5xx-text)';
-      } else if (srch.matches.length > 0) {
-        searchCount.textContent = srch.matches.length + ' matches';
-        searchCount.style.color = '';
-      } else {
-        searchCount.textContent = '';
-        searchCount.style.color = '';
-      }
       searchMatchesOnlyToggle.checked = srch.matchesOnly === true;
       for (const optionButton of searchOptionButtons) {
         optionButton.el.setAttribute('aria-pressed', String(srch.options[optionButton.key] === true));
       }
-      // Body-search progress and mode notes live inside the search panel where
-      // they have reserved space; putting them in the top bar resized the count
-      // span continuously during capture and made the buttons jitter.
-      const unsearchedBodies = srch.scope.resBody && activeKws.length > 0
-        ? countUnsearchedResponseBodies(state.filteredRows)
-        : 0;
-      const noticeParts = [];
-      if (srch.matchesOnly && activeKws.length > 0) noticeParts.push('Showing matches only');
-      if (unsearchedBodies > 0) noticeParts.push(unsearchedBodies + ' bodies not searched');
-      const notice = $('#searchPanelNotice');
-      if (notice) notice.textContent = noticeParts.join(' · ');
-      const announcement = [searchCount.textContent, ...noticeParts].filter(Boolean).join(' · ');
-      queueSearchCountAnnouncement(announcement);
+      updateListSearchStatus();
       // Update per-keyword counts in search rows
       renderSearchRows();
     }
@@ -23319,10 +23939,12 @@ const _NetworkPlus = (function () {
           // mirror import cannot be reopened, and a chunk-built File would
           // otherwise pin an extra copy of the entire archive in memory.
           if (retainSource) {
-            row._originalHarHasBody = typeof entry.response.content.text === 'string';
+            row._originalHarHasBody = typeof entry.response.content.text === 'string' ||
+              entry.response.content._networkPlus?.reason === HAR_OVERSIZED_BODY_REASON;
             if (row._originalHarHasBody || Array.isArray(rawEntry._webSocketMessages)) {
               const entryIndex = index;
               row._readImportedHarEntry = (isCurrent) => readImportedHarEntry(file, entryIndex, isCurrent);
+              if (row._originalHarHasBody) row._responseSearchSource = { file, index: entryIndex };
             }
           }
           const availability = classifyImportedResponseContent(entry);
@@ -23420,6 +24042,7 @@ const _NetworkPlus = (function () {
             startedDateTime,
           );
           const row = buildRowFromRequest({ ...entry, overviewUnknownStart: true, overviewUnknownDuration: true }, 0);
+          row._responseSearchSource = { file, id };
           if (isWebSocketRow(row)) row._wsArchive = true;
           rows.push(row);
         }
@@ -23912,6 +24535,10 @@ const _NetworkPlus = (function () {
           new Promise((resolve, reject) => {
             viewerSession.requestBody(row.id, (error, payload) => (error ? reject(error) : resolve(payload)));
           });
+        if (viewerSession.supportsFullSearch()) {
+          row._mirrorSearchResponse = (queries, options, after, signal) =>
+            viewerSession.requestFullSearch(row.id, session, queries, options, after, null, signal);
+        }
         // Older hosts had no revision on live rows. They still distinguished
         // a capture with no observed HTTP status from a normalized HAR import.
         if (row._mirrorStreamRevision != null ||
@@ -23940,6 +24567,10 @@ const _NetworkPlus = (function () {
               (error, payload) => (error ? reject(error) : resolve(payload)),
             );
           });
+          if (viewerSession.supportsFullSearch()) {
+            row._mirrorSearchWs = (query, ids, signal) =>
+              viewerSession.requestFullSearch(row.id, session, [query], {}, null, ids, signal);
+          }
         }
         return row;
       };
@@ -24100,6 +24731,7 @@ const _NetworkPlus = (function () {
         },
       });
       const wsCaptureBtnViewer = $('#wsCaptureBtn');
+      const sseCaptureToggle = $('#sseCaptureToggle');
       // The host reports devtoolsMinimized:false when its DevTools is docked
       // and therefore stayed visible next to this tab. That duplication is
       // the one moment the undock explainer earns its interruption — once
@@ -24157,6 +24789,8 @@ const _NetworkPlus = (function () {
           wsCaptureBtnViewer.textContent = uiText(streamEnabled ? 'wsCaptureOn' : 'wsCaptureOff');
           wsCaptureBtnViewer.setAttribute('aria-pressed', streamEnabled ? 'true' : 'false');
           wsReloadCaptureAvailable = control.streamCapture.reloadSupported === true;
+          $('#sseCaptureSettings').hidden = control.streamCapture.sseSupported !== true;
+          sseCaptureToggle.checked = control.streamCapture.sseEnabled === true;
           syncWsCapturePrompt();
         }
         if (control.devtoolsMinimized === false) maybeShowUndockHint();
@@ -24174,6 +24808,9 @@ const _NetworkPlus = (function () {
       };
       enableWsCapture = () => sendViewerCommand('stream-toggle', { enabled: true }, 'Stream capture');
       reloadWsCapture = () => sendViewerCommand('stream-reload', {}, uiText('wsReloadCapture'));
+      sseCaptureToggle.addEventListener('change', () => {
+        sendViewerCommand('sse-toggle', { enabled: sseCaptureToggle.checked }, uiText('settingsSseCapture'));
+      });
       const viewerImportInput = document.createElement('input');
       viewerImportInput.type = 'file';
       viewerImportInput.accept = '.har,.saz';
@@ -24312,6 +24949,7 @@ const _NetworkPlus = (function () {
           activeMirrorPort = null;
           resendInspectedOrigin = '';
           wsCaptureBtnViewer.hidden = true;
+          $('#sseCaptureSettings').hidden = true;
           wsReloadCaptureAvailable = false;
           syncWsCapturePrompt();
           viewerSession.failPendingBodyRequests(
@@ -24466,12 +25104,16 @@ const _NetworkPlus = (function () {
                 done('Stream capture is not available in this DevTools session.');
                 return;
               }
-              if (args?.enabled !== true || !capture.enabled) $('#wsCaptureBtn').click();
-              done('');
+              if (args?.enabled === true && capture.enabled) done('');
+              else setWsCapturePreference(!capture.enabled, done);
               return;
             }
             if (name === 'stream-reload') {
               done(reloadWsCapture() ? '' : uiText('statusStreamCaptureReloadFailed'));
+              return;
+            }
+            if (name === 'sse-toggle') {
+              done(setSseCapture(args?.enabled === true) ? '' : 'SSE capture is not available in this session.');
               return;
             }
             if (name === 'resend') {
@@ -24659,7 +25301,7 @@ const _NetworkPlus = (function () {
       startMirrorReconnect();
     }
 
-    // --- Stream capture wiring (WebSocket + SSE; opt-in; DevTools sessions only) ---
+    // --- Stream capture wiring (live DevTools sessions only) ---
     const wsCaptureBtn = $('#wsCaptureBtn');
     const inspectedEval =
       typeof chrome !== 'undefined' &&
@@ -24669,16 +25311,19 @@ const _NetworkPlus = (function () {
         ? chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)
         : null;
     if (wsCaptureBtn && inspectedEval && !mirrorViewerActive && !offlineView) {
-      wsCaptureBtn.hidden = false;
       const nativeNetwork = chrome.devtools.network;
       const nativeWebSockets = typeof nativeNetwork?.getHAR === 'function';
       const inspectedPage = chrome.devtools.inspectedWindow;
-      wsReloadCaptureAvailable = typeof inspectedPage.reload === 'function';
+      const wsReloadSupported = typeof inspectedPage.reload === 'function';
       const nativeSocketRows = new Map();
       const retiredNativeSockets = new Map();
-      const streamCapture = { enabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
+      const streamCapture = { enabled: false, sseEnabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
+      const sseCaptureToggle = $('#sseCaptureToggle');
+      $('#sseCaptureSettings').hidden = false;
       const fullFrameCaptureKey = crypto.randomUUID();
       let streamDocumentGeneration = 0;
+      let sseGeneration = 0;
+      let wsPreferenceReady = false;
       let nativeCaptureCutoff = pendingCaptureCutoff;
       let nativeCapturePaused = state.paused || state.sampleCaptureActive;
       let initialNativeCaptureCutoff = nativeCapturePaused ? null : Date.now();
@@ -24701,6 +25346,7 @@ const _NetworkPlus = (function () {
       };
       state.clearWsFullFrames = () => {
         streamDocumentGeneration += 1;
+        sseGeneration += 1;
         nativeCaptureCutoff = Date.now();
         initialNativeCaptureCutoff = null;
         if (!streamCapture.enabled || nativeWebSockets) return;
@@ -24738,10 +25384,7 @@ const _NetworkPlus = (function () {
         syncWsCapturePrompt();
       };
       refreshStreamCaptureLabel = updateStreamCaptureButton;
-      const injectStreamWrappers = () => {
-        if (!nativeWebSockets) inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});
-        inspectedEval(buildSseWrapperSource(), () => {});
-      };
+      const injectWsWrapper = () => inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});
       const readFullFrame = (row, frame, offset, timeout) => new Promise((resolve, reject) => {
         const available = () => streamCapture.enabled && frame.fullGeneration === streamDocumentGeneration &&
           isActiveRetainedRow(row, state.retainedRows, state.activeRows);
@@ -25050,9 +25693,9 @@ const _NetworkPlus = (function () {
       const sseDrain = buildStreamDrainSource('__networkPlusSSE__');
       const drainStreamQueues = () => {
         const generation = streamDocumentGeneration;
-        const isCurrent = () => streamCapture.enabled && generation === streamDocumentGeneration;
-        if (!nativeWebSockets) inspectedEval(wsDrain, (result, errorInfo) => {
-          if (!isCurrent()) return;
+        const eventGeneration = sseGeneration;
+        if (!nativeWebSockets && streamCapture.enabled) inspectedEval(wsDrain, (result, errorInfo) => {
+          if (!streamCapture.enabled || generation !== streamDocumentGeneration) return;
           if (errorInfo) {
             streamEvalFailureTicks += 1;
             if (streamEvalFailureTicks === 3) {
@@ -25065,33 +25708,67 @@ const _NetworkPlus = (function () {
           streamEvalFailureTicks = 0;
           ingestDrainedStream(readDrainedStream(result), 'ws');
         });
-        inspectedEval(sseDrain, (result, errorInfo) => {
-          if (isCurrent() && !errorInfo) ingestDrainedStream(readDrainedStream(result), 'sse');
+        if (streamCapture.sseEnabled) inspectedEval(sseDrain, (result, errorInfo) => {
+          if (streamCapture.sseEnabled && eventGeneration === sseGeneration && !errorInfo) {
+            ingestDrainedStream(readDrainedStream(result), 'sse');
+          }
         });
       };
-      wsCaptureBtn.addEventListener('click', () => {
-        streamCapture.enabled = !streamCapture.enabled;
+      const syncStreamTimer = () => {
+        if (streamCapture.sseEnabled || (!nativeWebSockets && streamCapture.enabled)) {
+          if (streamCapture.timer === null) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
+        } else if (streamCapture.timer !== null) {
+          clearInterval(streamCapture.timer);
+          streamCapture.timer = null;
+        }
+      };
+      setSseCapture = (enabled) => {
+        if (streamCapture.sseEnabled === enabled) return true;
+        streamCapture.sseEnabled = enabled;
+        sseGeneration += 1;
+        sseCaptureToggle.checked = enabled;
+        if (enabled) inspectedEval(buildSseWrapperSource(), () => {});
+        else inspectedEval('window.__networkPlusSSE__?.setEnabled(false)', () => {});
+        syncStreamTimer();
+        return true;
+      };
+      sseCaptureToggle.addEventListener('change', () => setSseCapture(sseCaptureToggle.checked));
+      const setWsCapture = (enabled, announce) => {
+        if (streamCapture.enabled === enabled) return;
+        streamCapture.enabled = enabled;
         nativeCaptureCutoff = Date.now();
         streamDocumentGeneration += 1;
         streamEvalFailureTicks = 0;
         if (streamCapture.enabled) {
-          injectStreamWrappers();
           if (nativeWebSockets) pollPendingRequests();
-          if (!streamCapture.timer) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
-          setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' :
+          else injectWsWrapper();
+          if (announce) setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' :
             nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'));
         } else {
           initialNativeCaptureCutoff = null;
-          if (streamCapture.timer) {
-            clearInterval(streamCapture.timer);
-            streamCapture.timer = null;
-          }
           if (!nativeWebSockets) inspectedEval('window.__networkPlusWS__ && window.__networkPlusWS__.setEnabled(false)', () => {});
-          inspectedEval('window.__networkPlusSSE__ && window.__networkPlusSSE__.setEnabled(false)', () => {});
-          setStatus(uiText('statusStreamCaptureOff'));
+          if (announce) setStatus(uiText('statusStreamCaptureOff'));
         }
+        syncStreamTimer();
         updateStreamCaptureButton();
-      });
+      };
+      setWsCapturePreference = (enabled, onSaved) => {
+        setWsCapture(enabled, true);
+        const failed = () => {
+          const message = uiText('statusWsCapturePrefNotSaved');
+          setStatus(message, true);
+          onSaved?.(message);
+        };
+        try {
+          chrome.storage.local.set({ [WS_CAPTURE_KEY]: enabled ? 'on' : 'off' }, () => {
+            if (chrome.runtime?.lastError) failed();
+            else onSaved?.('');
+          });
+        } catch (_error) {
+          failed();
+        }
+      };
+      wsCaptureBtn.addEventListener('click', () => setWsCapturePreference(!streamCapture.enabled));
       reloadWsCapture = () => {
         if (!wsReloadCaptureAvailable || state.sampleCaptureActive) return false;
         try {
@@ -25108,9 +25785,35 @@ const _NetworkPlus = (function () {
       };
       updateStreamCaptureButton();
       mirrorStreamCaptureState = () => ({
-        supported: true, enabled: streamCapture.enabled === true, native: nativeWebSockets && streamCapture.enabled,
+        supported: wsPreferenceReady, enabled: streamCapture.enabled, native: nativeWebSockets && streamCapture.enabled,
+        sseSupported: true, sseEnabled: streamCapture.sseEnabled,
         reloadSupported: wsReloadCaptureAvailable,
       });
+      const applyWsCapturePreference = (preference) => {
+        const enabled = preference === 'on' || (preference === undefined && nativeWebSockets);
+        if (!enabled && !wsPreferenceReady) initialNativeCaptureCutoff = null;
+        wsPreferenceReady = true;
+        wsCaptureBtn.hidden = false;
+        wsReloadCaptureAvailable = wsReloadSupported;
+        setWsCapture(enabled, false);
+        updateStreamCaptureButton();
+      };
+      chrome.storage?.onChanged?.addListener?.((changes, area) => {
+        if (area === 'local' && changes[WS_CAPTURE_KEY]) applyWsCapturePreference(changes[WS_CAPTURE_KEY].newValue);
+      });
+      const loadFailed = () => {
+        if (wsPreferenceReady) return;
+        applyWsCapturePreference(null);
+        setStatus(uiText('statusWsCapturePrefUnavailable'), true);
+      };
+      try {
+        chrome.storage.local.get([WS_CAPTURE_KEY], (items) => {
+          if (chrome.runtime?.lastError) loadFailed();
+          else if (!wsPreferenceReady) applyWsCapturePreference(items?.[WS_CAPTURE_KEY]);
+        });
+      } catch (_error) {
+        loadFailed();
+      }
       if (
         chrome.devtools.network &&
         chrome.devtools.network.onNavigated &&
@@ -25124,6 +25827,7 @@ const _NetworkPlus = (function () {
               initialNativeCaptureCutoff = streamCapture.enabled ? null : Date.now();
             }
           } else streamDocumentGeneration += 1;
+          sseGeneration += 1;
           streamEvalFailureTicks = 0;
           const navigatedRows = [];
           for (const rowsByVariant of [streamCapture.socketRows, streamCapture.sseRows]) {
@@ -25135,7 +25839,8 @@ const _NetworkPlus = (function () {
             rowsByVariant.clear();
           }
           publishStreamRows(navigatedRows);
-          if (streamCapture.enabled) injectStreamWrappers();
+          if (streamCapture.enabled && !nativeWebSockets) injectWsWrapper();
+          if (streamCapture.sseEnabled) inspectedEval(buildSseWrapperSource(), () => {});
         });
       }
     }
@@ -25514,15 +26219,14 @@ const _NetworkPlus = (function () {
     retainRowsByIdentity,
     createTableRow,
     classifyStatusClass,
-    getStatusClassIndicators,
-    formatStatusClassSummary,
-    findFirstStatusClassRow,
+    classifyRequestFacet,
     renderStatsSummary,
     updateTableSummary,
     planRequestCountSummary,
     computeStats,
     computeTrafficTimeline,
-    planOverviewWaterfallPage,
+    planOverviewRequestWindow,
+    buildOverviewRequestEntry,
     computeLatencyDistribution,
     requestOverlapsRange,
     computeDomainSummary,
@@ -25610,6 +26314,7 @@ const _NetworkPlus = (function () {
     buildStreamDrainSource,
     formatWsFrameLine,
     planWsMessageJson,
+    getWsMessageDisplayText,
     appendBoundedWsText,
     ingestWsEvents,
     escapeMarkdownTableCell,

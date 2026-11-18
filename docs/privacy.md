@@ -34,6 +34,7 @@ Network+ stores only UI preferences locally:
 - The selected language for explanatory text and dialogs (System, English, or Japanese) is stored the same way. Toolbar button labels and column headers stay in English, and the choice affects display only.
 - One-time guide dismissals — currently the mirror tab's undock explainer — are stored in panel local storage as a flag.
 - Search preferences — the search scope checkboxes, the case / whole-word / regular-expression match options, and the Matches only state — are stored through `chrome.storage.local` as booleans. Search keyword text is never stored.
+- An explicit WebSocket recording choice is saved through `chrome.storage.local`. SSE recording is a session-only setting and starts off.
 - The retention setting, column order, visibility, and widths, the configured header-column name, and the domain-summary visibility flag are stored in panel local storage.
 - The saved view preset stores column visibility and filter-rule values entered by the user. It does not store captured request or response records, headers, or bodies, but a user-entered filter value can itself contain text such as a domain or path.
 
@@ -43,7 +44,7 @@ Search results, selected rows, captured request records, headers, and bodies are
 
 The DevTools panel holds its working set in memory. Request rows are retained without a count limit by default. The Settings dialog explains the memory cost and lets users set a limit from 100 to 100,000 rows. The shared HTTP response cache keeps up to 1 MiB per body and 32 MiB in total. Old requests or bodies can be evicted when limits are reached.
 
-Live WebSocket capture keeps recent long text messages in the inspected page's memory, up to 8 Mi UTF-16 code units. This makes it possible to save complete messages while showing short previews in the panel. Stopping or clearing the capture, starting a new capture session, and leaving the inspected document release the retained text. Newer messages can also evict older ones. If the panel closes without clearing the capture, the page can retain the text until the document or capture session changes.
+Live Network+ in Chrome and Edge reads WebSocket messages from the inspected tab's DevTools log by default while recording is running. Turning WebSocket capture off stops collecting messages and is remembered. The extension does not record offline or in the background. Where DevTools does not provide its network log, the explicitly enabled fallback can keep recent long text in the inspected page's memory, up to 8 Mi UTF-16 code units. Stopping or clearing that capture, starting a new capture session, or leaving the document releases that text. If the panel closes without clearing fallback capture, the page can retain the text until the document or capture session changes.
 
 `Clear` removes the current working set from the panel and keeps one bounded Undo snapshot for up to 10 seconds. Retention pressure can release some or all of that snapshot earlier. After the Undo window expires, Network+ releases the retained snapshot. Closing DevTools ends the in-memory panel session. Clear and closing DevTools do not delete files the user already downloaded or text the user already placed on the system clipboard.
 
