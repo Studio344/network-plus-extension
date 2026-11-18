@@ -262,6 +262,43 @@ describe('incremental HAR reader', () => {
     await expect(np.readHarEntries(chunks('{"log":{"entries":[]}}'), () => {})).resolves.toBe(0);
   });
 
+  test('indexes original UTF-8 spans and opens a late entry without rereading the prefix', async () => {
+    const first = JSON.stringify(entry);
+    const second = JSON.stringify({ request: { url: 'https://example.test/雪\ufffd' }, response: { content: { text: '🚀' } } });
+    const prefix = '\ufeff{"前":"🎵","log":{"entries":[ ';
+    const separator = ', \r\n';
+    const bytes = encoder.encode(prefix + first + separator + second + ']}}');
+    const byteIndex = { usable: true };
+    const ranges = [];
+    await np.readHarEntries(chunks(bytes, 1), (_entry, _chars, _nodes, range) => ranges.push(range), undefined, byteIndex);
+    const secondStart = encoder.encode(prefix + first + separator).length;
+    const range = [secondStart, secondStart + encoder.encode(second).length];
+    expect(byteIndex.usable).toBe(true);
+    expect(ranges).toEqual([[encoder.encode(prefix).length, encoder.encode(prefix + first).length], range]);
+
+    const file = {
+      size: bytes.length,
+      stream() { throw new Error('Archived read opened the whole file'); },
+      slice: jest.fn((firstByte, pastLastByte) => ({ stream: () => chunks(bytes.slice(firstByte, pastLastByte), 2) })),
+    };
+    await expect(np.readImportedHarEntry(file, 1, undefined, range)).resolves.toEqual(JSON.parse(second));
+    expect(file.slice).toHaveBeenCalledTimes(1);
+    expect(file.slice).toHaveBeenCalledWith(...range);
+  });
+
+  test('keeps the old sequential reader available when the decoder may have replaced bytes', async () => {
+    const malformed = Buffer.concat([
+      Buffer.from('{"log":{"entries":[{"request":{"url":"'), Buffer.from([0xff]),
+      Buffer.from('"},"response":{}}]}}'),
+    ]);
+    const byteIndex = { usable: true };
+    const entries = [];
+    await np.readHarEntries(chunks(malformed, 1), (row) => entries.push(row), undefined, byteIndex);
+    expect(byteIndex.usable).toBe(false);
+    expect(entries).toEqual([{ request: { url: '\ufffd' }, response: {} }]);
+    await expect(np.readImportedHarEntry({ stream: () => chunks(malformed) }, 0)).resolves.toEqual(entries[0]);
+  });
+
   test.each([
     '', ' ', '{}', '[]', 'null', '{"log":[]}', '{"log":{}}', '{"log":{"entries":{}}}',
     '{"log":{"entries":[null]}}', '{"log":{"entries":[{}]}}',
@@ -2613,6 +2650,61 @@ describe('capture retention helpers', () => {
       { responseContentState: 'omitted' },
       { responseContentState: 'evicted' },
     ])).toBe(2);
+  });
+
+  test('shows pending, unavailable, over-budget and timed-out bodies separately', () => {
+    const timeout = { responseContentState: 'error' };
+    const found = { responseContentState: 'evicted' };
+    const binary = { responseContentState: 'omitted' };
+    const cachedBinary = {
+      responseContentState: 'cached',
+      responseContentEncoding: 'base64',
+      responseContent: 'AP8=',
+      responseContentText: '\u0000\ufffd',
+    };
+    const rows = [
+      { responseContentState: 'cached' },
+      { responseContentState: 'omitted' },
+      { responseContentState: 'unavailable' },
+      { responseContentState: 'not-loaded', _pendingRequest: true },
+      { responseContentState: 'evicted', _responseSearchSource: { index: 1 } },
+      found, timeout, binary, cachedBinary,
+    ];
+    const search = { searched: new WeakSet([found]), reasons: new WeakMap([[timeout, 'timeout'], [binary, 'binary']]) };
+    expect(np.getUnsearchedResponseBodyReasons(rows, search)).toEqual({
+      overBudget: 1, missing: 1, pending: 1, queued: 1, timeout: 1, binary: 2,
+    });
+  });
+
+  test('defers an oversized archived entry to an explicit read even when the reported body size is zero', async () => {
+    const read = jest.fn(async () => ({ response: { content: { text: 'explicit archive read' } } }));
+    const row = {
+      id: 77, _managedRetention: true, responseContentState: 'evicted', responseContentSize: 0,
+      _originalHarHasBody: true, _readImportedHarEntry: read,
+      _responseSearchSource: { byteRange: () => [0, 20 * np.MAX_RESPONSE_BODY_BYTES] },
+    };
+    await expect(np.cacheResponseContent(row)).rejects.toThrow('requires an explicit read');
+    expect(row.responseContentState).toBe('omitted');
+    expect(read).not.toHaveBeenCalled();
+    await expect(np.resolveHarResponseContent(row)).resolves.toMatchObject({ text: 'explicit archive read' });
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  test('can reopen an evicted local HAR body after its pop-out disconnects', async () => {
+    const mirrorRead = jest.fn();
+    const row = {
+      id: 78,
+      responseContentState: 'evicted',
+      _mirrorBodyConnected: () => false,
+      _mirrorFetchBody: mirrorRead,
+      _originalHarHasBody: true,
+      _readImportedHarEntry: async () => ({ response: { content: { text: 'local captured response' } } }),
+    };
+    await expect(np.cacheResponseContent(row)).resolves.toMatchObject({
+      responseContentState: 'cached',
+      responseContent: 'local captured response',
+    });
+    expect(mirrorRead).not.toHaveBeenCalled();
   });
 
   test('does not restore a managed row after it was removed before getContent resolves', async () => {
@@ -10347,6 +10439,25 @@ describe('mirror session identity and bounds', () => {
     });
     return { viewer, seen };
   };
+
+  test('preserves optional response search coverage without changing legacy match results', async () => {
+    const { viewer, seen } = captureViewer();
+    viewer.handleMessage({ type: 'snapshot-start', generation: 1, session: 'session-a', fullPayloadSearch: true, total: 0 });
+    viewer.handleMessage({ type: 'snapshot-end', generation: 1 });
+    const withCoverage = viewer.requestFullSearch(7, 'session-a', ['example'], {}, null, null, undefined, true);
+    const plain = viewer.requestFullSearch(7, 'session-a', ['example'], {}, null, null);
+    const [detailedRequest, plainRequest] = seen.posted.filter((message) => message.type === 'full-search-request');
+    expect(detailedRequest.coverage).toBe(true);
+    expect(plainRequest.coverage).toBeUndefined();
+    for (const request of [detailedRequest, plainRequest]) {
+      viewer.handleMessage({
+        type: 'full-search-result', viewer: request.viewer, requestId: request.requestId,
+        session: request.session, rowId: request.rowId, ok: false, reason: 'overBudget',
+      });
+    }
+    await expect(withCoverage).resolves.toEqual({ results: null, reason: 'overBudget' });
+    await expect(plain).resolves.toBeNull();
+  });
 
   test('a snapshot from a new host session is applied as a rebuild, not a reconcile', () => {
     const { viewer, seen } = captureViewer();

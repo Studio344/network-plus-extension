@@ -1190,7 +1190,19 @@ test('retains the local-only skip when no browser executable is discoverable', (
     },
     {
       skipped: true,
+      title: 'an old-page body becomes unavailable only after DevTools confirms it is missing',
+    },
+    {
+      skipped: true,
+      title: 'request search finds archived response text outside the list filters and opens it without clearing them',
+    },
+    {
+      skipped: true,
       title: 'matches-only grid navigation and range selection exclude hidden rows and comparison Escape restores focus',
+    },
+    {
+      skipped: true,
+      title: 'timeline selection shares elapsed time with the ruler and zooms without changing the request filter',
     },
     {
       skipped: true,
