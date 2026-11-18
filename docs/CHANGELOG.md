@@ -2,6 +2,10 @@
 
 All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/himiyosh/network-plus-extension/releases).
 
+## Unreleased
+
+- No changes have been recorded since v1.19.1.
+
 ## v1.19.1 - 2026-11-18
 
 - 🐛 **Response body retry** — Mark requests whose body could not be read, show the reason and retry action, and clear the notice after recovery.
