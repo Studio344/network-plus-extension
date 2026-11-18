@@ -565,14 +565,14 @@ describe('archive determinism', () => {
     try {
       for (const zone of zones) {
         process.env.TZ = zone;
-        jest.resetModules();
+        delete require.cache[require.resolve('../scripts/check-extension-package')];
         const { createArchive: buildInZone } = require('../scripts/check-extension-package');
         digests.set(zone, crypto.createHash('sha256').update(buildInZone(repositoryRoot)).digest('hex'));
       }
     } finally {
       if (original === undefined) delete process.env.TZ;
       else process.env.TZ = original;
-      jest.resetModules();
+      delete require.cache[require.resolve('../scripts/check-extension-package')];
     }
 
     expect(Object.fromEntries(digests)).toEqual(Object.fromEntries(zones.map((zone) => [zone, digests.get('UTC')])));

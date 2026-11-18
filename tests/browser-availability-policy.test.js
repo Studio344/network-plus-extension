@@ -14,7 +14,7 @@ const GRID_FOCUS_JOURNEY_TITLE =
 const SEPARATOR_FOCUS_JOURNEY_TITLE =
   'workbench separators preserve inset focus rings across responsive themes and resizing inputs';
 const BROWSER_POLICY_GUARD_CONTRACT = 'browser availability source-contract policy pin';
-const BROWSER_POLICY_GUARD_COMMAND = 'npx jest tests/browser-availability-policy.test.js --runInBand --coverage=false';
+const BROWSER_POLICY_GUARD_COMMAND = 'npm test -- --no-coverage tests/browser-availability-policy.test.js';
 const BROWSER_POLICY_GUARD_STEP_NAME = 'Run browser source-contract policy';
 const BROWSER_POLICY_GUARD_STEP_SOURCE = [
   `      - name: ${BROWSER_POLICY_GUARD_STEP_NAME}`,
@@ -435,7 +435,7 @@ test('policy invocation removal fails with a named pin diagnostic', () => {
   const mutatedWorkflow = replaceSourceOrThrow(
     qualityGatesSource,
     BROWSER_POLICY_GUARD_COMMAND,
-    'npm test -- --runInBand',
+    'npm test',
     'browser policy workflow invocation removal',
   );
 

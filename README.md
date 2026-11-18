@@ -112,7 +112,7 @@ There is no browser-specific branch in the source. The recording and inspection 
 Verified for Chrome:
 
 - Chrome 151 loads `manifest.json` with no extension errors.
-- All 133 real-browser regression tests pass under Chrome 151 (`CHROME_BIN=<path> npx jest tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`).
+- All 133 real-browser regression tests pass under Chrome 151 (`CHROME_BIN=<path> npm test -- --no-coverage tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`).
 - The `Network+` tab appearing in a real Chrome DevTools window was confirmed manually. Only this last step sits outside automated coverage: DevTools extension panels do not load reliably under automation — no probe could enumerate even the built-in panels — so CI cannot assert it.
 
 ### First run
@@ -268,7 +268,7 @@ The status bar continuously shows body cache usage, with the active retention po
 
 ```bash
 npm ci                    # install dependencies from the lockfile
-npm test                  # Jest with coverage
+npm test                  # Node.js tests with coverage
 npm run lint              # ESLint over all first-party JavaScript
 npm run format            # Prettier write (format:check for CI parity)
 npm run version:check     # 5 release version locations + version-free README routes
@@ -281,21 +281,21 @@ npm run audit:strict      # npm audit --audit-level=high
 npm run text:check -- --base <base-sha> --head <head-sha>   # whitespace / encoding of changed lines
 ```
 
-[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) runs a Node.js 22 / 24 matrix over `npm ci`, Jest, ESLint, release version sync, Prettier, lockfile provenance, changed-line text integrity, extension package integrity, Edge/Chrome submission-kit integrity, dependency audit, and coordinator contracts.
+[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) runs a Node.js 22 / 24 matrix over `npm ci`, the Node.js test runner, ESLint, release version sync, Prettier, lockfile provenance, changed-line text integrity, extension package integrity, Edge/Chrome submission-kit integrity, dependency audit, and coordinator contracts.
 
 ### Tests
 
 | Area | Method | Location |
 |---|---|---|
-| Pure functions | Jest unit tests | [tests/panel.test.js](tests/panel.test.js) |
-| Theme / UI contracts | Jest static contract tests | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
-| Extension package integrity | Jest + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
-| Repository integrity | Jest + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
-| Store submission kit | Jest + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
-| Support intake forms | Jest + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
-| Changed-line integrity | Jest + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
-| CI governance | Jest static regression | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
-| Coordinator contracts | Jest static contract tests | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
+| Pure functions | Node.js unit tests | [tests/panel.test.js](tests/panel.test.js) |
+| Theme / UI contracts | Node.js static contract tests | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
+| Extension package integrity | Node.js tests + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
+| Repository integrity | Node.js tests + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
+| Store submission kit | Node.js tests + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
+| Support intake forms | Node.js tests + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
+| Changed-line integrity | Node.js tests + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
+| CI governance | Node.js static regression | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
+| Coordinator contracts | Node.js static contract tests | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
 | DOM behavior, export contents, theme switching | Manual, in Edge DevTools | [docs/manual-test-checklist.md](docs/manual-test-checklist.md) |
 
 Browser API mocks live in [tests/setup.js](tests/setup.js).
@@ -310,7 +310,7 @@ network-plus-extension/
 ├── icons/               16 / 48 / 128 px extension icons
 ├── vendor/              third-party libraries (fflate)
 ├── scripts/             repository, package, version, and store verification scripts
-├── tests/               Jest suites and browser API mocks
+├── tests/               Node.js suites and browser API mocks
 ├── docs/                architecture, design, product, privacy, changelog, store assets
 └── .github/             workflows, agents, Copilot instructions, issue forms, funding config
 ```
