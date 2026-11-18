@@ -112,7 +112,7 @@ Chrome と Edge で同じソースを使用します。記録と調査には `ch
 Chrome での検証内容:
 
 - Chrome 151 が `manifest.json` を拡張エラーなしで読み込むこと。
-- 実ブラウザ回帰テスト 133 件すべてが Chrome 151 で通ること(`CHROME_BIN=<path> npx jest tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`)。
+- 実ブラウザ回帰テスト 133 件すべてが Chrome 151 で通ること(`CHROME_BIN=<path> npm test -- --no-coverage tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`)。
 - 実際の Chrome DevTools ウィンドウに `Network+` タブが現れることは手動で確認。この最後の 1 点だけは自動化の外にあります: DevTools 拡張パネルは自動化環境では安定して読み込まれず、組み込みパネルの列挙すら成功しないため、CI では断言できません。
 
 ### 初回起動
@@ -268,7 +268,7 @@ Edge / Chrome DevTools
 
 ```bash
 npm ci                    # ロックファイルから依存をインストール
-npm test                  # カバレッジ付き Jest
+npm test                  # カバレッジ付き Node.js テスト
 npm run lint              # ファーストパーティ JavaScript 全体に ESLint
 npm run format            # Prettier で整形(CI 同等の確認は format:check)
 npm run version:check     # リリースバージョン 5 箇所 + バージョン非依存の README 経路
@@ -281,21 +281,21 @@ npm run audit:strict      # npm audit --audit-level=high
 npm run text:check -- --base <base-sha> --head <head-sha>   # 変更行の空白 / エンコーディング
 ```
 
-[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) は Node.js 22 / 24 のマトリクスで、`npm ci`・Jest・ESLint・リリースバージョン同期・Prettier・ロックファイル来歴・変更行テキスト整合・拡張パッケージ整合・Edge/Chrome 申請キット整合・依存監査・コーディネータ契約を実行します。
+[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) は Node.js 22 / 24 のマトリクスで、`npm ci`・Node.js テストランナー・ESLint・リリースバージョン同期・Prettier・ロックファイル来歴・変更行テキスト整合・拡張パッケージ整合・Edge/Chrome 申請キット整合・依存監査・コーディネータ契約を実行します。
 
 ### テスト
 
 | 領域 | 手法 | 場所 |
 |---|---|---|
-| 純粋関数 | Jest ユニットテスト | [tests/panel.test.js](tests/panel.test.js) |
-| テーマ / UI 契約 | Jest 静的契約テスト | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
-| 拡張パッケージ整合 | Jest + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
-| リポジトリ整合 | Jest + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
-| ストア申請キット | Jest + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
-| サポート受付フォーム | Jest + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
-| 変更行の整合 | Jest + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
-| CI ガバナンス | Jest 静的回帰 | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
-| コーディネータ契約 | Jest 静的契約テスト | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
+| 純粋関数 | Node.js ユニットテスト | [tests/panel.test.js](tests/panel.test.js) |
+| テーマ / UI 契約 | Node.js 静的契約テスト | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
+| 拡張パッケージ整合 | Node.js テスト + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
+| リポジトリ整合 | Node.js テスト + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
+| ストア申請キット | Node.js テスト + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
+| サポート受付フォーム | Node.js テスト + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
+| 変更行の整合 | Node.js テスト + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
+| CI ガバナンス | Node.js 静的回帰 | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
+| コーディネータ契約 | Node.js 静的契約テスト | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
 | DOM 挙動・エクスポート内容・テーマ切替 | Edge DevTools での手動確認 | [docs/manual-test-checklist.md](docs/manual-test-checklist.md) |
 
 ブラウザ API のモックは [tests/setup.js](tests/setup.js) にあります。
@@ -310,7 +310,7 @@ network-plus-extension/
 ├── icons/               16 / 48 / 128 px の拡張アイコン
 ├── vendor/              サードパーティライブラリ(fflate)
 ├── scripts/             リポジトリ・パッケージ・バージョン・ストアの検証スクリプト
-├── tests/               Jest スイートとブラウザ API モック
+├── tests/               Node.js スイートとブラウザ API モック
 ├── docs/                アーキテクチャ・設計・プロダクト・プライバシー・変更履歴・ストア資産
 └── .github/             ワークフロー・エージェント・Copilot 指示・issue フォーム・funding 設定
 ```

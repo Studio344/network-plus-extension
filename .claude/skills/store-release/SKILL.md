@@ -88,7 +88,7 @@ sneaks back in.
    changelog gate requires the section to always exist with a bullet, and the
    release-notes builder skips exactly this placeholder.
 7. Run the exact candidate gates from `CLAUDE.md`. Derive the suite count
-   from Git and Jest. Run the full suites with installed Edge and Chrome and
+   from Git and `npm --silent test -- --list`. Run the full suites with installed Edge and Chrome and
    require zero skips. Use `EDGE_BIN` for Edge and unset it when setting
    `CHROME_BIN` for Chrome. Load the extracted checked ZIP in fresh browser
    profiles for changed user journeys. Record source ref, ZIP digest, actual

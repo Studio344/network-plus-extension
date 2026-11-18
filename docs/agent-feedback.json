@@ -13,7 +13,8 @@
       "rule": "Derive expected suites from Git/Jest; require zero skipped tests and actual status-summary-browser and mirror-browser PASS.",
       "source": "https://github.com/himiyosh/network-plus-extension/pull/28; CLAUDE.md#テスト実行の絶対則",
       "scope": "Validation",
-      "status": "active"
+      "status": "superseded",
+      "superseded_by": "complete-runner-browser-gates"
     },
     {
       "id": "pane-regex-feedback",
@@ -48,6 +49,13 @@
       "rule": "Track task-owned temporary work resources, save needed evidence, and verify they close once finished. Preserve user work and active monitoring.",
       "source": "https://github.com/himiyosh/agentic-rules/pull/32",
       "scope": "Agent work environment and closeout",
+      "status": "active"
+    },
+    {
+      "id": "complete-runner-browser-gates",
+      "rule": "Compare test-runner discovery with Git; require zero skipped tests and actual status-summary-browser and mirror-browser PASS.",
+      "source": "User-approved migration to the Node.js test runner; CLAUDE.md#テスト実行の絶対則",
+      "scope": "Validation",
       "status": "active"
     }
   ]
