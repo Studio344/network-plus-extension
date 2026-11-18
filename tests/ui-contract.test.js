@@ -576,7 +576,6 @@ describe('guided sample capture static contracts', () => {
     expect(js).toContain("action.textContent = uiText(hasQuickFilter ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');");
     expect(js).toContain("action.addEventListener('click', clearRequestAnalysisFilters);");
     expect(js).toContain("action.textContent = uiText('emptyCaptureAction');");
-    expect(js).not.toContain("action.setAttribute('aria-label'");
     expect(js).toContain("action.setAttribute('aria-describedby', description.id);");
     expect(js).toContain("action.addEventListener('click', activateSampleCapture);");
     expect(js).toContain('No network request is sent.');
@@ -586,6 +585,7 @@ describe('guided sample capture static contracts', () => {
       js.indexOf('function updateEmptyState'),
       js.indexOf('function updateRetentionStatus'),
     );
+    expect(emptyStateBlock).not.toContain("action.setAttribute('aria-label'");
     expect(emptyStateBlock).not.toContain('innerHTML');
     // The sample action is DevTools-only: the mirror tab captures nothing
     // itself and its local sample ids would collide with the host's rows.
@@ -833,12 +833,7 @@ describe('guided sample capture static contracts', () => {
     expect(css).toMatch(
       /#retentionStatus\{[^}]*white-space:normal[^}]*\}\s*#statsSummary\{[^}]*white-space:normal/,
     );
-    expect(css).toMatch(
-      /\.status-summary-visual\{[^}]*display:inline-flex[^}]*flex-wrap:wrap[^}]*max-width:100%/,
-    );
-    expect(css).toMatch(
-      /\.status-summary-chips\{[^}]*display:inline-flex[^}]*flex-wrap:wrap/,
-    );
+    expect(css).toMatch(/\.analysis-status\{[^}]*flex-wrap:wrap[^}]*max-width:100%/);
     expect(css).toMatch(
       /\.status-summary-duration\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/,
     );
@@ -2423,9 +2418,7 @@ describe('waterfall and stats topology', () => {
   test('statistics and waterfall helpers are exported', () => {
     const np = require('../panel.js');
     expect(typeof np.classifyStatusClass).toBe('function');
-    expect(typeof np.getStatusClassIndicators).toBe('function');
-    expect(typeof np.formatStatusClassSummary).toBe('function');
-    expect(typeof np.findFirstStatusClassRow).toBe('function');
+    expect(typeof np.classifyRequestFacet).toBe('function');
     expect(typeof np.renderStatsSummary).toBe('function');
     expect(typeof np.computeStats).toBe('function');
     expect(typeof np.computeWaterfallBar).toBe('function');
@@ -2495,50 +2488,25 @@ describe('waterfall and stats topology', () => {
     const summaryFn = js.slice(summaryFnStart, summaryFnEnd);
     expect(summaryFn).toContain("'#statsSummary'");
     expect(summaryFn).toContain('computeStats(');
-    expect(summaryFn).toContain(
-      'renderStatsSummary(statsEl, stats, inspectFirstStatusClassRequest)',
-    );
+    expect(summaryFn).toContain('renderStatsSummary(statsEl, stats)');
     expect(summaryFn).toContain('clearStatsSummary(statsEl)');
     expect(summaryFn).not.toContain('innerHTML');
   });
 
-  test('renders semantic status triage controls with a complete accessible text alternative', () => {
+  test('keeps durations in the footer and presents status controls only in the request toolbar', () => {
     const rendererStart = js.indexOf('function renderStatsSummary(');
     const rendererEnd = js.indexOf('\n  function ', rendererStart + 1);
     const renderer = js.slice(rendererStart, rendererEnd);
-    expect(renderer).toContain('getStatusClassIndicators(stats.statusClassCounts)');
-    expect(renderer).toContain('formatStatusClassSummary(stats.statusClassCounts)');
     expect(renderer).toContain('getOrCreateStatsSummaryStructure(statsElement)');
-    expect(renderer).toContain(
-      "structure.accessibleSummary.textContent = statusText + ' | ' + durationText",
-    );
-    expect(renderer).toContain(
-      'updateStatusSummaryChip(structure, indicator, onInspectStatusClass)',
-    );
-    expect(renderer).toContain("structure.duration.textContent = '| avg ' + fmtTime(stats.avgDuration)");
+    expect(renderer).toContain('structure.accessibleSummary.textContent = durationText');
+    expect(renderer).toContain("structure.duration.textContent = uiTextFormat('analysisAverageDuration'");
+    expect(renderer).not.toContain('statusClassCounts');
     expect(renderer).not.toContain("statsElement.textContent = ''");
     expect(renderer).not.toContain('innerHTML');
-  });
-
-  test('reuses keyed status chip nodes across non-empty summary updates', () => {
-    const updaterStart = js.indexOf('function updateStatusSummaryChip(');
-    const updaterEnd = js.indexOf('\n  function ', updaterStart + 1);
-    const updater = js.slice(updaterStart, updaterEnd);
-    expect(updater).toContain('structure.chipElements.get(indicator.statusClass)');
-    expect(updater).toContain("const expectedTagName = canInspect ? 'BUTTON' : 'SPAN'");
-    expect(updater).toContain('structure.chipElements.set(indicator.statusClass, replacement)');
-    expect(updater).not.toContain('innerHTML');
-  });
-
-  test('status triage selects and focuses the first matching visible sorted request', () => {
-    const triageStart = js.indexOf('function inspectFirstStatusClassRequest(');
-    const triageEnd = js.indexOf('\n  function ', triageStart + 1);
-    const triage = js.slice(triageStart, triageEnd);
-    expect(triage).toContain('getVisibleSortedRows()');
-    expect(triage).toContain('findFirstStatusClassRow(');
-    expect(triage).toContain('selectRow(targetRow, null, true)');
-    expect(triage).toContain('scrollToSelectedRow()');
-    expect(triage).not.toMatch(/filterRows|columnFilterRules|renderBody/);
+    const toolbar = html.slice(html.indexOf('<div class="analysis-status"'), html.indexOf('id="analysisDomainsBtn"'));
+    expect([...toolbar.matchAll(/data-status-facet="([^"]+)"/g)].map((result) => result[1]))
+      .toEqual(['all', '2xx', '3xx', '4xx', '5xx', 'other', 'pending']);
+    expect(html.slice(html.indexOf('<footer class="statusbar"'), html.indexOf('</footer>'))).not.toContain('data-status-facet');
   });
 
   test('waterfall CSS classes are defined: wf-track, wf-fill, wf-seg, waterfall-cell', () => {
@@ -2548,27 +2516,14 @@ describe('waterfall and stats topology', () => {
     expect(css).toContain('.waterfall-cell');
   });
 
-  test('statsSummary CSS is defined in the status bar section', () => {
+  test('uses status colors on the unified toolbar controls', () => {
     expect(css).toContain('#statsSummary');
     for (const statusClass of ['2xx', '3xx', '4xx', '5xx']) {
       expect(css).toContain(
-        `.status-summary-chip--${statusClass}{color:var(--status-${statusClass}-text)}`,
+        `[data-status-facet="${statusClass}"]{--facet-ink:var(--status-${statusClass}-text)}`,
       );
     }
-    expect(css).toContain(
-      '.status-summary-chip--other{border-color:var(--control-border);color:var(--text-muted)}',
-    );
-    expect(css).toContain(
-      '.status-summary-chip--empty{border-color:var(--control-border);color:var(--text-muted);font-weight:600}',
-    );
-    expect(css).toMatch(/\.status-summary-chip\{[^}]*min-height:24px/);
-    expect(css).toContain('.status-summary-chip--action{cursor:pointer');
-    expect(css).toContain(
-      '.status-summary-chip--action:active{border-color:var(--accent);background:var(--accent-fill);color:var(--on-accent)}',
-    );
-    expect(css).toContain(
-      '.status-summary-chip--action:focus-visible{outline:2px solid var(--accent);outline-offset:2px}',
-    );
+    expect(css).not.toContain('.status-summary-chip');
   });
 });
 
@@ -3487,8 +3442,8 @@ describe('search matches-only toggle contracts', () => {
 
 describe('detail pane search contracts', () => {
   test('attaches the in-pane search bar to the Body and Raw views of both inspectors', () => {
-    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { emptyContent: !requestBodyText });");
-    expect(js).toContain('attachPaneSearch(reqRawPane);');
+    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { ...requestFullSearch, emptyContent: !requestBodyText });");
+    expect(js).toContain('attachPaneSearch(reqRawPane, requestBodyPreview, requestFullSearch);');
     // The response Body pane hands its one toolbar the renderer picker too.
     expect(js).toContain('    attachPaneSearch(resBodyPane, text, {');
     expect(js).toContain('      viewToggle: bodyViewToggle,');
@@ -3614,11 +3569,11 @@ describe('detail pane search contracts', () => {
     expect(js).toContain('expandBtn.hidden = collapsedHits === 0 || treeOwnsExpansion;');
     expect(js).toContain("const treeOwnsExpansion = !!pane.querySelector('.json-tree-controls');");
     expect(js).toContain("expandBtn.addEventListener('click', expandEverything);");
-    // Ordinary panes search their source. Large payloads search the bounded
-    // preview and explain that scope alongside the full save action.
+    // Large payload previews stay bounded, and source matches are rendered as excerpts.
     expect(js).toContain('    attachPaneSearch(resBodyPane, text, {');
-    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { emptyContent: !requestBodyText });");
-    expect(js).toContain('    attachPaneSearch(body, preview, { emptyContent: !preview });');
+    expect(js).toContain("attachPaneSearch(reqBodyPane, requestBodyPreview, { ...requestFullSearch, emptyContent: !requestBodyText });");
+    expect(js).toContain('    attachPaneSearch(body, preview, { ...fullSearch, emptyContent: !preview });');
+    expect(js).toContain("fullResults.className = 'pane-search-full-results';");
     expect(css).toContain('.pane-search-expand');
   });
 
@@ -4109,39 +4064,40 @@ describe('stream capture contracts (WebSocket + SSE)', () => {
     expect(js).toContain('webSocketFramesOmitted: webSocket.count');
   });
 
-  test('capture is an explicit statusbar opt-in that names its own limits', () => {
+  test('WebSocket capture defaults on in live DevTools while SSE remains a separate opt-in', () => {
     expect(html).toContain('id="wsCaptureBtn"');
-    expect(html).toContain('Record WebSocket and Server-Sent Events while stream capture is on');
+    expect(html).toContain('Record WebSocket messages in the inspected tab while live recording is running');
     expect(html).toMatch(/id="wsReloadBtn"[^>]*hidden/);
     expect(html).toMatch(/id="wsMessagesReloadBtn"[^>]*hidden/);
     expect(html).toMatch(/id="wsCaptureBtn"[^>]*aria-pressed="false"[^>]*hidden/);
-    expect(html).toContain('>Stream capture: Off</button>');
+    expect(html).toContain('>WebSocket capture: Off</button>');
+    expect(html).toMatch(/id="sseCaptureSettings"[^>]*hidden/);
+    expect(js).toContain("preference === 'on' || (preference === undefined && nativeWebSockets)");
+    expect(js).toContain("chrome.storage.local.set({ [WS_CAPTURE_KEY]: enabled ? 'on' : 'off' }");
     expect(css).toContain('.ws-capture-btn[aria-pressed="true"]{');
     expect(js).toContain(
       "wsCaptureBtn.textContent = uiText(streamCapture.enabled ? 'wsCaptureOn' : 'wsCaptureOff');",
     );
     // The sentence still has a home, and a language switch repaints the label
     // the toggle writes for itself.
-    expect(js).toContain("      en: 'Stream capture: On',");
-    expect(js).toContain("      en: 'Stream capture: Off',");
+    expect(js).toContain("      en: 'WebSocket capture: On',");
+    expect(js).toContain("      en: 'WebSocket capture: Off',");
     expect(js).toContain('    if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();');
     expect(js).toContain("nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'");
     expect(js).toContain("setStatus(uiText('statusStreamCaptureOff'));");
-    expect(js).toContain(
-      "      en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',",
-    );
-    expect(js).toContain("      en: 'Stream capture off; recorded connections stay in the table.',");
+    expect(js).toContain("      en: 'WebSocket capture is off. Recorded messages stay in the table.',");
   });
 
   test('uses the existing HAR poll and finish event, with the page wrapper as a fallback', () => {
     expect(js).toContain('chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)');
-    expect(js).toContain('if (!nativeWebSockets) inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});');
+    expect(js).toContain('const injectWsWrapper = () => inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});');
     expect(js).toContain('readNativeWebSocketSnapshot(log?.entries);');
     expect(js).toContain('if (finishNativeWebSocket(request)) return;');
     expect(js).toContain('inspectedEval(buildSseWrapperSource(), () => {});');
     expect(js).toContain("const wsDrain = buildStreamDrainSource('__networkPlusWS__');");
     expect(js).toContain("const sseDrain = buildStreamDrainSource('__networkPlusSSE__');");
-    expect(js).toContain('if (streamCapture.enabled) injectStreamWrappers();');
+    expect(js).toContain('if (streamCapture.enabled && !nativeWebSockets) injectWsWrapper();');
+    expect(js).toContain('if (streamCapture.sseEnabled) inspectedEval(buildSseWrapperSource(), () => {});');
     // Recording discipline matches live capture: paused and sample sessions
     // drop drained events instead of recording them.
     expect(js).toContain('if (state.paused || state.sampleCaptureActive) return;');
@@ -4621,7 +4577,7 @@ describe('audit layout and contrast contracts', () => {
     // viewport, never from its content, so containing it costs nothing and is
     // what makes a max-height query possible at all.
     expect(css).toContain('overflow:hidden;border-left:1px solid var(--separator);container-type:size}');
-    expect(css).not.toContain('container-type:inline-size');
+    expect(css).not.toMatch(/\.details\s*\{[^}]*\bcontainer-type\s*:\s*inline-size\b/);
     const columnBlockStart = css.indexOf('@container (max-height:480px){');
     expect(columnBlockStart).toBeGreaterThan(-1);
     const columnBlock = css.slice(columnBlockStart, css.indexOf('\n}\n', columnBlockStart));

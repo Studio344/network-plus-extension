@@ -564,6 +564,7 @@ function createInstrumentedPanelFixture() {
   fs.mkdirSync(vendorDirectory);
   fs.copyFileSync(path.join(repositoryRoot, 'panel.html'), path.join(fixtureDirectory, 'panel.html'));
   fs.copyFileSync(path.join(repositoryRoot, 'panel.css'), path.join(fixtureDirectory, 'panel.css'));
+  fs.copyFileSync(path.join(repositoryRoot, 'payload-search.js'), path.join(fixtureDirectory, 'payload-search.js'));
   fs.copyFileSync(path.join(repositoryRoot, 'vendor', 'fflate.js'), path.join(vendorDirectory, 'fflate.js'));
 
   const panelSource = fs.readFileSync(path.join(repositoryRoot, 'panel.js'), 'utf8');
@@ -924,7 +925,7 @@ browserTest(
             const error = descriptionId ? document.getElementById(descriptionId) : null;
             return {
               rows: rows(),
-              header: document.querySelector('#columnFilterPopup .filter-popup-header').textContent,
+              activeCount: document.querySelector('#columnFilterPopup .filter-popup-count').textContent,
               active: fields.root.querySelector('.filter-section-state').textContent,
               invalid: fields.input.getAttribute('aria-invalid'),
               description: error?.textContent || '',
@@ -947,7 +948,7 @@ browserTest(
       expect(initial.before).toEqual(['1', '2', '3']);
       expect(initial.malformed).toMatchObject({
         rows: ['1', '2', '3'],
-        header: 'Column Filters (0 active)',
+        activeCount: '0 active',
         active: '',
         invalid: 'true',
         role: 'status',
@@ -992,7 +993,7 @@ browserTest(
         })()`,
       );
       expect(reopened).toMatchObject({
-        rows: ['1', '2', '3'], header: 'Column Filters (0 active)',
+        rows: ['1', '2', '3'], activeCount: '0 active',
         invalid: 'true', role: 'status', errorVisible: true,
       });
 
@@ -1048,33 +1049,33 @@ browserTest(
       );
 
       expect(corrected.genericValid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (1 active)',
+        rows: ['1', '3'], activeCount: '1 active',
         active: 'Active', invalid: null, description: '', focus: 'input',
       });
       expect(corrected.genericPlain).toMatchObject({
-        rows: ['2'], header: 'Column Filters (1 active)', invalid: null, description: '',
+        rows: ['2'], activeCount: '1 active', invalid: null, description: '',
       });
       expect(corrected.domainInvalid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (1 active)',
+        rows: ['1', '3'], activeCount: '1 active',
         active: '', invalid: 'true', role: 'status', errorVisible: true, focus: 'input',
       });
       expect(corrected.domainInvalid.description).toMatch(/^Invalid regular expression:/);
       expect(corrected.domainOperatorChanged).toMatchObject({
-        rows: [], header: 'Column Filters (2 active)', invalid: null, description: '', focus: 'operator',
+        rows: [], activeCount: '2 active', invalid: null, description: '', focus: 'operator',
       });
       expect(corrected.domainValid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (2 active)', invalid: null, description: '',
+        rows: ['1', '3'], activeCount: '2 active', invalid: null, description: '',
       });
       expect(corrected.pathInvalid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (3 active)',
+        rows: ['1', '3'], activeCount: '3 active',
         invalid: 'true', role: 'status', errorVisible: true, focus: 'input',
       });
       expect(corrected.pathInvalid.description).toMatch(/^Invalid regular expression:/);
       expect(corrected.pathValid).toMatchObject({
-        rows: ['1'], header: 'Column Filters (3 active)', invalid: null, description: '',
+        rows: ['1'], activeCount: '3 active', invalid: null, description: '',
       });
       expect(corrected.pathRemoved).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (3 active)',
+        rows: ['1', '3'], activeCount: '3 active',
         invalid: null, description: '', focus: 'input',
       });
       expect(corrected.lingeringErrors).toBe(0);
@@ -1575,7 +1576,7 @@ browserTest(
               rowIds: renderedRows.map((row) => Number(row.dataset.rowId)),
               counter: document.querySelector('#counter').textContent,
               totalSize: document.querySelector('#totalSize').textContent,
-              statsText: document.querySelector('#statsSummary').textContent.replace(/\\s+/g, ' ').trim(),
+              successCount: document.querySelector('[data-status-facet="2xx"] .analysis-count').textContent,
               tabStopIds: Array.from(tbody.querySelectorAll('tr[tabindex="0"]')).map(
                 (row) => row.dataset.rowId,
               ),
@@ -2137,8 +2138,7 @@ browserTest(
           tabStopIds: ['1'],
         }),
       );
-      expect(boundaryResult.exportBoundary.statsText).toContain('2xx');
-      expect(boundaryResult.exportBoundary.statsText).toContain('1');
+      expect(boundaryResult.exportBoundary.successCount).toBe('1');
       expect(boundaryResult.invalidRetentionBoundary).toEqual(
         expect.objectContaining({
           rowCount: 2,
@@ -2148,8 +2148,7 @@ browserTest(
           tabStopIds: ['1'],
         }),
       );
-      expect(boundaryResult.invalidRetentionBoundary.statsText).toContain('2xx');
-      expect(boundaryResult.invalidRetentionBoundary.statsText).toContain('2');
+      expect(boundaryResult.invalidRetentionBoundary.successCount).toBe('2');
       expect(boundaryResult.undoBoundary).toEqual(
         expect.objectContaining({
           rowCount: 100,
@@ -2159,8 +2158,7 @@ browserTest(
           undoWasAvailable: true,
         }),
       );
-      expect(boundaryResult.undoBoundary.statsText).toContain('2xx');
-      expect(boundaryResult.undoBoundary.statsText).toContain('100');
+      expect(boundaryResult.undoBoundary.successCount).toBe('100');
       expect(result.firstBurst).toEqual(
         expect.objectContaining({
           cleanupQueries: 1,
@@ -2737,112 +2735,53 @@ browserTest(
 browserTest(
   'live summary update preserves focused status chip identity and the pending click gesture',
   async () => {
-    const { browserProcess, profileDirectory, browserWebSocketUrl } = await startPanelBrowser(
-      'network-plus-status-dom-',
-    );
-
-    let cdp;
+    const page = await launchPanelPage({ executable: browserExecutable, width: 500, height: 800, initScript: LIVE_CAPTURE_INIT_SCRIPT });
+    const { cdp } = page;
+    const read = () => evaluate(cdp, `(() => {
+      const button = document.querySelector('[data-status-facet="5xx"]');
+      const rect = button.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+        sameButton: window.__focusedStatusFacet === button,
+        focused: document.activeElement === button,
+        pressed: button.getAttribute('aria-pressed') === 'true',
+        counts: Object.fromEntries([...document.querySelectorAll('[data-status-facet]')].map(button =>
+          [button.dataset.statusFacet, Number(button.querySelector('.analysis-count').textContent)])),
+        visible: [...document.querySelectorAll('#tbody tr[data-row-id]')].map(row => row.querySelector('[data-col-id="status"]').textContent),
+        footerHasActions: !!document.querySelector('#statsSummary button'),
+      };
+    })()`);
     try {
-      const panelTarget = await findPanelTarget(browserWebSocketUrl);
-      cdp = await connectCdp(panelTarget.webSocketDebuggerUrl);
-      await cdp.send('Runtime.enable');
-      await cdp.send('Page.bringToFront');
-      await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: 500,
-        height: 800,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
-      await waitForSampleCaptureAction(cdp);
-
-      const before = await evaluate(
-        cdp,
-        `(async () => {
-          if (document.readyState === 'loading') {
-            await new Promise((resolve) => window.addEventListener('DOMContentLoaded', resolve, { once: true }));
-          }
-          const sampleButton = Array.from(document.querySelectorAll('button')).find(
-            (button) => button.textContent.trim() === 'Explore sample capture',
-          );
-          if (!sampleButton) throw new Error('Sample capture action was not found.');
-          sampleButton.click();
-          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const statusDetailsToggle = document.querySelector('#statusDetailsToggle');
-          if (!statusDetailsToggle || statusDetailsToggle.hidden) {
-            throw new Error('Narrow status details disclosure was not available.');
-          }
-          statusDetailsToggle.click();
-          await new Promise((resolve) => requestAnimationFrame(resolve));
-          const chip = document.querySelector('.status-summary-chip--5xx');
-          if (!chip) throw new Error('5xx status triage chip was not rendered.');
-          chip.focus();
-          window.__statusSummaryFocusedChip = chip;
-          const rect = chip.getBoundingClientRect();
-          return {
-            selectedRowId: document.querySelector('#tbody tr.selected')?.dataset.rowId || null,
-            first5xxRowId: document.querySelector('#tbody tr.status-5xx')?.dataset.rowId || null,
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-          };
-        })()`,
-        true,
-      );
-
-      expect(before.selectedRowId).not.toBe(before.first5xxRowId);
-      await cdp.send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x: before.x,
-        y: before.y,
-        button: 'left',
-        clickCount: 1,
-      });
-
-      const duringFlush = await evaluate(
-        cdp,
-        `(() => {
-          const chip = window.__statusSummaryFocusedChip;
-          _NetworkPlus.updateTableSummary();
-          return {
-            sameNode: document.querySelector('.status-summary-chip--5xx') === chip,
-            focusHeld: document.activeElement === chip,
-            connected: chip.isConnected,
-          };
-        })()`,
-      );
-      expect(duringFlush).toEqual({
-        sameNode: true,
-        focusHeld: true,
-        connected: true,
-      });
-
-      await cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x: before.x,
-        y: before.y,
-        button: 'left',
-        clickCount: 1,
-      });
-      await evaluate(
-        cdp,
-        'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
-        true,
-      );
-
-      const after = await evaluate(
-        cdp,
-        `(() => ({
-          selectedRowId: document.querySelector('#tbody tr.selected')?.dataset.rowId || null,
-          focusedRowId: document.activeElement?.closest?.('tr[data-row-id]')?.dataset.rowId || null,
-          detailsTitle: document.querySelector('#detailsTitle')?.textContent || '',
-        }))()`,
-      );
-      expect(after.selectedRowId).toBe(before.first5xxRowId);
-      expect(after.focusedRowId).toBe(before.first5xxRowId);
-      expect(after.detailsTitle).toBe('POST checkout.network-plus.test/v1/orders/preview');
+      await waitForLiveNetworkListener(cdp);
+      await evaluate(cdp, `(() => {
+        window.__emitStatusFixture = (status) => window.__networkPlusLiveListener({
+          startedDateTime: new Date().toISOString(), time: 25,
+          request: { method: 'GET', url: 'https://example.test/status/' + status, headers: [] },
+          response: { status, headers: [], content: { size: 0 } },
+          getContent(callback) { callback('', ''); },
+        });
+        [200, 302, 404, 503, 101].forEach(window.__emitStatusFixture);
+      })()`);
+      await settleLayout(cdp);
+      await evaluate(cdp, `(() => {
+        window.__focusedStatusFacet = document.querySelector('[data-status-facet="5xx"]');
+        window.__focusedStatusFacet.focus();
+      })()`);
+      const before = await read();
+      expect(before.counts).toEqual({ all: 5, '2xx': 1, '3xx': 1, '4xx': 1, '5xx': 1, other: 1, pending: 0 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: before.x, y: before.y, button: 'left', clickCount: 1 });
+      await evaluate(cdp, 'window.__emitStatusFixture(500)');
+      await settleLayout(cdp);
+      expect(await read()).toMatchObject({ sameButton: true, focused: true, pressed: false, counts: { '5xx': 2 } });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: before.x, y: before.y, button: 'left', clickCount: 1 });
+      await settleLayout(cdp);
+      expect(await read()).toMatchObject({ sameButton: true, focused: true, pressed: true, visible: ['503', '500'], footerHasActions: false });
+      await evaluate(cdp, "document.querySelector('[data-status-facet=other]').click()");
+      expect(await read()).toMatchObject({ visible: ['101'], counts: { all: 6, '5xx': 2, other: 1 } });
+      await evaluate(cdp, "document.querySelector('[data-status-facet=other]').click()");
+      expect((await read()).visible).toHaveLength(6);
     } finally {
-      if (cdp) await cdp.close();
-      await stopBrowser(browserProcess);
-      removeProfileDirectory(profileDirectory);
+      await page.close();
     }
   },
   TEST_TIMEOUT_MS,
@@ -3431,10 +3370,6 @@ browserTest(
         deviceScaleFactor: 1,
         mobile: false,
       });
-      // The media-query change is asynchronous. Focusing the chip before the
-      // wide sync ran only ever worked because [hidden] used to be defeated by
-      // display:contents at wide widths — focusing a display:none element is a
-      // no-op, so wait for the details to actually be visible first.
       await waitForStatusDetailsState(
         cdp,
         { detailsHidden: false, toggleHidden: true },
@@ -3444,9 +3379,7 @@ browserTest(
       const reverseBreakpointBaseline = await evaluate(
         cdp,
         `(() => {
-          const chip = document.querySelector('.status-summary-chip--5xx');
-          if (!chip) throw new Error('Wide status action was not available.');
-          chip.focus({ preventScroll: true });
+          document.querySelector('#filterBtn').focus({ preventScroll: true });
           return {
             activeResponseTabId:
               document.querySelector('#res-tab-bar [aria-selected="true"]')?.id || null,
@@ -3471,12 +3404,12 @@ browserTest(
       await waitForStatusDetailsState(
         cdp,
         {
-          activeElementId: 'statusDetailsToggle',
+          activeElementId: 'filterBtn',
           detailsHidden: true,
           expanded: 'false',
           toggleHidden: false,
         },
-        'Narrow breakpoint status-action focus transfer',
+        'Narrow breakpoint does not steal toolbar focus',
       );
       const reverseNarrowState = await evaluate(
         cdp,
@@ -3500,6 +3433,7 @@ browserTest(
         ...reverseBreakpointBaseline,
         documentOverflow: 0,
       });
+      await evaluate(cdp, "document.querySelector('#statusDetailsToggle').focus({ preventScroll: true })");
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1280,
         height: 800,
@@ -3637,8 +3571,8 @@ browserTest(
       ]) {
         expect(expandedAccessibleNames.some((name) => name.includes(disclosedFact))).toBe(true);
       }
-      expect(expandedAccessibleNames.some((name) => name.includes('Inspect first visible 2xx request'))).toBe(true);
-      expect(expandedAccessibleNames.some((name) => name.includes('Inspect first visible 5xx request'))).toBe(true);
+      expect(expandedAccessibleNames).toEqual(expect.arrayContaining(['2xx: 1', '5xx: 1']));
+      expect(expandedAccessibleNames.some((name) => name.includes('Inspect first visible'))).toBe(false);
 
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1280,
@@ -7494,10 +7428,20 @@ browserTest(
       executable: browserExecutable,
       initScript: LIVE_CAPTURE_INIT_SCRIPT + `
         window.__harEntries = [];
+        window.__captureWrites = [];
+        window.__sseWrapperRequested = false;
+        const storageSet = chrome.storage.local.set;
+        chrome.storage.local.set = (value, callback) => {
+          if (value['networkPlus.webSocketCapture']) window.__captureWrites.push(value['networkPlus.webSocketCapture']);
+          storageSet(value, callback);
+        };
         chrome.devtools.network.getHAR = (callback) => callback({ entries: window.__harEntries });
         window.__wsNavigated = [];
         chrome.devtools.network.onNavigated = { addListener: (listener) => window.__wsNavigated.push(listener) };
-        chrome.devtools.inspectedWindow = { eval(_expression, callback) { callback('[]'); } };
+        chrome.devtools.inspectedWindow = { eval(expression, callback) {
+          if (expression.includes('function pageSseWrapper')) window.__sseWrapperRequested = true;
+          callback('[]');
+        } };
       `,
     });
     try {
@@ -7515,18 +7459,14 @@ browserTest(
           response: { status: 101, headers: [], content: {} },
           _webSocketMessages: frames,
         });
-        const earlier = await nextStamp();
-        const previous = connection('B', earlier, [frame('send', 'previous page', earlier)]);
+        const capture = document.querySelector('#wsCaptureBtn');
+        if (!await waitFor(() => capture.getAttribute('aria-pressed') === 'true', 2000)) throw new Error('Capture was not on by default');
         await nextStamp();
         window.__wsNavigated.forEach((listener) => listener('https://example.test'));
         const startup = await nextStamp();
-        previous._webSocketMessages.push(frame('receive', 'old socket after navigation', startup));
         const first = [frame('send', 'first message', startup), frame('receive', 'first reply', startup)];
         const entry = connection('A', startup, first);
-        window.__harEntries = [previous, entry];
-        await nextStamp();
-        const capture = document.querySelector('#wsCaptureBtn');
-        capture.click();
+        window.__harEntries = [entry];
         const rows = () => Array.from(document.querySelectorAll('#tbody tr[data-row-id]'));
         if (!await waitFor(() => rows().length === 1, 3000)) throw new Error('No native WebSocket connection');
         const id = rows()[0].dataset.rowId;
@@ -7547,12 +7487,14 @@ browserTest(
         if (!await waitFor(() => messages().includes('later reply'), 3000)) throw new Error('Selected timeline did not refresh');
         window.__networkPlusLiveListener({ ...entry, time: 50 });
         await waitFor(() => rows()[0].querySelector('[data-col-id="status"]').textContent === 'Closed', 2000);
-        return { id, initial, messages: messages(), rows: rows().map((row) => ({
+        return { id, initial, messages: messages(), stored: window.__captureWrites, sse: window.__sseWrapperRequested, rows: rows().map((row) => ({
           id: row.dataset.rowId, status: row.querySelector('[data-col-id="status"]').textContent,
         })) };
       })()`, true);
       expect(result.initial).toEqual(['first message', 'first reply']);
       expect(result.messages).toEqual(['first message', 'first reply', 'later reply']);
+      expect(result.stored).toEqual(['off', 'on']);
+      expect(result.sse).toBe(false);
       expect(result.rows).toEqual([{ id: result.id, status: 'Closed' }]);
     } finally {
       await page.close();
@@ -16883,93 +16825,39 @@ browserTest(
             expect(countLayout.text).toBe(countLayout.expectedText);
             expect(countLayout.title).toBe(countLayout.expectedTitle);
           }
-          for (const counts of [
-            { '2xx': 1, '3xx': 0, '4xx': 0, '5xx': 1, other: 0 },
-            { '2xx': 999999, '3xx': 1000, '4xx': 0, '5xx': 1, other: 9999 },
-            { '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, other: 0 },
-          ]) {
-            const observed = await evaluate(page.cdp, `(() => {
-              const theme = ${JSON.stringify(theme.dataTheme)};
-              if (theme === null) document.documentElement.removeAttribute('data-theme');
-              else document.documentElement.dataset.theme = theme;
-              _NetworkPlus.renderStatsSummary(document.querySelector('#statsSummary'), {
-                statusClassCounts: ${JSON.stringify(counts)}, avgDuration: 886, minDuration: 24, maxDuration: 2450,
-              }, () => {});
-              const badgeProfile = (style) => Object.fromEntries([
-                'boxSizing', 'minWidth', 'paddingLeft', 'paddingRight', 'borderTopWidth',
-                'borderTopStyle', 'borderTopColor', 'borderRadius', 'backgroundColor',
-                'fontSize', 'fontWeight', 'lineHeight', 'textAlign', 'fontVariantNumeric',
-              ].map((key) => [key, style[key]]));
-              return {
-                referenceBadge: badgeProfile(getComputedStyle(document.querySelector('#req-tab-query'), '::after')),
-                pageOverflow: document.documentElement.scrollWidth > innerWidth,
-                chips: Array.from(document.querySelectorAll('.status-summary-chip')).map((chip) => {
-                  const box = chip.getBoundingClientRect();
-                  const label = chip.querySelector('.status-summary-chip-label');
-                  const count = chip.querySelector('.status-summary-chip-count');
-                  const labelBox = label.getBoundingClientRect();
-                  const countBox = count.getBoundingClientRect();
-                  return {
-                    statusClass: chip.dataset.statusClass, label: label.textContent, count: count.textContent,
-                    tag: chip.tagName, text: chip.textContent, height: box.height,
-                    badgeHeight: countBox.height, badgeStyle: badgeProfile(getComputedStyle(count)),
-                    centered: Math.abs(countBox.top + countBox.height / 2 - box.top - box.height / 2) <= 0.5,
-                    ariaLabel: chip.getAttribute('aria-label'), ariaHidden: chip.getAttribute('aria-hidden'),
-                    separated: labelBox.right <= countBox.left && countBox.right <= box.right - 0.5,
-                    fits: chip.scrollWidth <= chip.clientWidth + 1 && chip.scrollHeight <= chip.clientHeight + 1,
-                  };
-                }),
-              };
-            })()`);
-            expect(observed.pageOverflow).toBe(false);
-            expect(observed.chips).toHaveLength(5);
-            for (const chip of observed.chips) {
-              const count = counts[chip.statusClass];
-              expect(chip).toMatchObject({
-                label: chip.statusClass, count: String(count), text: chip.statusClass + ' ' + count,
-                height: 24, badgeHeight: 16, centered: true,
-                tag: count > 0 ? 'BUTTON' : 'SPAN', fits: true, separated: true,
-                ariaHidden: count > 0 ? null : 'true',
-              });
-              expect(chip.badgeStyle).toEqual(observed.referenceBadge);
-              expect(chip.badgeStyle).toMatchObject({ borderTopWidth: '1px', borderTopStyle: 'solid' });
-              if (count > 0) {
-                expect(chip.ariaLabel).toBe('Inspect first visible ' +
-                  (chip.statusClass === 'other' ? 'other-status' : chip.statusClass) +
-                  ' request (' + count + ' matching)');
-              }
-            }
-            if (counts['2xx'] > 0) {
-              const point = await evaluate(page.cdp, `(() => {
-                const chip = document.querySelector('.status-summary-chip--2xx');
-                const box = chip.getBoundingClientRect();
-                return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-              })()`);
-              await page.cdp.send('Input.dispatchMouseEvent', {
-                type: 'mousePressed', ...point, button: 'left', clickCount: 1,
-              });
-              const contrast = await evaluate(page.cdp, `(() => {
-                const chip = document.querySelector('.status-summary-chip--2xx');
-                const count = chip.querySelector('.status-summary-chip-count');
-                const rgba = (text) => text.match(/[\\d.]+/g).map(Number);
-                const ink = rgba(getComputedStyle(count).color);
-                const front = rgba(getComputedStyle(count).backgroundColor);
-                const back = rgba(getComputedStyle(chip).backgroundColor);
-                const alpha = front[3] ?? 1;
-                const ground = front.slice(0, 3).map((channel, i) => channel * alpha + back[i] * (1 - alpha));
-                const luminance = (rgb) => rgb.slice(0, 3).reduce((sum, channel, i) => {
-                  const c = channel / 255;
-                  return sum + (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * [0.2126, 0.7152, 0.0722][i];
-                }, 0);
-                const a = luminance(ink), b = luminance(ground);
-                return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-              })()`);
-              await page.cdp.send('Input.dispatchMouseEvent', {
-                type: 'mouseReleased', ...point, button: 'left', clickCount: 1,
-              });
-              expect(contrast).toBeGreaterThanOrEqual(4.5);
-            }
-          }
+          const observed = await evaluate(page.cdp, `(() => {
+            const theme = ${JSON.stringify(theme.dataTheme)};
+            if (theme === null) document.documentElement.removeAttribute('data-theme');
+            else document.documentElement.dataset.theme = theme;
+            const counts = { all: 1000000, '2xx': 999999, '3xx': 0, '4xx': 1, '5xx': 0, other: 0, pending: 0 };
+            const luminance = (rgb) => rgb.match(/[\\d.]+/g).slice(0, 3).reduce((sum, value, index) => {
+              const c = Number(value) / 255;
+              return sum + (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * [0.2126, 0.7152, 0.0722][index];
+            }, 0);
+            const buttons = [...document.querySelectorAll('.analysis-status [data-status-facet]')];
+            const fits = buttons.every(button => {
+              const count = button.querySelector('.analysis-count');
+              count.textContent = String(counts[button.dataset.statusFacet]);
+              const box = button.getBoundingClientRect();
+              return box.height >= 27 && box.right <= ${width} && button.scrollWidth <= button.clientWidth + 1;
+            });
+            const contrast = buttons.map(button => {
+              const badge = getComputedStyle(button.querySelector('.analysis-count'));
+              const a = luminance(badge.color);
+              const b = luminance(badge.backgroundColor);
+              return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+            });
+            const footer = document.querySelector('#statsSummary');
+            return { fits, pageOverflow: document.documentElement.scrollWidth > innerWidth,
+              names: buttons.map(button => button.getAttribute('aria-label')),
+              footerHasActions: !!footer.querySelector('button'), duration: footer.querySelector('.status-summary-duration').title,
+              minimumContrast: Math.min(...contrast) };
+          })()`);
+          expect(observed).toMatchObject({ fits: true, pageOverflow: false, footerHasActions: false });
+          expect(observed.names).toHaveLength(7);
+          expect(observed.names).toEqual(['All: 3', '2xx: 1', '3xx: 1', '4xx: 0', '5xx: 1', 'Other: 0', 'Pending: 0']);
+          expect(observed.duration).toMatch(/^avg .* · min .* · max /);
+          expect(observed.minimumContrast).toBeGreaterThanOrEqual(4.5);
         }
       }
     } finally {
@@ -16989,8 +16877,31 @@ browserTest(
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers });
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers });
     };
+    const measureFilter = () => evaluate(cdp, `(() => {
+      const popup = document.getElementById('columnFilterPopup');
+      const rect = popup.getBoundingClientRect();
+      const groups = [...popup.querySelectorAll('.filter-status-row')];
+      const positions = groups.map(group => {
+        const labels = [...group.querySelectorAll('.filter-checkbox-inline')];
+        const first = labels[0].getBoundingClientRect();
+        const category = group.querySelector('.filter-status-category').getBoundingClientRect();
+        return {
+          left: first.left,
+          stacked: first.top >= category.bottom - 0.5,
+          fits: labels.every(label => label.getBoundingClientRect().right <= rect.right),
+        };
+      });
+      return {
+        aligned: new Set(positions.map(position => position.left)).size === 1,
+        groups: positions.length,
+        stacked: positions.every(position => position.stacked),
+        fits: positions.every(position => position.fits) && popup.scrollWidth <= popup.clientWidth + 1,
+        labelled: document.getElementById(popup.getAttribute('aria-labelledby')).textContent,
+      };
+    })()`);
     try {
       await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      expect(await measureFilter()).toEqual({ aligned: true, groups: 4, stacked: false, fits: true, labelled: 'Column filters' });
       expect(await evaluate(cdp, "document.activeElement.getAttribute('aria-expanded')")).toBe('false');
       await evaluate(cdp, "document.activeElement.click()");
       await press('Tab', 'Tab', 9);
@@ -17037,6 +16948,10 @@ browserTest(
       await evaluate(cdp, "document.querySelector('#searchToggleBtn').click(); document.querySelector('.search-color-btn').click()");
       await press('Tab', 'Tab', 9);
       expect(await evaluate(cdp, "document.querySelector('#searchColorMenu').classList.contains('show')")).toBe(false);
+
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 320, height: 540, deviceScaleFactor: 1, mobile: false });
+      await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      expect(await measureFilter()).toEqual({ aligned: true, groups: 4, stacked: true, fits: true, labelled: 'Column filters' });
     } finally {
       await page.close();
     }

@@ -10,6 +10,42 @@ const np = require('../panel.js');
 
 const PANEL_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
 
+describe('full payload search worker', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'payload-search.js'), 'utf8');
+  const search = (text, rules, after = null, webSocketAliases = false) => {
+    const self = { postMessage: jest.fn() };
+    vm.runInNewContext(source, { self });
+    self.onmessage({ data: { text, rules, after, webSocketAliases } });
+    return self.postMessage.mock.calls[0][0];
+  };
+
+  test('matches full text without returning it to the request list', () => {
+    const text = 'x'.repeat(40000) + ' Needle';
+    expect(search(text, [{ source: '\\bneedle\\b', flags: 'gi' }, { source: 'needle', flags: 'g' }]))
+      .toEqual([true, false]);
+  });
+
+  test('returns only bounded excerpts for matches extending past the preview', () => {
+    const text = 'needle ' + 'x'.repeat(20000) + 'needle' + 'y'.repeat(200);
+    const [result] = search(text, [{ source: 'needle', flags: 'g' }], 20010);
+    expect(result.hits).toEqual([{ offset: 20007, before: 'x'.repeat(80), match: 'needle', after: 'y'.repeat(80) }]);
+    expect(result.more).toBe(false);
+    const [many] = search('a '.repeat(200), [{ source: 'a*', flags: 'g' }], 0);
+    expect(many.hits).toHaveLength(100);
+    expect(many.more).toBe(true);
+  });
+
+  test('matches an escaped emoji in a large framed message without decoding literal escapes', () => {
+    const padding = 'x'.repeat(40000);
+    const tail = '{"padding":"' + padding + '","match":"';
+    const query = [{ source: '👋', flags: 'gi' }];
+    const good = tail + String.raw`\uD83D\uDC4B` + '"}\u001e';
+    const literal = tail + String.raw`\\uD83D\\uDC4B` + '"}\u001e';
+    expect(search(good, query, 2048, true)[0].hits[0].match).toBe('👋');
+    expect(search(literal, query, 2048, true)[0].hits).toEqual([]);
+  });
+});
+
 describe('native WebSocket capture', () => {
   const start = Date.UTC(2026, 10, 17);
   const request = { method: 'GET', url: 'wss://example.test/socket' };
@@ -89,22 +125,26 @@ describe('traffic overview', () => {
     ];
     const { range } = np.computeTrafficTimeline(rows);
     expect(range).toEqual({ start: 0, end: 100 });
-    expect(np.planOverviewWaterfallPage(rows, range, 0)).toMatchObject({
-      total: 7,
-      lastPage: 1,
-      entries: [
+    expect([rows[0], rows[2], rows[1], ...rows.slice(3)].map((row) => np.buildOverviewRequestEntry(row, range)))
+      .toMatchObject([
         { startsAt: 0, width: 1, duration: 100 },
         { startsAt: 0.21, width: 0, duration: null },
         { startsAt: 0.25, width: 0.75, statusClass: '5xx' },
         { startsAt: 0.3, width: 0, duration: 0 },
         { startsAt: 0.3, width: 0, duration: null },
         { startsAt: 0.31, width: 0 },
-      ],
-    });
-    expect(np.planOverviewWaterfallPage(rows, range, 3)).toMatchObject({ page: 1, offset: 6, entries: [{ row: rows[6] }] });
+        { startsAt: 0.4, width: 0 },
+      ]);
     expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 26, end: 30 }))).toEqual(rows.slice(0, 2));
     expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 100, end: 101 }))).toEqual([]);
     expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 30, end: 31 }))).toEqual([rows[0], rows[1], rows[3], rows[4]]);
+  });
+
+  test('keeps a bounded waterfall window and clamps past the last request', () => {
+    expect(np.planOverviewRequestWindow(0, 0)).toEqual({ start: 0, end: 0 });
+    expect(np.planOverviewRequestWindow(5, 0)).toEqual({ start: 0, end: 5 });
+    expect(np.planOverviewRequestWindow(1203, 25 * 700 + 3)).toEqual({ start: 697, end: 713 });
+    expect(np.planOverviewRequestWindow(1203, 25 * 1203)).toEqual({ start: 1199, end: 1203 });
   });
 
   test('keeps measured zero and band boundaries, and excludes pending and unknown durations', () => {
@@ -3450,6 +3490,15 @@ describe('evaluateFilterRule', () => {
     expect(np.evaluateFilterRule('PUT', rule, false)).toBe(false);
   });
 
+  test('applies status-family defaults to future codes and preserves individual overrides', () => {
+    const rule = { mode: 'statusSet', excludedFamilies: ['4xx', 'other'], include: { 404: true, 503: false } };
+    const restored = np.deserializeFilterState(np.serializeFilterState({ status: rule })).status;
+    expect(np.isRuleActive(restored)).toBe(true);
+    expect([200, 304, 418, 499, 404, 503, 599, 101, 0].map((code) => np.evaluateFilterRule(code, restored, true)))
+      .toEqual([true, true, false, false, true, false, true, false, false]);
+    expect(np.isRuleActive({ mode: 'statusSet', excludedFamilies: ['4xx'], include: {} })).toBe(true);
+  });
+
   test('supports statusSet mode for status code filtering', () => {
     const rule = {
       mode: 'statusSet',
@@ -5196,14 +5245,11 @@ describe('status class statistics', () => {
     },
   );
 
-  test('builds ordered semantic indicator descriptors without trusting malformed counts', () => {
-    expect(np.getStatusClassIndicators({ '2xx': 4, '3xx': -1, '4xx': 2.5, '5xx': 1, other: 3 })).toEqual([
-      { statusClass: '2xx', count: 4, text: '2xx 4' },
-      { statusClass: '3xx', count: 0, text: '3xx 0' },
-      { statusClass: '4xx', count: 0, text: '4xx 0' },
-      { statusClass: '5xx', count: 1, text: '5xx 1' },
-      { statusClass: 'other', count: 3, text: 'other 3' },
-    ]);
+  test('classifies request facets and counts pending independently from other', () => {
+    expect([200, 302, 404, 503, 101, 0, undefined].map((status) => np.classifyRequestFacet({ status })))
+      .toEqual(['2xx', '3xx', '4xx', '5xx', 'other', 'other', 'other']);
+    expect(np.classifyRequestFacet({ status: 0, _pendingRequest: true })).toBe('pending');
+    expect(np.classifyRequestFacet({ status: 200, _pendingRequest: false })).toBe('2xx');
   });
 
   test.each([
@@ -5218,35 +5264,8 @@ describe('status class statistics', () => {
     expect(statusClasses).toEqual(expectedClasses);
   });
 
-  test('formats a compact textual summary in status-class order', () => {
-    expect(
-      np.formatStatusClassSummary({ '2xx': 4, '3xx': 3, '4xx': 2, '5xx': 1, other: 5 }),
-    ).toBe('status 2xx 4 · 3xx 3 · 4xx 2 · 5xx 1 · other 5');
-  });
-
-  test('finds the first matching status-class row in the supplied visible order', () => {
-    const visibleSortedRows = [
-      { id: 'latest-2xx', status: 204 },
-      { id: 'first-5xx', status: 503 },
-      { id: 'second-5xx', status: 500 },
-      { id: 'other-status' },
-    ];
-
-    expect(np.findFirstStatusClassRow(visibleSortedRows, '5xx')).toBe(visibleSortedRows[1]);
-    expect(np.findFirstStatusClassRow(visibleSortedRows, 'other')).toBe(visibleSortedRows[3]);
-    expect(np.findFirstStatusClassRow(visibleSortedRows, '1xx')).toBeNull();
-    expect(np.findFirstStatusClassRow([null, undefined], 'other')).toBeNull();
-    expect(visibleSortedRows.map((row) => row.id)).toEqual([
-      'latest-2xx',
-      'first-5xx',
-      'second-5xx',
-      'other-status',
-    ]);
-  });
-
-  test('renders non-empty status classes as accessible inspection buttons', () => {
+  test('keeps average duration visible and the full duration range accessible in the footer', () => {
     const statsElement = { textContent: '', appendChild: jest.fn() };
-    const onInspect = jest.fn();
     document.createElement.mockClear();
 
     np.renderStatsSummary(
@@ -5257,44 +5276,14 @@ describe('status class statistics', () => {
         minDuration: 10,
         maxDuration: 40,
       },
-      onInspect,
     );
 
-    const createdElements = document.createElement.mock.calls.map((call, index) => ({
-      tagName: call[0],
-      element: document.createElement.mock.results[index].value,
-    }));
-    const fiveHundreds = createdElements.find(({ element }) =>
-      element.className.includes('status-summary-chip--5xx'),
-    );
-    const redirects = createdElements.find(({ element }) =>
-      element.className.includes('status-summary-chip--3xx'),
-    );
-    const accessibleSummary = createdElements.find(
-      ({ element }) => element.className === 'sr-only status-summary-accessible',
-    ).element;
-
-    expect(fiveHundreds.tagName).toBe('button');
-    expect(fiveHundreds.element.type).toBe('button');
-    expect(fiveHundreds.element.title).toBe(
-      'Inspect first visible 5xx request (1 matching)',
-    );
-    expect(fiveHundreds.element.setAttribute).toHaveBeenCalledWith(
-      'aria-label',
-      'Inspect first visible 5xx request (1 matching)',
-    );
-    const clickHandler = fiveHundreds.element.addEventListener.mock.calls.find(
-      ([eventName]) => eventName === 'click',
-    )[1];
-    clickHandler();
-    expect(onInspect).toHaveBeenCalledWith('5xx');
-
-    expect(redirects.tagName).toBe('span');
-    expect(redirects.element.className).toContain('status-summary-chip--empty');
-    expect(redirects.element.setAttribute).toHaveBeenCalledWith('aria-hidden', 'true');
-    expect(accessibleSummary.textContent).toBe(
-      'status 2xx 2 · 3xx 0 · 4xx 0 · 5xx 1 · other 0 | avg 25 ms · min 10 ms · max 40 ms',
-    );
+    const [accessibleSummary, duration] = statsElement.appendChild.mock.calls.map(([element]) => element);
+    expect(document.createElement.mock.calls).toEqual([['span'], ['span']]);
+    expect(accessibleSummary.textContent).toBe('avg 25 ms · min 10 ms · max 40 ms');
+    expect(duration.textContent).toBe('avg 25 ms');
+    expect(duration.title).toBe(accessibleSummary.textContent);
+    expect(duration.setAttribute).toHaveBeenCalledWith('aria-hidden', 'true');
   });
 
   test('counts every row exactly once, including malformed and missing statuses', () => {
@@ -6525,6 +6514,7 @@ describe('details reopen status', () => {
     for (const [key, text] of Object.entries(ENGLISH)) expect([key, np.uiText(key)]).toEqual([key, text]);
     expect(np.uiTextFormat('menuFilterOnly', { column: 'Domain', value: 'api.test' })).toBe('Only Domain api.test');
     expect(np.uiTextFormat('menuFilterExclude', { column: 'Path', value: '/v1' })).toBe('Exclude Path /v1');
+    expect(np.uiTextFormat('analysisSingleColumnFilter', { column: 'Status' })).toBe('Status filter');
     expect(np.uiTextFormat('menuHighlightRows', { count: 3 })).toBe('Highlight (3 rows)');
     expect(np.uiTextFormat('menuUnhighlightRows', { count: 3 })).toBe('Unhighlight (3)');
     expect(np.uiTextFormat('menuKeepSelected', { count: 2 })).toBe('Keep Selected (2)');
@@ -6685,6 +6675,7 @@ describe('details reopen status', () => {
       { key: 'statusCopiedFullUnsanitized', slot: 'label', values: PANE_NAME_KEYS },
       { key: 'menuFilterOnly', slot: 'column', texts: COLUMN_LABELS, others: { value: 'r-42' } },
       { key: 'menuFilterExclude', slot: 'column', texts: COLUMN_LABELS, others: { value: 'r-42' } },
+      { key: 'analysisSingleColumnFilter', slot: 'column', texts: COLUMN_LABELS },
       // The auto-hide opt-out names the column it pins back, in both places.
       { key: 'columnsShowAnywayLabel', slot: 'column', texts: COLUMN_LABELS },
       { key: 'columnsShowAnywayStatus', slot: 'column', texts: COLUMN_LABELS },
@@ -8483,6 +8474,65 @@ describe('websocket capture pieces', () => {
     expect(np.planWsMessageJson('label={"ok":true}')).toBeNull();
     expect(np.planWsMessageJson('["' + 'x'.repeat(17 * 1024) + '"]')).toBeNull();
     expect(np.planWsMessageJson('[' + '0,'.repeat(2050) + '0]')).toBeNull();
+  });
+
+  test.each([
+    ['4:::', '{"count":1}', '{\n  "count": 1\n}'],
+    ['4:7:/chat:', '[1,true]', '[\n  1,\n  true\n]'],
+    ['5:::', '{"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['5:1::', '{"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['5:1+::', '{"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['5:2+:/group/chat:', ' {"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['6:::1+', '["pong"]', '[\n  "pong"\n]'],
+    ['6::/chat:17+', '[null]', '[\n  null\n]'],
+  ])('formats legacy Socket.IO packet %s and retains the original envelope', (envelope, body, formatted) => {
+    expect(np.planWsMessageJson(envelope + body)).toEqual({ envelope, formatted, tail: '' });
+  });
+
+  test('formats a truncated legacy Socket.IO preview without guessing malformed or control packets', () => {
+    expect(np.planWsMessageJson('5:1+::{"name":"demo","body":"part', true)).toEqual({
+      envelope: '5:1+::',
+      formatted: '{\n  "name": "demo",\n  "body": ',
+      tail: '"part',
+    });
+    for (const packet of ['1::', '3:::{"x":1}', '5:abc::{"name":"demo"}',
+      '5:::[1]', '5:::{"name":}', '6:::1', '6:::["pong"]', '6:::1+{"x":1}', 'prefix 5:::{"name":"demo"}']) {
+      expect(np.planWsMessageJson(packet)).toBeNull();
+    }
+    expect(np.planWsMessageJson('5:::{"text":"' + 'x'.repeat(17 * 1024) + '"}')).toBeNull();
+  });
+
+  test('formats bounded SignalR records without changing malformed or escaped text', () => {
+    const record = '\u001e';
+    expect(np.planWsMessageJson('{"protocol":"json","version":1}' + record)?.formatted)
+      .toBe('{\n  "protocol": "json",\n  "version": 1\n}');
+    const grouped = '{"id":9007199254740993,"escaped":"\\u001e"}' + record + '{"ok":true}' + record;
+    expect(np.planWsMessageJson(grouped)?.formatted)
+      .toBe('{\n  "id": 9007199254740993,\n  "escaped": "\\u001e"\n}\n\n{\n  "ok": true\n}');
+    expect(np.planWsMessageJson('{"first":1}' + record + '{"body":"part', true))
+      .toMatchObject({ formatted: '{\n  "first": 1\n}\n\n{\n  "body": ', tail: '"part' });
+    expect(np.planWsMessageJson('{"first":1}' + record + '{"body":true}')).toBeNull();
+    expect(np.planWsMessageJson('{"first":1}' + record + 'bad' + record)).toBeNull();
+    expect(np.planWsMessageJson(('{}' + record).repeat(17))).toBeNull();
+  });
+
+  test('shows printable Unicode in WebSocket JSON and preserves escapes used as literal text or syntax', () => {
+    const original = String.raw`{"\u65E5":"\uD83D\uDC4B\uD83D\uDE0A \u2705 \uD83D\uDC69\uD83C\uDFFD\u200D\uD83D\uDD2C","raw":"\\uD83D\\uDC4B \u0022 \u005c \u001e \u202e \ud83d \n"}` + '\u001e';
+    const visible = String.raw`{"日":"👋😊 ✅ 👩🏽‍🔬","raw":"\\uD83D\\uDC4B \u0022 \u005c \u001e \u202e \ud83d \n"}` + '\u001e';
+    expect(np.getWsMessageDisplayText(original, false)).toBe(visible);
+    expect(np.planWsMessageJson(original).formatted).toContain(String.raw`\uD83D\uDC4B`);
+    expect(np.getWsMessageDisplayText(String.raw`5:2+::{"name":"\uD83D\uDC4B"}`, false)).toBe('5:2+::{"name":"👋"}');
+    expect(np.getWsMessageDisplayText(String.raw`42["\uD83D\uDC4B"]`, false)).toBe('42["👋"]');
+  });
+
+  test('uses complete escapes only in truncated WebSocket previews and leaves malformed and raw text intact', () => {
+    const prefix = String.raw`{"text":"\uD83D\uDC4B \uD83D\uDC`;
+    expect(np.getWsMessageDisplayText(prefix, true)).toBe(String.raw`{"text":"👋 \uD83D\uDC`);
+    for (const data of [prefix, String.raw`{"text":"\uD83D\uDC4B",}`, String.raw`plain \uD83D\uDC4B`]) {
+      expect(np.getWsMessageDisplayText(data, false)).toBe(data);
+    }
+    const long = String.raw`{"text":"\uD83D\uDC4B` + 'a'.repeat(17 * 1024) + '"}';
+    expect(np.getWsMessageDisplayText(long, false)).toBe(long);
   });
 
   test('the latest WebSocket history keeps recording after the full HAR frame cap', () => {

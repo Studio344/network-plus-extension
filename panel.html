@@ -70,8 +70,8 @@
     </div>
   </header>
   <div id="wsCapturePrompt" class="ws-capture-prompt" hidden>
-    <span id="wsCapturePromptHelp" data-i18n="wsCapturePromptHelp">Enable stream capture before opening a new WebSocket connection.</span>
-    <button id="wsCapturePromptBtn" class="ws-capture-btn" type="button" aria-describedby="wsCapturePromptHelp" data-i18n="wsCapturePromptBtn">Enable stream capture</button>
+    <span id="wsCapturePromptHelp" data-i18n="wsCapturePromptHelp">WebSocket capture is off. Turn it on to record new messages.</span>
+    <button id="wsCapturePromptBtn" class="ws-capture-btn" type="button" aria-describedby="wsCapturePromptHelp" data-i18n="wsCapturePromptBtn">Enable WebSocket capture</button>
   </div>
   <div class="search-panel" id="searchPanel" role="search" aria-label="Search requests" style="display:none">
     <div class="search-panel-rows" id="searchRows"></div>
@@ -89,10 +89,13 @@
   </div>
   <section id="analysisBar" class="analysis-bar" aria-label="Request filters and actions" data-i18n-aria-label="analysisAria" hidden>
     <div class="analysis-actions">
-      <div class="analysis-status" role="group" aria-label="Filter by request status" data-i18n-aria-label="analysisStatusAria">
+      <div class="analysis-status" role="group" aria-label="Filter by request status" data-i18n-aria-label="analysisStatusAria" data-i18n-title="analysisStatusAria">
         <button type="button" data-status-facet="all" aria-pressed="true"><span data-i18n="analysisAll">All</span><span class="analysis-count"></span></button>
+        <button type="button" data-status-facet="2xx" aria-pressed="false"><span>2xx</span><span class="analysis-count"></span></button>
+        <button type="button" data-status-facet="3xx" aria-pressed="false"><span>3xx</span><span class="analysis-count"></span></button>
         <button type="button" data-status-facet="4xx" aria-pressed="false"><span>4xx</span><span class="analysis-count"></span></button>
         <button type="button" data-status-facet="5xx" aria-pressed="false"><span>5xx</span><span class="analysis-count"></span></button>
+        <button type="button" data-status-facet="other" aria-pressed="false"><span data-i18n="analysisStatusOther">Other</span><span class="analysis-count"></span></button>
         <button type="button" data-status-facet="pending" aria-pressed="false"><span data-i18n="analysisPending">Pending</span><span class="analysis-count"></span></button>
       </div>
       <button type="button" id="analysisDomainsBtn" aria-controls="domainSummary" aria-expanded="false" data-i18n="analysisDomains">Hosts</button>
@@ -111,16 +114,12 @@
             <span data-status-class="2xx">2xx</span><span data-status-class="3xx">3xx</span>
             <span data-status-class="4xx">4xx</span><span data-status-class="5xx">5xx</span>
           </div>
-          <div id="overviewPager" class="overview-pager" hidden>
-            <span id="overviewPageCount" class="overview-muted" aria-live="polite"></span>
-            <button type="button" id="overviewPreviousPage" class="overview-action" data-i18n-aria-label="overviewPreviousPage" aria-label="Previous requests">‹</button>
-            <button type="button" id="overviewNextPage" class="overview-action" data-i18n-aria-label="overviewNextPage" aria-label="Next requests">›</button>
-          </div>
+          <span id="overviewRequestCount" class="overview-muted" hidden></span>
         </div>
       </div>
       <p id="overviewTimeEmpty" class="overview-muted" data-i18n="overviewNoStarts" hidden>No recorded start times in this scope.</p>
       <p id="overviewInstructions" class="overview-muted" data-i18n="overviewInstructions">Left edge = start. Bar length = duration. Drag the time ruler to filter.</p>
-      <div id="overviewWaterfall" class="overview-waterfall">
+      <div id="overviewWaterfall" class="overview-waterfall" role="region" tabindex="0" aria-label="Scrollable requests" data-i18n-aria-label="overviewScrollRegion">
         <div class="overview-ruler">
           <div id="overviewTimeBounds" class="overview-time-bounds" aria-hidden="true"><span></span><span></span><span></span></div>
           <div id="overviewTimeline" class="overview-timeline" role="group" data-i18n-aria-label="overviewBinGroup" aria-label="Filter by time range" aria-describedby="overviewInstructions"></div>
@@ -239,7 +238,7 @@
       </div>
     </aside>
   </main>
-  <footer class="statusbar"><span id="offlineViewStatus" class="sample-capture-status" data-i18n="offlineViewScope" hidden>Offline · no live capture</span><span id="sampleCaptureStatus" class="sample-capture-status" hidden></span><button id="sampleGuideBtn" type="button" class="sample-guide-btn" aria-haspopup="dialog" aria-controls="sampleGuideDialog" aria-expanded="false" data-i18n="sampleGuideBtn" hidden disabled>Sample guide</button><button id="sampleExitBtn" type="button" class="sample-exit-btn" title="Remove the complete local sample and restore the prior recording state and column filters" data-i18n-title="titleSampleExit" data-i18n="sampleGuideExit" hidden disabled>Exit · restore prior recording state</button><button id="wsCaptureBtn" type="button" class="ws-capture-btn" title="Record WebSocket and Server-Sent Events while stream capture is on" data-i18n-title="titleWsCapture" aria-pressed="false" hidden>Stream capture: Off</button><button id="wsReloadBtn" class="ws-capture-btn" type="button" data-i18n="wsReloadCapture" hidden>Reload and record</button><button id="undoClearBtn" type="button" class="undo-clear-btn" aria-label="Undo clear" data-i18n-aria-label="ariaUndoClear" data-i18n="undoClearBtn" hidden disabled>Undo clear</button><span id="statusText" role="status" aria-live="polite" aria-atomic="true">Loaded</span><span class="spacer"></span><span id="statusDetails" class="status-details" role="group" aria-label="Retention and aggregate status details"><span id="retentionStatus" title="Retention: 20,000 requests. body cache 0 B / 32 MB">cache 0 B / 32 MB</span><span id="statsSummary"></span><span id="selectedSize"></span><span id="totalSize"></span></span><span id="counter" aria-hidden="true">0 requests</span><button id="statusDetailsToggle" type="button" class="status-details-toggle" aria-controls="statusDetails" aria-expanded="false" data-i18n="statusDetailsToggle" hidden>More status</button><span id="requestCountStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span><span id="retentionAnnouncement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span></footer>
+  <footer class="statusbar"><span id="offlineViewStatus" class="sample-capture-status" data-i18n="offlineViewScope" hidden>Offline · no live capture</span><span id="sampleCaptureStatus" class="sample-capture-status" hidden></span><button id="sampleGuideBtn" type="button" class="sample-guide-btn" aria-haspopup="dialog" aria-controls="sampleGuideDialog" aria-expanded="false" data-i18n="sampleGuideBtn" hidden disabled>Sample guide</button><button id="sampleExitBtn" type="button" class="sample-exit-btn" title="Remove the complete local sample and restore the prior recording state and column filters" data-i18n-title="titleSampleExit" data-i18n="sampleGuideExit" hidden disabled>Exit · restore prior recording state</button><button id="wsCaptureBtn" type="button" class="ws-capture-btn" title="Record WebSocket messages in the inspected tab while live recording is running" data-i18n-title="titleWsCapture" aria-pressed="false" hidden>WebSocket capture: Off</button><button id="wsReloadBtn" class="ws-capture-btn" type="button" data-i18n="wsReloadCapture" hidden>Reload and record</button><button id="undoClearBtn" type="button" class="undo-clear-btn" aria-label="Undo clear" data-i18n-aria-label="ariaUndoClear" data-i18n="undoClearBtn" hidden disabled>Undo clear</button><span id="statusText" role="status" aria-live="polite" aria-atomic="true">Loaded</span><span class="spacer"></span><span id="statusDetails" class="status-details" role="group" aria-label="Retention and aggregate status details"><span id="retentionStatus" title="Retention: 20,000 requests. body cache 0 B / 32 MB">cache 0 B / 32 MB</span><span id="statsSummary"></span><span id="selectedSize"></span><span id="totalSize"></span></span><span id="counter" aria-hidden="true">0 requests</span><button id="statusDetailsToggle" type="button" class="status-details-toggle" aria-controls="statusDetails" aria-expanded="false" data-i18n="statusDetailsToggle" hidden>More status</button><span id="requestCountStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span><span id="retentionAnnouncement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span></footer>
   <dialog id="settingsDialog" aria-labelledby="settingsDialogTitle">
     <form method="dialog" class="settings-form">
       <h2 id="settingsDialogTitle" data-i18n="settingsTitle">Settings</h2>
@@ -259,6 +258,13 @@
           <option value="dark" data-i18n="settingsOptionDark">Dark</option>
           <option value="light" data-i18n="settingsOptionLight">Light</option>
         </select>
+      </section>
+      <section id="sseCaptureSettings" class="settings-section" aria-labelledby="sseCaptureTitle" hidden>
+        <h3 id="sseCaptureTitle" data-i18n="settingsSseSection">Server-Sent Events (SSE)</h3>
+        <label class="retention-unlimited">
+          <input id="sseCaptureToggle" type="checkbox">
+          <span data-i18n="settingsSseCapture">Record SSE in this session</span>
+        </label>
       </section>
       <section class="settings-section" aria-labelledby="retentionSectionTitle">
         <h3 id="retentionSectionTitle" data-i18n="settingsRetentionSection">🗃️ Retention</h3>
@@ -475,6 +481,7 @@
     </form>
   </dialog>
   <script src="vendor/fflate.js"></script>
+  <script src="payload-search.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>
