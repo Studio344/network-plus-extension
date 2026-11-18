@@ -54,10 +54,10 @@ jobs:
         run: npm ci
 
       - name: Run browser source-contract policy
-        run: npx jest tests/browser-availability-policy.test.js --runInBand --coverage=false
+        run: npm test -- --no-coverage tests/browser-availability-policy.test.js
 
-      - name: Run Jest
-        run: npm test -- --runInBand
+      - name: Run tests with coverage
+        run: npm test
 
       - name: Run ESLint
         run: npm run lint

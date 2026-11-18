@@ -112,7 +112,7 @@ Chrome と Edge で同じソースを使用します。記録と調査には `ch
 Chrome での検証内容:
 
 - Chrome 151 が `manifest.json` を拡張エラーなしで読み込むこと。
-- 実ブラウザ回帰テスト 133 件すべてが Chrome 151 で通ること(`CHROME_BIN=<path> npx jest tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`)。
+- 実ブラウザ回帰テスト 133 件すべてが Chrome 151 で通ること(`CHROME_BIN=<path> npm test -- --no-coverage tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`)。
 - 実際の Chrome DevTools ウィンドウに `Network+` タブが現れることは手動で確認。この最後の 1 点だけは自動化の外にあります: DevTools 拡張パネルは自動化環境では安定して読み込まれず、組み込みパネルの列挙すら成功しないため、CI では断言できません。
 
 ### 初回起動
@@ -126,9 +126,13 @@ Chrome での検証内容:
 - `chrome.devtools.network.onRequestFinished` によるライブキャプチャ。アニメーションフレームごとに追記され、既存行が再描画されることはありません。
 - リクエスト行は既定で全件保持し、メモリが無制限に増えうる旨をダイアログ内に警告として表示します。Settings で Unlimited を外すと 100〜100,000 件の上限をかけられ、古いものから破棄されます。
 - レスポンスボディは 1 件あたり 1 MiB・共有キャッシュ全体で 32 MiB に別建てで制限され、行そのものは残す LRU 破棄が働きます。
+- **大きな本文。** Body・Raw では最大 16 KiB をプレビューします。検索ではプレビューの先も調べ、一致箇所を短い抜粋で表示します。一覧のレスポンス本文検索も、DevTools や保持中の HAR・SAZ から本文を取得できます。元データを取得できない場合や検索上限に達した場合は、検索範囲を表示します。取得可能な全文は **レスポンスボディ全体を保存** から確認できます。
 - 記録の一時停止 / 再開、上にスクロールすると自動で切れるオートスクロール、10 秒間の **Undo clear** 付き `Clear`。
 - HAR(`.har`)と Fiddler SAZ(`.saz`)のインポート。インポートはアトミックで、ファイルが拒否されても現在のキャプチャは壊れません。`_webSocketMessages` を含む Chrome の HAR は、そのフレームがライブ WebSocket キャプチャと同じ Request / Response の Body ペインに展開されます。逆方向も同様で、ライブキャプチャした WebSocket 会話は完全版 HAR に `_webSocketMessages` として書き出されます(テキストフレームはキャプチャ上限 2 KB まで、ペイロードなしのバイナリフレームは件数のみ、失われた分はエントリに明記)。サニタイズ版エクスポートはフレームを省略し、省略した旨のマーカーを残します。
-- **オプトインのストリームキャプチャ(WebSocket + SSE)。** ステータスバーの **Stream capture** トグルが、DevTools の eval API 経由でページの `WebSocket` と `EventSource` のコンストラクタをラップし(追加権限なし)、接続を行として記録します。WebSocket の送信フレームは Request の Body ペイン、受信フレームと Server-Sent Events(名前付きイベントも、ページがリスナーを登録した時点から)とライフサイクルは Response の Body ペインに入り、他のボディと同様に検索・サニタイズ付きエクスポートの対象です。見えるのはキャプチャ ON 中に作られた接続だけで、ラッパーが通信を改変することはなく、ページ遷移後は自動で再インストールされます。
+- **WebSocketとSSEの記録。** Chrome・EdgeのDevToolsでNetwork+を開くと、ライブのWebSocket記録は既定でオンです。ステータスバーからオフにでき、設定は次回も維持されます。DevToolsが接続を取得できていなければ **再読み込みして記録** を使います。SSEは **設定** でセッションごとにオンにできます。記録した本文は **詳細** で検索でき、通信の改変や追加の権限はありません。
+- **WebSocket のメッセージ。** 記録した接続や取り込んだ HAR の接続を選ぶと、直近 100 件の時刻・色分けした送受信ラベル・本文のプレビューを、1 件 1 行で時系列に確認できます。ポップアウトにも対応します。行を開くと JSON オブジェクトや配列が整形され、キーや値の型ごとに色が付きます。SignalR や Socket.IO の JSON にも対応します。記録時に途中で切れた本文には注記が付きます。従来の Request・Response ペインは **詳細** から開けます。
+- **WebSocket の全文。** DevTools や直接選んだ HAR に全文が残っていれば、元のパネルの **全文を保存** から原文を保存できます。旧ブラウザー向けの代替記録を有効にした場合は、対象のページに最大 8 Mi UTF-16 コードユニットを一時保持します。記録停止・クリア・新しい記録セッション・ページ遷移・新着による領域の入れ替えで、この一時データは解放されます。DevTools を閉じた後もページに残る場合があります。
+- **WebSocket 通信を探す。** 一覧のツールバーで **WebSocket** を押すと、WebSocket 通信だけが表示されます。**メッセージ** の **本文を検索** または Ctrl/⌘+F では、行を折りたたんだまま、取得可能な本文をプレビューの先まで検索できます。一致した行を開くと該当箇所の抜粋が表示されます。JSON 内でエスケープされた絵文字などは文字として表示され、**送信**・**受信** の絞り込みも併用できます。
 - **ナビゲーションでキャプチャは消えません。** 行はページ遷移をまたいで保持され、上限付きキャッシュへ先読み済みのボディはそのまま読めます。取得が間に合わなかったボディは、後でエラーになる代わりに明示的な注記付きでマークされ、ステータスバーが両方の件数を報告します。
 
 ### 調べる
@@ -148,6 +152,8 @@ Chrome での検証内容:
 
 - 統合された複数キーワード検索(<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>F</kbd>): キーワードごとの入力欄、6 色のハイライト、キーワード別の件数と ▲▼ ナビゲーション、URL / Body / Headers のスコープ切替、一致オプション(大文字小文字 / 単語一致 / 正規表現)、非一致行を隠す **Matches only** トグル(HAR エクスポートは表示中のセットに従います)。スコープ・一致オプション・トグルはセッションをまたいで保存されますが、キーワード文字列は保存されません。
 - 列ごとのフィルタ: Client start / Server done のローカル時刻レンジピッカー、メソッド複数選択、ドメイン・パスへの繰り返し可能な `contains` / `notcontains` ルール、URL の any / all / exclude ロジック。
+- **一覧の絞り込みと操作。** 4xx、5xx、応答待ちの通信をワンクリックで表示できます。**ホスト**では完全一致で絞り込み、別のホストにも直接切り替えられます。適用中の条件は一覧の上で外せます。表示中のリクエストを2件選ぶと、同じ場所から比較を開けます。
+- **タイムライン。** 開始件数とHTTPエラーの分布をUTCで表示します。棒を選択して一覧を絞り込み、Shift＋クリックやShift＋矢印キーで範囲を広げられます。遅延分布は表示中の計測可能な通信が対象です。エラー最多の時間帯を選んだり、最も遅い通信を開いたりできます。
 - ビュープリセット — Columns メニューが保存ビュー(列の表示 + フィルタルール)を 1 つ保持します。Apply で復元(何も保存していなければ工場出荷状態)、Update で現在のビューを上書き保存。プリセットが保存するのは列とフィルタの構成だけで、キャプチャしたトラフィックは決して含まれません。
 - ステータスバー統計: 2xx / 3xx / 4xx / 5xx / その他の件数と、フィルタに追随して再計算される平均・最小・最大レスポンスタイム。
 
@@ -262,7 +268,7 @@ Edge / Chrome DevTools
 
 ```bash
 npm ci                    # ロックファイルから依存をインストール
-npm test                  # カバレッジ付き Jest
+npm test                  # カバレッジ付き Node.js テスト
 npm run lint              # ファーストパーティ JavaScript 全体に ESLint
 npm run format            # Prettier で整形(CI 同等の確認は format:check)
 npm run version:check     # リリースバージョン 5 箇所 + バージョン非依存の README 経路
@@ -275,21 +281,21 @@ npm run audit:strict      # npm audit --audit-level=high
 npm run text:check -- --base <base-sha> --head <head-sha>   # 変更行の空白 / エンコーディング
 ```
 
-[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) は Node.js 22 / 24 のマトリクスで、`npm ci`・Jest・ESLint・リリースバージョン同期・Prettier・ロックファイル来歴・変更行テキスト整合・拡張パッケージ整合・Edge/Chrome 申請キット整合・依存監査・コーディネータ契約を実行します。
+[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) は Node.js 22 / 24 のマトリクスで、`npm ci`・Node.js テストランナー・ESLint・リリースバージョン同期・Prettier・ロックファイル来歴・変更行テキスト整合・拡張パッケージ整合・Edge/Chrome 申請キット整合・依存監査・コーディネータ契約を実行します。
 
 ### テスト
 
 | 領域 | 手法 | 場所 |
 |---|---|---|
-| 純粋関数 | Jest ユニットテスト | [tests/panel.test.js](tests/panel.test.js) |
-| テーマ / UI 契約 | Jest 静的契約テスト | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
-| 拡張パッケージ整合 | Jest + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
-| リポジトリ整合 | Jest + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
-| ストア申請キット | Jest + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
-| サポート受付フォーム | Jest + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
-| 変更行の整合 | Jest + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
-| CI ガバナンス | Jest 静的回帰 | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
-| コーディネータ契約 | Jest 静的契約テスト | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
+| 純粋関数 | Node.js ユニットテスト | [tests/panel.test.js](tests/panel.test.js) |
+| テーマ / UI 契約 | Node.js 静的契約テスト | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
+| 拡張パッケージ整合 | Node.js テスト + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
+| リポジトリ整合 | Node.js テスト + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
+| ストア申請キット | Node.js テスト + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
+| サポート受付フォーム | Node.js テスト + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
+| 変更行の整合 | Node.js テスト + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
+| CI ガバナンス | Node.js 静的回帰 | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
+| コーディネータ契約 | Node.js 静的契約テスト | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
 | DOM 挙動・エクスポート内容・テーマ切替 | Edge DevTools での手動確認 | [docs/manual-test-checklist.md](docs/manual-test-checklist.md) |
 
 ブラウザ API のモックは [tests/setup.js](tests/setup.js) にあります。
@@ -304,7 +310,7 @@ network-plus-extension/
 ├── icons/               16 / 48 / 128 px の拡張アイコン
 ├── vendor/              サードパーティライブラリ(fflate)
 ├── scripts/             リポジトリ・パッケージ・バージョン・ストアの検証スクリプト
-├── tests/               Jest スイートとブラウザ API モック
+├── tests/               Node.js スイートとブラウザ API モック
 ├── docs/                アーキテクチャ・設計・プロダクト・プライバシー・変更履歴・ストア資産
 └── .github/             ワークフロー・エージェント・Copilot 指示・issue フォーム・funding 設定
 ```

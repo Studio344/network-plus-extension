@@ -108,9 +108,9 @@ profile によっては配布されないファイルがある。存在しない
 CI（`GITHUB_ACTIONS=true` または `CI` が `false` 以外）では明示的に失敗する。
 ローカルで `npm test` が成功しても、ブラウザテストが skip されたなら実ブラウザ回帰は未検証と扱う。
 
-実行前に `git ls-files 'tests/*.test.js'` と `npx jest --listTests --runInBand` の一覧を照合し、
+実行前に `git ls-files 'tests/*.test.js'` と `npm --silent test -- --list` の一覧を照合し、
 その checkout で期待するスイート数を求める（固定値は使わない）。`npm test` の終了コードに加え、
-`Test Suites:` の passed/total が検出数と一致し、`Tests:` の skipped が 0 件で、
+テストランナーの通過ファイル数が検出数と一致し、スキップが 0 件で、
 両ブラウザスイートが `PASS` と表示されることを確認する。出力をパイプするときは事前に
 `set -o pipefail` を設定し、`npm test` の失敗を隠さない。
 

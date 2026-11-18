@@ -14,7 +14,7 @@ const GRID_FOCUS_JOURNEY_TITLE =
 const SEPARATOR_FOCUS_JOURNEY_TITLE =
   'workbench separators preserve inset focus rings across responsive themes and resizing inputs';
 const BROWSER_POLICY_GUARD_CONTRACT = 'browser availability source-contract policy pin';
-const BROWSER_POLICY_GUARD_COMMAND = 'npx jest tests/browser-availability-policy.test.js --runInBand --coverage=false';
+const BROWSER_POLICY_GUARD_COMMAND = 'npm test -- --no-coverage tests/browser-availability-policy.test.js';
 const BROWSER_POLICY_GUARD_STEP_NAME = 'Run browser source-contract policy';
 const BROWSER_POLICY_GUARD_STEP_SOURCE = [
   `      - name: ${BROWSER_POLICY_GUARD_STEP_NAME}`,
@@ -406,7 +406,7 @@ const VIEWPORT_CONTRACTS = [
   },
   {
     constantName: 'GRID_FOCUS_VIEWPORT_WIDTHS',
-    expectedWidths: [375, 500, 800, 1280],
+    expectedWidths: [300, 375, 500, 800, 1280],
     journeyTitle: GRID_FOCUS_JOURNEY_TITLE,
   },
   {
@@ -435,7 +435,7 @@ test('policy invocation removal fails with a named pin diagnostic', () => {
   const mutatedWorkflow = replaceSourceOrThrow(
     qualityGatesSource,
     BROWSER_POLICY_GUARD_COMMAND,
-    'npm test -- --runInBand',
+    'npm test',
     'browser policy workflow invocation removal',
   );
 
@@ -541,7 +541,7 @@ test('locks toolbar focus coverage to narrow, stacked, and split layouts', () =>
 });
 
 test('locks request-grid focus coverage to narrow, stacked, and split layouts', () => {
-  assertExactViewportWidths(browserSuiteSource, 'GRID_FOCUS_VIEWPORT_WIDTHS', [375, 500, 800, 1280]);
+  assertExactViewportWidths(browserSuiteSource, 'GRID_FOCUS_VIEWPORT_WIDTHS', [300, 375, 500, 800, 1280]);
 });
 
 test('locks separator focus coverage to acceptance widths and both sides of the responsive boundary', () => {
@@ -1191,6 +1191,10 @@ test('retains the local-only skip when no browser executable is discoverable', (
     {
       skipped: true,
       title: 'the explicit offline workspace imports and inspects saved requests with localized scope and no capture controls',
+    },
+    {
+      skipped: true,
+      title: 'native WebSocket snapshots capture the first exchange and refresh the selected row across recording boundaries',
     },
     {
       skipped: true,

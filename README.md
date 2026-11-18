@@ -112,7 +112,7 @@ There is no browser-specific branch in the source. The recording and inspection 
 Verified for Chrome:
 
 - Chrome 151 loads `manifest.json` with no extension errors.
-- All 133 real-browser regression tests pass under Chrome 151 (`CHROME_BIN=<path> npx jest tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`).
+- All 133 real-browser regression tests pass under Chrome 151 (`CHROME_BIN=<path> npm test -- --no-coverage tests/status-summary-browser.test.js tests/browser-availability-policy.test.js`).
 - The `Network+` tab appearing in a real Chrome DevTools window was confirmed manually. Only this last step sits outside automated coverage: DevTools extension panels do not load reliably under automation — no probe could enumerate even the built-in panels — so CI cannot assert it.
 
 ### First run
@@ -126,9 +126,13 @@ With the panel open and no traffic captured yet, choose **Explore sample capture
 - Live capture through `chrome.devtools.network.onRequestFinished`, appended per animation frame so existing rows are never re-rendered.
 - Request rows are retained in full by default, with an in-dialog warning that memory can grow without bound. Turning Unlimited off in Settings caps them anywhere from 100 to 100,000 and evicts the oldest first.
 - Response bodies are capped independently at 1 MiB per body and 32 MiB across the shared cache, with least-recently-used eviction that keeps the rows themselves.
+- **Large payloads.** Body and Raw show a plain-text preview of up to 16 KiB. Search can find text past the preview and shows short excerpts around each match. Request-list response-body search can also read from DevTools or a retained HAR/SAZ source. Searches report incomplete coverage when the source is unavailable or exceeds the search limits. Use **Save full response body** to inspect the complete available body in a local file.
 - Pause / Resume recording, auto-scroll that switches itself off when you scroll up, and `Clear` with a 10-second **Undo clear**.
 - Import HAR (`.har`) and Fiddler SAZ (`.saz`) archives; import is atomic and never destroys the current capture if the file is rejected. Chrome HAR files that carry `_webSocketMessages` get those frames threaded into the same request/response Body panes that live WebSocket capture uses — and live-captured WebSocket conversations are written back out the same way: exported full HARs carry `_webSocketMessages` (text frames up to the 2 KB capture preview, binary frames counted without payload, every fidelity loss declared on the entry), while sanitized exports omit the frames with a per-entry marker.
-- **Opt-in stream capture (WebSocket + SSE).** The **Stream capture** toggle in the status bar wraps the page's `WebSocket` and `EventSource` constructors through the DevTools eval API — no extra permissions — and records each connection as a row: sent WebSocket frames land in the request Body pane; received frames, Server-Sent Events (named events included, once the page listens for them), and lifecycle marks in the response Body pane, all searchable and export-sanitized like any other body. Only connections created while capture is on are seen, the wrappers never alter traffic, and a navigation reinstalls them automatically.
+- **WebSocket and SSE recording.** Live WebSocket recording is on by default when opening Network+ in Chrome or Edge DevTools. The status bar control can turn it off, and the choice is remembered. If DevTools missed a connection, use **Reload and record**. SSE is enabled separately for the current session in **Settings**. Stream transcripts are searchable in **Details**; no extra permissions are required and traffic is not altered.
+- **WebSocket Messages.** Select a recorded or imported WebSocket connection to scan the latest 100 messages in time order, including in the pop-out. Each row shows the time, a colored direction label, and a one-line preview. Expand for the captured payload, with indentation and syntax colors for JSON objects and arrays, including in SignalR records and Socket.IO packets. Capture truncation is labeled. Choose **Details** for the original Request and Response panes.
+- **Full WebSocket text.** In the original panel, **Save full message** retrieves the original payload when DevTools or the directly selected HAR still provides it. The optional fallback for older browser versions holds up to 8 Mi UTF-16 code units in the inspected page. Stopping or clearing the capture, starting a new session, navigating, or eviction by newer messages releases this fallback data. It can remain in the page after DevTools closes.
+- **Find WebSocket traffic.** Toggle **WebSocket** in the request toolbar to show only WebSocket requests. In **Messages**, use **Search messages** or Ctrl/⌘+F to find text in folded rows and beyond the preview when the source is available. Expand a matching row to see the relevant excerpt. JSON shows escaped emoji and other printable characters. Combine text search with **Sent** or **Received**.
 - **Navigation does not clear the capture.** Rows persist across page navigations, bodies already prefetched into the bounded cache stay readable, and bodies the page navigated away from before retrieval are marked with an explicit notice instead of failing later — the status bar reports both counts.
 
 ### Inspect
@@ -146,6 +150,8 @@ With the panel open and no traffic captured yet, choose **Explore sample capture
 
 ### Find
 
+- **Request filters and actions.** Narrow the request list to 4xx, 5xx, or requests still awaiting a response. Open **Hosts** to switch between exact hosts. Remove active conditions from the list bar, and select two visible requests to open **Compare** there.
+- **Traffic timeline.** Open **Timeline** to see request starts and HTTP errors by time window (UTC). Choose a bar, or use Shift with clicks or arrows to select a span of bars. The timeline keeps its wider view, and the latency bands use displayed requests with recorded durations. Open the slowest request or select the time window with the most HTTP errors directly.
 - Integrated multi-keyword search (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>F</kbd>): one input per keyword, six highlight colors, per-keyword match counts and ▲▼ navigation, a scope switch for URL / Body / Headers, match options (case / whole word / regex), and a **Matches only** toggle that hides non-matching rows (HAR export follows the displayed set). Scope, match options, and the toggle persist between sessions; keyword text does not.
 - Per-column filters: a visual local-time range picker for Client start and Server done, method multi-select, repeatable `contains` / `notcontains` rules for domain and path, and any/all/exclude logic for URLs.
 - View preset — the Columns menu keeps one saved view (column visibility + filter rules). Apply restores it (or the factory default before anything is saved) and Update overwrites it with the current view. Presets store column/filter configuration only, never captured traffic.
@@ -262,7 +268,7 @@ The status bar continuously shows body cache usage, with the active retention po
 
 ```bash
 npm ci                    # install dependencies from the lockfile
-npm test                  # Jest with coverage
+npm test                  # Node.js tests with coverage
 npm run lint              # ESLint over all first-party JavaScript
 npm run format            # Prettier write (format:check for CI parity)
 npm run version:check     # 5 release version locations + version-free README routes
@@ -275,21 +281,21 @@ npm run audit:strict      # npm audit --audit-level=high
 npm run text:check -- --base <base-sha> --head <head-sha>   # whitespace / encoding of changed lines
 ```
 
-[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) runs a Node.js 22 / 24 matrix over `npm ci`, Jest, ESLint, release version sync, Prettier, lockfile provenance, changed-line text integrity, extension package integrity, Edge/Chrome submission-kit integrity, dependency audit, and coordinator contracts.
+[`.github/workflows/quality-gates.yml`](.github/workflows/quality-gates.yml) runs a Node.js 22 / 24 matrix over `npm ci`, the Node.js test runner, ESLint, release version sync, Prettier, lockfile provenance, changed-line text integrity, extension package integrity, Edge/Chrome submission-kit integrity, dependency audit, and coordinator contracts.
 
 ### Tests
 
 | Area | Method | Location |
 |---|---|---|
-| Pure functions | Jest unit tests | [tests/panel.test.js](tests/panel.test.js) |
-| Theme / UI contracts | Jest static contract tests | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
-| Extension package integrity | Jest + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
-| Repository integrity | Jest + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
-| Store submission kit | Jest + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
-| Support intake forms | Jest + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
-| Changed-line integrity | Jest + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
-| CI governance | Jest static regression | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
-| Coordinator contracts | Jest static contract tests | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
+| Pure functions | Node.js unit tests | [tests/panel.test.js](tests/panel.test.js) |
+| Theme / UI contracts | Node.js static contract tests | [tests/ui-contract.test.js](tests/ui-contract.test.js) |
+| Extension package integrity | Node.js tests + CI | [tests/extension-package.test.js](tests/extension-package.test.js) |
+| Repository integrity | Node.js tests + CI | [tests/repository-integrity.test.js](tests/repository-integrity.test.js) |
+| Store submission kit | Node.js tests + CI | [tests/store-readiness.test.js](tests/store-readiness.test.js) |
+| Support intake forms | Node.js tests + CI | [tests/support-intake.test.js](tests/support-intake.test.js) |
+| Changed-line integrity | Node.js tests + CI | [tests/text-integrity.test.js](tests/text-integrity.test.js) |
+| CI governance | Node.js static regression | [tests/ci-governance.test.js](tests/ci-governance.test.js) |
+| Coordinator contracts | Node.js static contract tests | [tests/coordinator-contract.test.js](tests/coordinator-contract.test.js) |
 | DOM behavior, export contents, theme switching | Manual, in Edge DevTools | [docs/manual-test-checklist.md](docs/manual-test-checklist.md) |
 
 Browser API mocks live in [tests/setup.js](tests/setup.js).
@@ -304,7 +310,7 @@ network-plus-extension/
 ├── icons/               16 / 48 / 128 px extension icons
 ├── vendor/              third-party libraries (fflate)
 ├── scripts/             repository, package, version, and store verification scripts
-├── tests/               Jest suites and browser API mocks
+├── tests/               Node.js suites and browser API mocks
 ├── docs/                architecture, design, product, privacy, changelog, store assets
 └── .github/             workflows, agents, Copilot instructions, issue forms, funding config
 ```

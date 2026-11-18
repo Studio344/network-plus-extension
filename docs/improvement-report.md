@@ -13,7 +13,7 @@
 
 Cycle 1 で提案したコマンドコピー、フィルタープリセット、統計、Waterfall、ショートカット一覧、2 リクエスト比較、レスポンス Body 検索、カラム並べ替えは Cycle 2 以降で実装され、その後の回帰修復とハードニングも Cycle 3〜7 に記録している。現行 README は保持上限、sanitized outbound data、アクセシビリティ、HAR/SAZ import、Edge / Chrome 対応、サポート導線を含む v1.9.0 の機能と制約を正としている。
 
-現行の品質ゲートは Jest、ESLint、version sync、Prettier、text/lock/package integrity、audit、coordinator contract で構成され、CI は Node.js 22/24 で実行する。本レポート内の `43/43` や `54/54` などの正確な件数は 2026-03-09 の履歴値であり、現在のテスト総数を表さない。
+現行の品質ゲートは Node.js テストランナー、ESLint、version sync、Prettier、text/lock/package integrity、audit、coordinator contract で構成され、CI は Node.js 22/24 で実行する。本レポート内の `43/43` や `54/54` などの正確な件数は 2026-03-09 の履歴値であり、現在のテスト総数を表さない。
 
 ---
 
