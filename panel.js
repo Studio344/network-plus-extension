@@ -76,6 +76,10 @@ const _NetworkPlus = (function () {
   const MIN_REQUEST_RETENTION_LIMIT = 100;
   const MAX_REQUEST_RETENTION_LIMIT = 100000;
   const MAX_RESPONSE_BODY_BYTES = 1024 * 1024;
+  // A retained body can take up to six bytes per character in HAR JSON.
+  // Leave room for that escaping and metadata, but do not scan a giant
+  // archived entry or restart an unindexed stream just to show a preview.
+  const HAR_MAX_BOUNDED_ENTRY_BYTES = 8 * MAX_RESPONSE_BODY_BYTES;
   const MAX_RESPONSE_CACHE_BYTES = 32 * 1024 * 1024;
   const MAX_SAZ_SOURCE_BYTES = 32 * 1024 * 1024;
   const MAX_SAZ_ARCHIVE_ENTRIES = 20000;
@@ -3518,12 +3522,12 @@ const _NetworkPlus = (function () {
       signal?.removeEventListener('abort', close);
     };
     signal?.addEventListener('abort', close, { once: true });
-    const scan = (text, regexes, after = null, webSocketAliases = false) => {
-      if (signal?.aborted || typeof text !== 'string' || text.length > PAYLOAD_SEARCH_MAX_CHARS) {
-        return Promise.resolve(null);
-      }
+    const scanWithStatus = (text, regexes, after = null, webSocketAliases = false) => {
+      if (signal?.aborted) return Promise.resolve({ results: null, reason: 'queued' });
+      if (typeof text !== 'string') return Promise.resolve({ results: null, reason: 'missing' });
+      if (text.length > PAYLOAD_SEARCH_MAX_CHARS) return Promise.resolve({ results: null, reason: 'overBudget' });
       return new Promise((resolve) => {
-        const finish = (value) => {
+        const finish = (value, reason) => {
           clearTimeout(timeout);
           cancel = null;
           if (worker) {
@@ -3534,24 +3538,25 @@ const _NetworkPlus = (function () {
               worker = null;
             }
           }
-          resolve(value);
+          resolve({ results: value, reason });
         };
-        const timeout = setTimeout(() => finish(null), PAYLOAD_SEARCH_TIMEOUT_MS);
-        cancel = () => finish(null);
+        const timeout = setTimeout(() => finish(null, 'timeout'), PAYLOAD_SEARCH_TIMEOUT_MS);
+        cancel = () => finish(null, 'queued');
         try {
           if (!worker) worker = new Worker('payload-search.js');
           worker.onmessage = ({ data }) => finish(data);
           worker.onerror = (event) => {
             event.preventDefault();
-            finish(null);
+            finish(null, 'failed');
           };
           worker.postMessage({ text, after, webSocketAliases, rules: regexes.map(({ source, flags }) => ({ source, flags })) });
         } catch (_error) {
-          finish(null);
+          finish(null, 'failed');
         }
       });
     };
-    return { scan, close };
+    const scan = async (...args) => (await scanWithStatus(...args)).results;
+    return { scan, scanWithStatus, close };
   }
 
   function isPayloadSearchHit(hit) {
@@ -3773,6 +3778,7 @@ const _NetworkPlus = (function () {
       columnFilterRules: deserializeFilterState(serializeFilterState(context.columnFilterRules)),
       webSocketOnly: context.webSocketOnly === true,
       requestStatusFacet: context.requestStatusFacet || 'all',
+      responseBodyIssuesOnly: context.responseBodyIssuesOnly === true,
       requestHostFacet: context.requestHostFacet || '',
       requestTimeFacet: context.requestTimeFacet || null,
       searchKeywords: Array.isArray(context.searchKeywords)
@@ -3945,8 +3951,8 @@ const _NetworkPlus = (function () {
     return data.log.entries;
   }
 
-  async function readHarEntries(byteStream, onEntry, responseTextLimit = HAR_MAX_RESPONSE_TEXT_CHARS) {
-    const decoder = new TextDecoder();
+  async function readHarEntries(byteStream, onEntry, responseTextLimit = HAR_MAX_RESPONSE_TEXT_CHARS, byteIndex = null) {
+    const decoder = new TextDecoder('utf-8', { ignoreBOM: byteIndex != null });
     const stack = [{ kind: 'root', state: 'value', role: '' }];
     // JSON forbids all unescaped control characters in strings.
     // eslint-disable-next-line no-control-regex
@@ -3962,6 +3968,7 @@ const _NetworkPlus = (function () {
     let sawEntries = false;
     let entryParts = null;
     let entryStart = -1;
+    let entryByteStart = null;
     let entryChars = 0;
     let entryNodes = 0;
     let body = null;
@@ -3970,6 +3977,18 @@ const _NetworkPlus = (function () {
     let count = 0;
     let text = '';
     let index = 0;
+    let byteOffset = 0;
+    let sourceBytes = 0;
+    let measuredIndex = 0;
+    let beginning = true;
+
+    const offsetAt = (position) => {
+      if (!byteIndex?.usable) return null;
+      const fragment = text.slice(measuredIndex, position);
+      byteOffset += /^\p{ASCII}*$/u.test(fragment) ? fragment.length : getUtf8ByteLength(fragment);
+      measuredIndex = position;
+      return byteOffset;
+    };
 
     const invalidJson = () => { throw createImportError('HAR is not valid JSON.'); };
     const invalidStructure = () => {
@@ -4027,7 +4046,9 @@ const _NetworkPlus = (function () {
           delete entry.response.content.text;
           entry.response.content._networkPlus = { status: 'omitted', reason: HAR_OVERSIZED_BODY_REASON };
         }
-        onEntry(entry, entryChars - responseTextChars, entryNodes);
+        const byteEnd = offsetAt(index);
+        const byteRange = entryByteStart == null || byteEnd == null ? null : [entryByteStart, byteEnd];
+        onEntry(entry, entryChars - responseTextChars, entryNodes, byteRange);
         count += 1;
       }
       parent.state = parent.kind === 'root' ? 'done' : 'commaOrEnd';
@@ -4053,6 +4074,7 @@ const _NetworkPlus = (function () {
         role = 'entry';
         entryParts = [];
         entryStart = index;
+        entryByteStart = offsetAt(index);
         entryChars = 0;
         entryNodes = 0;
         responseTextChars = 0;
@@ -4107,6 +4129,13 @@ const _NetworkPlus = (function () {
     const consume = (chunk) => {
       text = chunk;
       index = 0;
+      measuredIndex = 0;
+      if (byteIndex && text) {
+        // Preserve the decoder's usual leading-BOM stripping in the parser
+        // while counting the BOM in source byte offsets.
+        if (beginning && text.charCodeAt(0) === 0xfeff) index = 1;
+        beginning = false;
+      }
       if (body) body.start = 0;
       else if (entryParts) entryStart = 0;
       while (index < text.length) {
@@ -4217,41 +4246,69 @@ const _NetworkPlus = (function () {
       }
       if (body) appendBodyPart(text.slice(body.start));
       else if (entryParts) appendEntryPart(text.slice(entryStart));
+      offsetAt(text.length);
       text = '';
     };
 
-    for await (const chunk of byteStream) consume(decoder.decode(chunk, { stream: true }));
+    for await (const chunk of byteStream) {
+      if (byteIndex) sourceBytes += chunk.byteLength;
+      consume(decoder.decode(chunk, { stream: true }));
+    }
     consume(decoder.decode());
     if (token === 'number') finishNumber();
     if (token || stack.length !== 1 || stack[0].state !== 'done') invalidJson();
     if (!sawLog || !sawEntries) invalidStructure();
+    // UTF-8 replacement never contracts malformed bytes in the decoded stream.
+    // A length mismatch invalidates all provisional offsets, but keeps the
+    // previously accepted import available through its sequential reader.
+    if (byteIndex && byteOffset !== sourceBytes) byteIndex.usable = false;
     return count;
   }
 
-  async function readImportedHarEntry(file, entryIndex, isCurrent = () => true) {
+  const HAR_SLICE_PREFIX = new TextEncoder().encode('{"log":{"entries":[');
+  const HAR_SLICE_SUFFIX = new TextEncoder().encode(']}}');
+
+  function isHarByteRange(range, fileSize) {
+    return Array.isArray(range) && range.length === 2 && range.every(Number.isSafeInteger) &&
+      range[0] >= 0 && range[1] > range[0] && range[1] <= fileSize;
+  }
+
+  async function readImportedHarEntry(file, entryIndex, isCurrent = () => true, range = null) {
     // The full import already validated the file. Stop this explicit reread
     // after its target to avoid scanning any later entries or retaining their
     // bodies. The same stream parser and entry limits still apply.
     const found = Symbol('HAR entry found');
     let entry;
     let index = 0;
+    const useRange = typeof file.slice === 'function' && isHarByteRange(range, file.size);
+    const targetIndex = useRange ? 0 : entryIndex;
     async function* chunks() {
-      for await (const chunk of file.stream()) {
+      if (!isCurrent()) throw createImportError('The selected HAR entry changed.');
+      if (useRange) yield HAR_SLICE_PREFIX;
+      const source = useRange ? file.slice(range[0], range[1]) : file;
+      for await (const chunk of source.stream()) {
         if (!isCurrent()) throw createImportError('The selected HAR entry changed.');
         yield chunk;
       }
+      if (useRange) yield HAR_SLICE_SUFFIX;
     }
     try {
       await readHarEntries(chunks(), (candidate) => {
-        if (index++ !== entryIndex) return;
+        if (index++ !== targetIndex) return;
         entry = candidate;
         throw found;
-      }, (index) => index === entryIndex ? HAR_REREAD_RESPONSE_TEXT_CHARS : 0);
+      }, (index) => index === targetIndex ? HAR_REREAD_RESPONSE_TEXT_CHARS : 0);
     } catch (error) {
       if (error !== found) throw error;
     }
     if (!entry) throw createImportError('The selected HAR entry is no longer available.');
     return entry;
+  }
+
+  function attachImportedHarSource(row, file, index, byteRange, byteIndex) {
+    const range = () => byteIndex?.usable ? byteRange : null;
+    row._readImportedHarEntry = (isCurrent) => readImportedHarEntry(file, index, isCurrent, range());
+    if (row._originalHarHasBody) row._responseSearchSource = { file, index, byteRange: range };
   }
 
   function normalizeHarPostData(postData) {
@@ -4717,6 +4774,7 @@ const _NetworkPlus = (function () {
     browser: 'responseBodyIssueBrowser',
     processing: 'responseBodyIssueProcessing',
     unavailable: 'responseBodyIssueUnavailable',
+    navigation: 'responseBodyIssueNavigation',
   });
 
   function normalizeResponseBodyIssue(issue) {
@@ -4732,15 +4790,18 @@ const _NetworkPlus = (function () {
   }
 
   function canReadResponseBody(row) {
-    return !row._pendingRequest &&
-      (typeof row._reqObj?.getContent === 'function' || typeof row._mirrorFetchBody === 'function');
+    return !row._pendingRequest && row._responseBodyIssue !== 'navigation' &&
+      (typeof row._reqObj?.getContent === 'function' ||
+        (row._originalHarHasBody && typeof row._readImportedHarEntry === 'function') ||
+        (typeof row._mirrorFetchBody === 'function' && row._mirrorBodyConnected?.() !== false));
   }
 
   function setResponseBodyIssue(row, issue) {
     const next = normalizeResponseBodyIssue(issue);
-    if (row._retentionDisposed || normalizeResponseBodyIssue(row._responseBodyIssue) === next) return false;
+    const previous = normalizeResponseBodyIssue(row._responseBodyIssue);
+    if (row._retentionDisposed || previous === next) return false;
     row._responseBodyIssue = next;
-    state.onResponseBodyIssueChanged?.(row);
+    state.onResponseBodyIssueChanged?.(row, Boolean(previous) !== Boolean(next));
     return true;
   }
 
@@ -4770,6 +4831,7 @@ const _NetworkPlus = (function () {
   // travel through the mirror protocol and into exports unchanged — and are
   // translated only at display time via localizeBodyReason.
   const BODY_RETRIEVAL_FAILED_REASON = 'Response content retrieval failed.';
+  const HAR_EXPLICIT_RESPONSE_REASON = 'This saved response requires an explicit read from the original HAR.';
   const BODY_UNAVAILABLE_REASON = 'Full response content is unavailable.';
   const BODY_EVICTED_REASON =
     'Evicted from the bounded response-body cache; select or export to retry retrieval.';
@@ -4780,11 +4842,10 @@ const _NetworkPlus = (function () {
     const markedRows = [];
     for (const row of Array.isArray(rows) ? rows : []) {
       if (!row || typeof row !== 'object') continue;
-      // Only live-captured rows still waiting on getContent lose anything at
-      // navigation: embedded (sample/import), cached, in-flight, mirror, and
-      // already-terminal bodies all keep their existing behavior.
+      if (typeof row._reqObj?.getContent !== 'function') continue;
+      row._responseBodyNavigationObserved = true;
+      // Existing and in-flight bodies can still be available in DevTools.
       if (row.responseContentState !== 'not-loaded') continue;
-      if (!row._reqObj || typeof row._reqObj.getContent !== 'function') continue;
       row.responseContentState = 'unavailable';
       row.responseContentReason = NAVIGATION_BODY_UNAVAILABLE_REASON;
       row.responseContentError = null;
@@ -4792,6 +4853,19 @@ const _NetworkPlus = (function () {
       markedRows.push(row);
     }
     return markedRows;
+  }
+
+  function markUnavailableBodyAfterNavigation(row, error) {
+    if (!row._responseBodyNavigationObserved || row._retentionDisposed || typeof row.responseContent === 'string') return false;
+    const message = error?.message || '';
+    const missingResource = /No resource with given identifier found|No data found for resource with given identifier|Request content was evicted from inspector cache/i;
+    if (!message.startsWith('Response content is unavailable for ') && !missingResource.test(message)) return false;
+    row.responseContentState = 'unavailable';
+    row.responseContentReason = NAVIGATION_BODY_UNAVAILABLE_REASON;
+    row.responseContentError = null;
+    row._reqObj = null;
+    setResponseBodyIssue(row, 'navigation');
+    return true;
   }
 
   function getUtf8ByteLength(value) {
@@ -4918,7 +4992,7 @@ const _NetworkPlus = (function () {
       if (postText && matchesValue(postText)) return true;
     }
 
-    if (scope.resBody) {
+    if (scope.resBody && !hasBinaryCachedResponse(row)) {
       const resText = row.responseContentText != null ? row.responseContentText : row.responseContent || '';
       if (resText && matchesValue(resText)) return true;
     }
@@ -4943,9 +5017,47 @@ const _NetworkPlus = (function () {
   }
 
   function countUnsearchedResponseBodies(rows, search) {
-    return (rows || []).filter(
-      (row) => row && row.responseContentState !== 'cached' && !search?.searched.has(row),
-    ).length;
+    return Object.values(getUnsearchedResponseBodyReasons(rows, search)).reduce((total, count) => total + count, 0);
+  }
+
+  const RESPONSE_SEARCH_COVERAGE_KEYS = Object.freeze({
+    pending: 'payloadSearchCoveragePending',
+    queued: 'payloadSearchCoverageQueued',
+    missing: 'payloadSearchCoverageMissing',
+    overBudget: 'payloadSearchCoverageOverBudget',
+    binary: 'payloadSearchCoverageBinary',
+    timeout: 'payloadSearchCoverageTimeout',
+    failed: 'payloadSearchCoverageFailed',
+  });
+
+  function hasResponseSearchSource(row) {
+    return !!row._responseSearchSource || typeof row._reqObj?.getContent === 'function' ||
+      typeof row._mirrorSearchResponse === 'function';
+  }
+
+  function hasBinaryCachedResponse(row) {
+    return row.responseContentState === 'cached' && row.responseContentEncoding === 'base64' &&
+      !!row.responseContent && (!row.responseContentText || isUndecodableBodyText(row.responseContentText));
+  }
+
+  function getUnsearchedResponseBodyReasons(rows, search) {
+    const counts = {};
+    for (const row of rows || []) {
+      if (!row) continue;
+      if (row.responseContentState === 'cached') {
+        if (hasBinaryCachedResponse(row)) counts.binary = (counts.binary || 0) + 1;
+        continue;
+      }
+      if (search?.searched.has(row)) continue;
+      let reason = search?.reasons?.get(row);
+      if (row._pendingRequest) reason = 'pending';
+      if (!reason) {
+        if (hasResponseSearchSource(row)) reason = 'queued';
+        else reason = row.responseContentState === 'omitted' ? 'overBudget' : 'missing';
+      }
+      counts[reason] = (counts[reason] || 0) + 1;
+    }
+    return counts;
   }
 
   /**
@@ -5351,7 +5463,7 @@ const _NetworkPlus = (function () {
     return duration > 0 ? start + duration > range.start : start >= range.start;
   }
 
-  function computeTrafficTimeline(rows) {
+  function computeTrafficTimeline(rows, viewport) {
     let first = Infinity;
     let end = -Infinity;
     let untimed = 0;
@@ -5368,6 +5480,17 @@ const _NetworkPlus = (function () {
     if (first === Infinity) return { bins, untimed, peak: null, range: null };
 
     end = Math.min(end, MAX_OVERVIEW_EPOCH + 1);
+    const fullRange = { start: first, end };
+    let range = fullRange;
+    if (viewport) {
+      const start = Math.max(first, viewport.start);
+      const finish = Math.min(end, viewport.end);
+      if (start < finish && (start > first || finish < end)) {
+        range = { start, end: finish };
+        first = start;
+        end = finish;
+      }
+    }
     const width = Math.max(1, Math.ceil((end - first) / TRAFFIC_TIMELINE_BINS));
     const count = Math.min(TRAFFIC_TIMELINE_BINS, Math.ceil((end - first) / width));
     for (let index = 0; index < count; index += 1) {
@@ -5375,14 +5498,14 @@ const _NetworkPlus = (function () {
     }
     for (const row of rows) {
       const start = getOverviewStart(row);
-      if (start === null) continue;
+      if (start === null || start < first || start >= end) continue;
       const bin = bins[Math.min(bins.length - 1, Math.floor((start - first) / width))];
       bin.count += 1;
       const statusClass = classifyStatusClass(row.status);
       if (!row._pendingRequest && (statusClass === '4xx' || statusClass === '5xx')) bin.errors += 1;
     }
     const peak = bins.reduce((best, bin) => bin.errors > (best?.errors || 0) ? bin : best, null);
-    return { bins, untimed, peak, range: { start: first, end } };
+    return { bins, untimed, peak, range, fullRange };
   }
 
   function planOverviewRequestWindow(total, scrollTop) {
@@ -5395,10 +5518,12 @@ const _NetworkPlus = (function () {
     const span = range.end - range.start;
     const start = getOverviewStart(row);
     const duration = getOverviewDuration(row);
+    const clippedStart = Math.min(range.end, Math.max(range.start, start));
+    const clippedEnd = Math.min(range.end, start + (duration ?? 0));
     return {
       row,
-      startsAt: (start - range.start) / span,
-      width: Math.min(duration ?? 0, range.end - start) / span,
+      startsAt: (clippedStart - range.start) / span,
+      width: Math.max(0, clippedEnd - clippedStart) / span,
       duration,
       statusClass: row._pendingRequest ? 'pending' : classifyStatusClass(row.status),
     };
@@ -5576,6 +5701,7 @@ const _NetworkPlus = (function () {
     filteredRows: [], // [U5] cache for filtered rows
     webSocketOnly: false,
     requestStatusFacet: 'all',
+    responseBodyIssuesOnly: false,
     requestHostFacet: '',
     requestTimeFacet: null,
     requestScopeRows: null,
@@ -6177,6 +6303,7 @@ const _NetworkPlus = (function () {
       row._boundedResponsePayloadPromise = null;
       row._liveRawResponsePromise = null;
       row._readImportedHarEntry = null;
+      row._mirrorHarSource = null;
       row._readWsHarEntry = null;
       row._responseSearchSource = null;
       row._retentionDisposed = true;
@@ -6368,6 +6495,7 @@ const _NetworkPlus = (function () {
         columnFilterRules: deserializeFilterState(serializeFilterState(state.columnFilterRules)),
         webSocketOnly: state.webSocketOnly,
         requestStatusFacet: state.requestStatusFacet,
+        responseBodyIssuesOnly: state.responseBodyIssuesOnly,
         requestHostFacet: state.requestHostFacet,
         requestTimeFacet: state.requestTimeFacet,
         searchKeywords: state.search.keywords.map((keyword) => ({
@@ -6708,6 +6836,18 @@ const _NetworkPlus = (function () {
     overviewClearTime: {
       en: 'Clear time range',
       ja: '時間帯の絞り込みを解除',
+    },
+    overviewZoomTime: {
+      en: 'Zoom to range',
+      ja: '時間帯を拡大',
+    },
+    overviewFullTime: {
+      en: 'Full timeline',
+      ja: '全体の時間軸',
+    },
+    overviewRangeSummary: {
+      en: '{range} · {count} shown',
+      ja: '{range} · {count}件',
     },
     overviewRangeFilter: {
       en: 'Active during {range}',
@@ -7473,8 +7613,8 @@ const _NetworkPlus = (function () {
       ja: 'キーボードショートカット (?)',
     },
     titleMatchesOnly: {
-      en: 'Show only requests that match search keywords. When off, all requests stay visible with highlights.',
-      ja: '検索キーワードに一致するリクエストだけを表示します。オフの間はすべてのリクエストがハイライト付きで表示されたままです。',
+      en: 'Show only matches in the filtered list. Search results include the entire capture.',
+      ja: '絞り込み中の一覧には検索に一致した通信だけを表示します。検索結果は記録全体が対象です。',
     },
     titleMatchCase: {
       en: 'Match case',
@@ -7759,6 +7899,10 @@ const _NetworkPlus = (function () {
     reasonBodyRetrievalFailed: {
       en: BODY_RETRIEVAL_FAILED_REASON,
       ja: 'レスポンス内容の取得に失敗しました。',
+    },
+    reasonHarExplicitResponse: {
+      en: HAR_EXPLICIT_RESPONSE_REASON,
+      ja: 'このレスポンスを表示するには、元のHARから本文を明示的に取得してください。',
     },
     reasonBodyUnavailable: {
       en: BODY_UNAVAILABLE_REASON,
@@ -8510,6 +8654,10 @@ const _NetworkPlus = (function () {
       en: 'No matches',
       ja: '一致なし',
     },
+    searchOutsideListFilters: {
+      en: 'Matches outside list filters ({count})',
+      ja: '一覧の絞り込み対象外に {count} 件一致',
+    },
     payloadSearchRunning: {
       en: 'Searching full text…',
       ja: '全文を検索中…',
@@ -8517,6 +8665,38 @@ const _NetworkPlus = (function () {
     payloadSearchPartial: {
       en: 'Some text could not be searched',
       ja: '一部の本文を検索できませんでした',
+    },
+    payloadSearchCoverageTotal: {
+      en: '{count} bodies not searched',
+      ja: '本文未検索 {count} 件',
+    },
+    payloadSearchCoveragePending: {
+      en: '{count} responses pending',
+      ja: '{count} 件はレスポンス待ち',
+    },
+    payloadSearchCoverageQueued: {
+      en: '{count} awaiting search',
+      ja: '{count} 件は検索待ち',
+    },
+    payloadSearchCoverageMissing: {
+      en: '{count} bodies unavailable',
+      ja: '{count} 件は本文なし',
+    },
+    payloadSearchCoverageOverBudget: {
+      en: '{count} over the search limit',
+      ja: '{count} 件は検索上限を超過',
+    },
+    payloadSearchCoverageBinary: {
+      en: '{count} binary bodies',
+      ja: '{count} 件はバイナリ本文',
+    },
+    payloadSearchCoverageTimeout: {
+      en: '{count} searches timed out',
+      ja: '{count} 件は検索がタイムアウト',
+    },
+    payloadSearchCoverageFailed: {
+      en: '{count} could not be read or searched',
+      ja: '{count} 件は本文の読み込みまたは検索に失敗',
     },
     payloadSearchExcerpts: {
       en: 'Matches outside the preview',
@@ -9031,6 +9211,18 @@ const _NetworkPlus = (function () {
     responseBodyIssueUnavailable: {
       en: 'DevTools could not provide the recorded body.',
       ja: 'DevToolsから記録済みの本文を取得できる状態ではありません。',
+    },
+    responseBodyIssueNavigation: {
+      en: 'DevTools could no longer retrieve this response body after the inspected page navigated.',
+      ja: '検査対象ページが移動した後、DevToolsでこのレスポンス本文を取得できなくなりました。',
+    },
+    responseBodyIssuesFilter: {
+      en: 'Body read failures',
+      ja: '本文の取得エラー',
+    },
+    responseBodyRetryDisconnected: {
+      en: 'Reconnect the DevTools session to retry.',
+      ja: '再取得するにはDevToolsセッションを再接続してください。',
     },
     responseBodyRetryAction: {
       en: 'Retry body',
@@ -9739,6 +9931,7 @@ const _NetworkPlus = (function () {
     [BODY_EVICTED_REASON, 'reasonBodyEvicted'],
     [IMPORT_BODY_MISSING_REASON, 'reasonImportNoContent'],
     [BODY_RETRIEVAL_FAILED_REASON, 'reasonBodyRetrievalFailed'],
+    [HAR_EXPLICIT_RESPONSE_REASON, 'reasonHarExplicitResponse'],
     [BODY_UNAVAILABLE_REASON, 'reasonBodyUnavailable'],
     [UI_TEXT.statusPendingResponse.en, 'statusPendingResponse'],
     [UI_TEXT.importReasonSessionDisconnected.en, 'importReasonSessionDisconnected'],
@@ -10397,7 +10590,7 @@ const _NetworkPlus = (function () {
 
   function hasRequestFacets() {
     return !state.sampleCaptureActive &&
-      (state.requestStatusFacet !== 'all' || state.requestHostFacet !== '' || !!state.requestTimeFacet);
+      (state.requestStatusFacet !== 'all' || state.responseBodyIssuesOnly || state.requestHostFacet !== '' || !!state.requestTimeFacet);
   }
 
   function matchesRequestHostFacet(row) {
@@ -10408,8 +10601,13 @@ const _NetworkPlus = (function () {
     return state.requestStatusFacet === 'all' || classifyRequestFacet(row) === state.requestStatusFacet;
   }
 
+  function matchesBodyIssueFacet(row) {
+    return !state.responseBodyIssuesOnly || Boolean(normalizeResponseBodyIssue(row._responseBodyIssue));
+  }
+
   function matchesRequestFacets(row) {
-    return matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) && requestOverlapsRange(row, state.requestTimeFacet);
+    return matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) &&
+      matchesBodyIssueFacet(row) && requestOverlapsRange(row, state.requestTimeFacet);
   }
 
   function repaintRequestScope() {
@@ -10422,6 +10620,7 @@ const _NetworkPlus = (function () {
     if (!state.sampleCaptureActive) {
       state.webSocketOnly = false;
       state.requestStatusFacet = 'all';
+      state.responseBodyIssuesOnly = false;
       state.requestHostFacet = '';
       state.requestTimeFacet = null;
     }
@@ -10737,9 +10936,15 @@ const _NetworkPlus = (function () {
 
   function serializeRowForMirror(row) {
     const issue = normalizeResponseBodyIssue(row._responseBodyIssue);
+    const harSource = row._mirrorHarSource;
     return {
       id: row.id,
       ...(issue || row._responseBodyIssue === null ? { responseBodyIssue: issue } : {}),
+      ...(harSource ? { harSource: {
+        token: harSource.token, index: harSource.index, size: harSource.size, body: row._originalHarHasBody,
+        range: harSource.byteIndex?.usable ? harSource.range : null,
+        ...(row.responseContentState === 'omitted' ? { omitted: true } : {}),
+      } } : {}),
       ...(row._pendingRequest ? { pending: true } : {}),
       ...(row._overviewUnknownStart ? { overviewUnknownStart: true } : {}),
       ...(row._overviewUnknownDuration ? { overviewUnknownDuration: true } : {}),
@@ -11450,10 +11655,15 @@ const _NetworkPlus = (function () {
     return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
   }
 
+  function normalizeHarSourceToken(value) {
+    return typeof value === 'string' && /^[a-z0-9-]{1,64}$/i.test(value) ? value : null;
+  }
+
   // Rough serialized size of a wire row, for chunking. Counting the two
   // transcript directions and headers covers everything that actually grows.
   function estimateWireRowChars(wireRow) {
     let chars = 256 + (wireRow.request.url ? wireRow.request.url.length : 0);
+    if (wireRow.harSource) chars += 192;
     const postData = wireRow.request.postData;
     if (postData && typeof postData.text === 'string') chars += postData.text.length;
     if (postData && Array.isArray(postData.params)) {
@@ -11616,18 +11826,19 @@ const _NetworkPlus = (function () {
     };
     const fullSearchKey = ({ viewer, requestId }) => viewer + ':' + requestId;
     const sendFullSearch = async (message) => {
-      const { requestId, viewer, rowId, session, queries, options, after, frameIds } = message;
+      const { requestId, viewer, rowId, session, queries, options, after, frameIds, coverage } = message;
       if (session !== sessionToken || typeof viewer !== 'string' || !viewer || viewer.length > 128 ||
           !Number.isSafeInteger(requestId) || requestId <= 0 || !Number.isSafeInteger(rowId) || rowId <= 0) return;
       const result = { type: 'full-search-result', requestId, viewer, rowId, session };
+      const withReason = (reason) => coverage === true && reason ? { reason } : {};
       if (!Array.isArray(queries) || queries.length === 0 || queries.length > 16 ||
           queries.some(query => typeof query !== 'string' || !query.trim() || query.length > 2048) || fullSearches.size >= 8) {
-        postMessage({ ...result, ok: false });
+        postMessage({ ...result, ok: false, ...withReason('failed') });
         return;
       }
-      const row = getRows().find(candidate => candidate.id === rowId && !candidate._pendingRequest);
-      if (!row || row._retentionDisposed) {
-        postMessage({ ...result, ok: false });
+      const row = getRows().find(candidate => candidate.id === rowId);
+      if (!row || row._retentionDisposed || row._pendingRequest) {
+        postMessage({ ...result, ok: false, ...withReason(row?._pendingRequest ? 'pending' : 'missing') });
         return;
       }
       const key = fullSearchKey(message);
@@ -11637,6 +11848,7 @@ const _NetworkPlus = (function () {
       const current = () => !controller.signal.aborted && !row._retentionDisposed;
       try {
         let hits = null;
+        let reason;
         if (Array.isArray(frameIds) && queries.length === 1 && frameIds.length <= WS_MESSAGE_HISTORY_LIMIT &&
             frameIds.every(id => Number.isSafeInteger(id) && id > 0)) {
           const ids = new Set(frameIds);
@@ -11653,15 +11865,29 @@ const _NetworkPlus = (function () {
           if (rules.every(Boolean)) {
             const search = createPayloadSearcher(controller.signal);
             try {
-              hits = await search.scan(await readSearchableResponse(row, current), rules, after);
+              if (coverage === true) {
+                if (typeof row.responseContent !== 'string' && !row._responseSearchSource && !canReadResponseBody(row)) {
+                  reason = row.responseContentState === 'omitted' ? 'overBudget' : 'missing';
+                } else {
+                  const source = classifySearchableResponseText(row, await readFullResponseDownload(row, current));
+                  reason = source.reason;
+                  if (!reason) {
+                    const scanned = await search.scanWithStatus(source.text, rules, after);
+                    hits = scanned.results;
+                    reason = scanned.reason;
+                  }
+                }
+              } else {
+                hits = await search.scan(await readSearchableResponse(row, current), rules, after);
+              }
             } finally {
               search.close();
             }
           }
         }
-        if (current()) postMessage({ ...result, ok: hits !== null, hits });
+        if (current()) postMessage({ ...result, ok: hits !== null, hits, ...withReason(reason) });
       } catch (_error) {
-        if (current()) postMessage({ ...result, ok: false });
+        if (current()) postMessage({ ...result, ok: false, ...withReason('failed') });
       } finally {
         fullSearches.delete(key);
       }
@@ -11788,6 +12014,7 @@ const _NetworkPlus = (function () {
           viewer: message.viewer,
           fileName: message.fileName,
           size: message.size,
+          harSourceToken: getImportFormat(message.fileName) === 'har' ? normalizeHarSourceToken(message.harSourceToken) : null,
           parts: [],
           receivedBytes: 0,
           writer: null,
@@ -11809,7 +12036,7 @@ const _NetworkPlus = (function () {
               sendCommandResult(transfer.commandId, '', transfer.viewer);
               sendSync();
             }
-          });
+          }, transfer.harSourceToken, transfer.size);
         }
         return;
       }
@@ -11883,7 +12110,7 @@ const _NetworkPlus = (function () {
         receiveImportFile(transfer.fileName, transfer.parts, (error) => {
           sendCommandResult(message.commandId, error, message.viewer);
           sendSync();
-        });
+        }, transfer.harSourceToken);
       }
     };
     return {
@@ -11994,9 +12221,9 @@ const _NetworkPlus = (function () {
       return requestId;
     };
     const requestBody = (rowId, callback) => requestExport('body-request', rowId, callback);
-    const requestFullSearch = (rowId, session, queries, options, after, frameIds, signal) => {
+    const requestFullSearch = (rowId, session, queries, options, after, frameIds, signal, coverage = false) => {
       if (!fullPayloadSearchSupported || pendingSnapshot || !session || session !== hostSessionToken || signal?.aborted) {
-        return Promise.resolve(null);
+        return Promise.resolve(coverage ? { results: null, reason: 'missing' } : null);
       }
       return new Promise((resolve) => {
         const abort = () => {
@@ -12007,10 +12234,10 @@ const _NetworkPlus = (function () {
           }
           settleExport(requestId, null, null);
         };
-        const requestId = requestExport('full-search-request', rowId, (_error, result) => {
+        const requestId = requestExport('full-search-request', rowId, (error, result) => {
           signal?.removeEventListener('abort', abort);
-          resolve(result);
-        }, { session, queries, options, after, frameIds });
+          resolve(coverage && !result ? { results: null, reason: error?.message?.includes('in time') ? 'timeout' : 'missing' } : result);
+        }, { session, queries, options, after, frameIds, ...(coverage ? { coverage: true } : {}) });
         signal?.addEventListener('abort', abort, { once: true });
       });
     };
@@ -12157,10 +12384,13 @@ const _NetworkPlus = (function () {
         throw error;
       }
     };
-    const sendImportFile = (fileName, bytes, callback) => {
+    const sendImportFile = (fileName, bytes, callback, harSourceToken) => {
       const commandId = trackCommand(callback, MIRROR_IMPORT_RESULT_TIMEOUT_MS);
       try {
-        postMessage({ type: 'import-begin', commandId, viewer: viewerNonce, fileName, size: bytes.length });
+        postMessage({
+          type: 'import-begin', commandId, viewer: viewerNonce, fileName, size: bytes.length,
+          ...(harSourceToken ? { harSourceToken } : {}),
+        });
         for (let index = 0; index < bytes.length; index += MIRROR_IMPORT_CHUNK_BYTES) {
           postMessage({
             type: 'import-chunk',
@@ -12175,7 +12405,7 @@ const _NetworkPlus = (function () {
         throw error;
       }
     };
-    const sendHarStream = async (file, callback) => {
+    const sendHarStream = async (file, callback, harSourceToken) => {
       let finishAck;
       let completed = false;
       const commandId = trackCommand((error) => {
@@ -12192,7 +12422,10 @@ const _NetworkPlus = (function () {
       }, MIRROR_IMPORT_RESULT_TIMEOUT_MS);
       const pending = pendingCommandCallbacks.get(commandId);
       try {
-        postMessage({ type: 'import-begin', commandId, viewer: viewerNonce, fileName: file.name, size: file.size, stream: true });
+        postMessage({
+          type: 'import-begin', commandId, viewer: viewerNonce, fileName: file.name, size: file.size, stream: true,
+          ...(harSourceToken ? { harSourceToken } : {}),
+        });
         for await (const bytes of file.stream()) {
           for (let offset = 0; offset < bytes.length && !completed; offset += MIRROR_IMPORT_CHUNK_BYTES) {
             const acknowledged = new Promise((resolve) => { finishAck = resolve; });
@@ -12317,7 +12550,9 @@ const _NetworkPlus = (function () {
           if (pending?.type === 'full-search-request' && message.viewer === viewerNonce &&
               message.session === hostSessionToken && message.session === pending.session && message.rowId === pending.rowId) {
             const hits = message.ok === true ? validateMirrorSearchResult(message.hits, pending) : null;
-            settleExport(message.requestId, null, hits);
+            const reason = typeof message.reason === 'string' && Object.hasOwn(RESPONSE_SEARCH_COVERAGE_KEYS, message.reason)
+              ? message.reason : 'missing';
+            settleExport(message.requestId, null, pending.coverage ? { results: hits, reason: hits ? null : reason } : hits);
           }
           break;
         }
@@ -12381,7 +12616,20 @@ const _NetworkPlus = (function () {
     const promiseKey = maxBytes === Infinity ? '_responsePayloadPromise' : '_boundedResponsePayloadPromise';
     if (row[promiseKey]) return row[promiseKey];
     const requestLabel = row.id == null ? 'unknown request' : 'request ' + row.id;
-    if (typeof row._mirrorFetchBody === 'function') {
+    const readImported = row._originalHarHasBody && typeof row._readImportedHarEntry === 'function'
+      ? () => row._readImportedHarEntry(() => !row._retentionDisposed).then((entry) => {
+        const content = entry.response.content;
+        if (typeof content?.text !== 'string') throw new Error('The archived response body is unavailable within the read budget.');
+        return { content: content.text, encoding: content.encoding };
+      })
+      : null;
+    if (readImported && Number.isFinite(maxBytes)) {
+      const range = row._responseSearchSource?.byteRange?.();
+      if (!range || range[1] - range[0] > HAR_MAX_BOUNDED_ENTRY_BYTES) {
+        return Promise.reject(new Error(HAR_EXPLICIT_RESPONSE_REASON));
+      }
+    }
+    if (!readImported && typeof row._mirrorFetchBody === 'function') {
       // Mirror rows hold no getContent; the DevTools session serves the body
       // over the port. The timeout guards a host that stops responding.
       const pending = new Promise((resolve, reject) => {
@@ -12438,7 +12686,7 @@ const _NetworkPlus = (function () {
       );
       return pending;
     }
-    const pending = fetchRawLiveResponsePayload(row, timeoutMs).then(({ content, encoding }) => {
+    const pending = (readImported ? readImported() : fetchRawLiveResponsePayload(row, timeoutMs)).then(({ content, encoding }) => {
       try {
         return measureResponsePayload(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type), maxBytes);
       } catch (error) {
@@ -12509,6 +12757,7 @@ const _NetworkPlus = (function () {
   // [U1] Pre-fetch response content into the bounded shared cache.
   function cacheResponseContent(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
     if (row._responseContentPromise) return row._responseContentPromise;
+    if (row._responseBodyIssue === 'navigation') return Promise.reject(new Error(NAVIGATION_BODY_UNAVAILABLE_REASON));
     if (row.responseContentState === 'omitted') {
       return Promise.reject(
         row.responseContentError ||
@@ -12534,6 +12783,9 @@ const _NetworkPlus = (function () {
       }
     }
 
+    if (row._mirrorBodyConnected?.() === false && !canReadResponseBody(row)) {
+      return Promise.reject(new Error(UI_TEXT.importReasonSessionDisconnected.en));
+    }
     row.responseContentState = 'loading';
     const streamRevision = row._mirrorStreamRevision;
     const pending = fetchResponsePayload(row, timeoutMs, row._managedRetention ? MAX_RESPONSE_BODY_BYTES : Infinity)
@@ -12558,8 +12810,13 @@ const _NetworkPlus = (function () {
       })
       .catch((error) => {
         if (streamRevision !== row._mirrorStreamRevision) return row;
+        if (markUnavailableBodyAfterNavigation(row, error)) throw new Error(NAVIGATION_BODY_UNAVAILABLE_REASON);
         row.responseContentError = error;
-        if (
+        if (error?.message?.endsWith(HAR_EXPLICIT_RESPONSE_REASON)) {
+          row.responseContentState = 'omitted';
+          row.responseContentReason = HAR_EXPLICIT_RESPONSE_REASON;
+          setResponseBodyIssue(row, null);
+        } else if (
           row.responseContentState !== 'omitted' &&
           row.responseContentState !== 'row-evicted' &&
           row.responseContentState !== 'unavailable'
@@ -16761,14 +17018,14 @@ const _NetworkPlus = (function () {
       srch.fullResponses?.controller.abort();
       srch.fullResponses = key ? {
         key, controller: new AbortController(), attempted: new WeakSet(), searched: new WeakSet(), matches: new WeakMap(),
+        reasons: new WeakMap(),
         running: false,
       } : null;
     }
     const job = srch.fullResponses;
     if (!job || job.running) return;
-    const rows = state.filteredRows.filter((row) => !job.attempted.has(row) &&
-      !row._pendingRequest && row.responseContentState !== 'cached' &&
-      (row._responseSearchSource || typeof row._reqObj?.getContent === 'function' || row._mirrorSearchResponse));
+    const rows = state.rows.filter((row) => !job.attempted.has(row) &&
+      !row._pendingRequest && row.responseContentState !== 'cached' && hasResponseSearchSource(row));
     if (!rows.length) return;
     const options = { ...srch.options };
     const rules = queries.filter(Boolean).map(query => compileSearchQuery(query, options).regex);
@@ -16781,10 +17038,13 @@ const _NetworkPlus = (function () {
     // quadratic for large captures, especially when the body cache has evicted rows.
     const run = async () => {
       const search = createPayloadSearcher(job.controller.signal);
-      const applyResult = (row, result) => {
+      const applyResult = (row, result, reason) => {
         if (!current() || row._retentionDisposed) return;
         job.attempted.add(row);
-        if (!result) return;
+        if (!result) {
+          job.reasons.set(row, reason || 'missing');
+          return;
+        }
         job.searched.add(row);
         let index = 0;
         const matches = new Set();
@@ -16796,12 +17056,21 @@ const _NetworkPlus = (function () {
       const scan = async (row, payload) => {
         if (!current() || row._retentionDisposed) return;
         try {
-          const result = row._mirrorSearchResponse
-            ? await row._mirrorSearchResponse(queries.filter(Boolean), options, null, job.controller.signal)
-            : await search.scan(payload ? getSearchableResponseText(row, payload) : await readSearchableResponse(row, current), rules);
-          applyResult(row, result);
+          if (row._mirrorSearchResponse && !row._responseSearchSource && !payload) {
+            const result = await row._mirrorSearchResponse(queries.filter(Boolean), options, null, job.controller.signal, true);
+            applyResult(row, result?.results, result?.reason);
+            return;
+          }
+          const source = payload || await readFullResponseDownload(row, current);
+          const { text, reason } = classifySearchableResponseText(row, source);
+          if (reason) {
+            applyResult(row, null, reason);
+            return;
+          }
+          const result = await search.scanWithStatus(text, rules);
+          applyResult(row, result.results, result.reason);
         } catch (_error) {
-          applyResult(row, null);
+          applyResult(row, null, 'failed');
         }
       };
       const archives = new Map();
@@ -16827,6 +17096,11 @@ const _NetworkPlus = (function () {
                 const entry = createSazHarEntry(entries.get('raw/' + id + '_c.txt'), entries.get('raw/' + id + '_s.txt'), row.startedDateTime);
                 await scan(row, { content: entry.response.content?.text, encoding: entry.response.content?.encoding });
               }
+            } else if (group.every((row) => isHarByteRange(row._responseSearchSource.byteRange?.(), file.size))) {
+              for (const row of group) {
+                if (!current()) return;
+                await scan(row);
+              }
             } else {
               const wanted = new Map(group.map(row => [row._responseSearchSource.index, row]));
               const queued = [];
@@ -16836,7 +17110,7 @@ const _NetworkPlus = (function () {
                   if (!current() || !wanted.size) return;
                   yield chunk;
                   for (const [row, content] of queued.splice(0)) {
-                    await scan(row, { content: content?.text, encoding: content?.encoding });
+                    await scan(row, describeArchivedResponsePayload(content));
                   }
                 }
               }
@@ -16851,11 +17125,13 @@ const _NetworkPlus = (function () {
                 if (current() && wanted.size) throw error;
               });
               for (const [row, content] of queued) {
-                await scan(row, { content: content?.text, encoding: content?.encoding });
+                await scan(row, describeArchivedResponsePayload(content));
               }
             }
           } catch (_error) {
-            for (const row of group) job.attempted.add(row);
+            for (const row of group) {
+              if (!job.attempted.has(row)) applyResult(row, null, 'failed');
+            }
           }
           for (const row of group) job.attempted.add(row);
         }
@@ -16887,7 +17163,7 @@ const _NetworkPlus = (function () {
     }
     srch.rowColors.clear();
     srch.rowKeywords.clear();
-    const sorted = getSortedRows(state.filteredRows);
+    const sorted = getSortedRows(state.rows);
     const matchSet = new Set();
     // Build per-keyword match lists while retaining each navigated row when it still matches.
     for (let ki = 0; ki < srch.keywords.length; ki++) {
@@ -17272,16 +17548,28 @@ const _NetworkPlus = (function () {
     return new Date(Math.min(epoch, MAX_OVERVIEW_EPOCH)).toISOString().replace('T', ' ');
   }
 
-  function formatOverviewRange(range) {
+  function formatOverviewAbsoluteRange(range) {
     const start = formatOverviewEpoch(range.start);
     const end = formatOverviewEpoch(range.end);
     return start + ' – ' + (start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end);
   }
 
-  function applyOverviewRange(range) {
-    state.requestTimeFacet = range ? { start: range.start, end: range.end } : null;
+  function formatOverviewElapsed(offset) {
+    const elapsed = Math.abs(offset);
+    const formatted = elapsed < 1000 ? formatTimingDuration(elapsed) : Number((elapsed / 1000).toFixed(3)) + ' s';
+    return (offset < 0 ? '−' : offset > 0 ? '+' : '') + formatted;
+  }
+
+  function formatOverviewRange(range, origin = range.origin) {
+    return Number.isSafeInteger(origin)
+      ? formatOverviewElapsed(range.start - origin) + ' – ' + formatOverviewElapsed(range.end - origin)
+      : formatOverviewAbsoluteRange(range);
+  }
+
+  function applyOverviewRange(range, origin) {
+    state.requestTimeFacet = range ? { start: range.start, end: range.end, origin } : null;
     repaintRequestScope();
-    setStatus(range ? uiTextFormat('overviewRangeApplied', { range: formatOverviewRange(range) }) : uiText('overviewTimeCleared'));
+    setStatus(range ? uiTextFormat('overviewRangeApplied', { range: formatOverviewRange(range, origin) }) : uiText('overviewTimeCleared'));
   }
 
   function initializeTrafficOverview() {
@@ -17296,9 +17584,12 @@ const _NetworkPlus = (function () {
     const timeBounds = $('#overviewTimeBounds');
     const instructions = $('#overviewInstructions');
     const readout = $('#overviewTimeReadout');
+    const binReadout = $('#overviewBinReadout');
+    const rangeControls = $('#overviewRangeControls');
     const missingStarts = $('#overviewTimeOmissions');
     const peakButton = $('#overviewPeakBtn');
     const clearButton = $('#overviewClearTime');
+    const zoomButton = $('#overviewZoomTime');
     const latency = $('#overviewLatency');
     const measured = $('#overviewLatencyCount');
     const latencyOmissions = $('#overviewLatencyOmissions');
@@ -17315,6 +17606,9 @@ const _NetworkPlus = (function () {
     let drag = null;
     let ignorePointerClick = false;
     let drawnRange = null;
+    let drawnZoom = null;
+    let zoomRange = null;
+    let timeOrigin;
 
     const bins = Array.from({ length: TRAFFIC_TIMELINE_BINS }, (_, index) => {
       const button = document.createElement('button');
@@ -17375,10 +17669,7 @@ const _NetworkPlus = (function () {
       return { band, count };
     });
 
-    const showRangeReadout = () => {
-      const range = state.requestTimeFacet;
-      readout.textContent = range ? uiTextFormat('overviewSelected', { range: formatOverviewRange(range) }) : '';
-    };
+    const clearBinReadout = () => { binReadout.textContent = ''; };
 
     const paintSelection = (selection, scale) => {
       const span = scale.end - scale.start;
@@ -17441,13 +17732,13 @@ const _NetworkPlus = (function () {
       const previousOffset = previousTop - previousIndex * OVERVIEW_ROW_HEIGHT;
       const previousRow = reset ? null : requestRows[previousIndex];
       requestScale = range;
-      requestRows = rows.filter((row) => getOverviewStart(row) !== null)
+      requestRows = rows.filter((row) => requestOverlapsRange(row, range))
         .sort((first, second) => first.clientStartEpoch - second.clientStartEpoch);
       const newIndex = previousRow ? requestRows.indexOf(previousRow) : -1;
       const scrollTop = reset ? 0 : newIndex >= 0 ? newIndex * OVERVIEW_ROW_HEIGHT + previousOffset : previousTop;
       const hasRequests = requestRows.length > 0;
       noDisplayedRequests.hidden = hasRequests;
-      requestCount.hidden = !hasRequests;
+      requestCount.hidden = !hasRequests || !!state.requestTimeFacet;
       requestCount.textContent = uiTextFormat('overviewRequestCount', { total: requestRows.length.toLocaleString() });
       waterfall.tabIndex = hasRequests ? 0 : -1;
       paintRequestWindow(scrollTop);
@@ -17471,17 +17762,38 @@ const _NetworkPlus = (function () {
       const focusedBin = timeline.contains(focusedControl) ? focusedControl : null;
       const focusedStart = focusedBin ? Number(focusedBin.dataset.start) : NaN;
       const preTimeRows = state.requestTimeFacet
-        ? state.requestScopeRows.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row))
+        ? state.requestScopeRows.filter((row) =>
+          matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) && matchesBodyIssueFacet(row))
         : state.filteredRows;
-      chart = computeTrafficTimeline(preTimeRows);
+      const range = state.requestTimeFacet;
+      if (!range) {
+        anchor = null;
+        zoomRange = null;
+      }
+      chart = computeTrafficTimeline(preTimeRows, zoomRange);
+      timeOrigin = range?.origin ?? chart.fullRange?.start;
+      const isZoomed = !!chart.range && chart.range !== chart.fullRange;
       const visible = getVisibleRows();
       distribution = computeLatencyDistribution(visible);
-      const range = state.requestTimeFacet;
-      if (!range) anchor = null;
-      const resetRequests = range !== drawnRange;
+      const currentZoom = isZoomed ? zoomRange : null;
+      const resetRequests = range !== drawnRange || currentZoom !== drawnZoom;
       drawnRange = range;
+      drawnZoom = currentZoom;
 
       const hasTimes = !!chart.range;
+      rangeControls.hidden = !range;
+      if (range) {
+        const summary = uiTextFormat('overviewRangeSummary', {
+          range: formatOverviewRange(range, timeOrigin), count: visible.length.toLocaleString(),
+        });
+        if (readout.textContent !== summary) readout.textContent = summary;
+        readout.title = formatOverviewAbsoluteRange(range);
+      }
+      zoomButton.textContent = uiText(isZoomed ? 'overviewFullTime' : 'overviewZoomTime');
+      zoomButton.setAttribute('aria-pressed', String(isZoomed));
+      zoomButton.hidden = !hasTimes || (!isZoomed && (!range ||
+        range.start >= chart.fullRange.end || range.end <= chart.fullRange.start ||
+        (range.start <= chart.fullRange.start && range.end >= chart.fullRange.end)));
       const focusIndex = chart.bins.findIndex((bin) => focusedStart >= bin.start && focusedStart < bin.end);
       activeIndex = focusIndex >= 0 ? focusIndex : Math.max(0, Math.min(activeIndex, chart.bins.length - 1));
       waterfall.hidden = instructions.hidden = !hasTimes;
@@ -17505,34 +17817,32 @@ const _NetworkPlus = (function () {
         const selected = !!range && bin.start >= range.start && bin.end <= range.end;
         const partial = !!range && !selected && bin.start < range.end && range.start < bin.end;
         button.title = uiTextFormat('overviewBinLabel', {
-          range: formatOverviewRange(bin), count: bin.count, errors: bin.errors,
+          range: formatOverviewRange(bin, timeOrigin), count: bin.count, errors: bin.errors,
         }) + (partial ? ' · ' + uiText('overviewPartialBin') : '');
-        button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-label', button.title + ' · ' + formatOverviewAbsoluteRange(bin));
         button.setAttribute('aria-pressed', String(selected));
         button.classList.toggle('overview-bin--partial', partial);
         button.style.setProperty('--overview-bin-width', (bin.end - bin.start) / (chart.range.end - chart.range.start));
       }
       if (hasTimes) {
-        const span = chart.range.end - chart.range.start;
-        timeBounds.firstElementChild.textContent = '0 ms';
-        timeBounds.children[1].textContent = formatTimingDuration(span / 2);
-        timeBounds.lastElementChild.textContent = formatTimingDuration(span);
+        timeBounds.firstElementChild.textContent = formatOverviewElapsed(chart.range.start - timeOrigin);
+        timeBounds.children[1].textContent = formatOverviewElapsed((chart.range.start + chart.range.end) / 2 - timeOrigin);
+        timeBounds.lastElementChild.textContent = formatOverviewElapsed(chart.range.end - timeOrigin);
         paintSelection(range, chart.range);
         paintRequests(visible, chart.range, resetRequests);
       }
       const currentBin = focusedBin && hasTimes ? bins[activeIndex] : null;
       if (focusedBin && focusedBin !== currentBin) (currentBin || toggle).focus({ preventScroll: true });
-      if (currentBin) readout.textContent = currentBin.title;
-      else showRangeReadout();
+      if (currentBin) binReadout.textContent = currentBin.title;
+      else clearBinReadout();
       missingStarts.hidden = chart.untimed === 0;
       if (chart.untimed) missingStarts.textContent = uiTextFormat('overviewMissingStarts', { count: chart.untimed });
       peakButton.hidden = !chart.peak;
       if (chart.peak) {
         peakButton.textContent = uiTextFormat('overviewPeak', { count: chart.peak.errors });
-        peakButton.title = formatOverviewRange(chart.peak);
+        peakButton.title = formatOverviewRange(chart.peak, timeOrigin);
         peakButton.setAttribute('aria-label', peakButton.textContent + ' · ' + peakButton.title);
       }
-      clearButton.hidden = !range;
 
       measured.textContent = uiTextFormat('overviewMeasured', { count: distribution.measured });
       latency.hidden = distribution.measured === 0;
@@ -17552,7 +17862,8 @@ const _NetworkPlus = (function () {
       if (distribution.slowest) slowestButton.textContent = uiTextFormat('overviewSlowest', {
         duration: formatTimingDuration(distribution.slowest.duration),
       });
-      if ([clearButton, peakButton, slowestButton].includes(focusedControl) && focusedControl.hidden) {
+      if (([peakButton, slowestButton, zoomButton].includes(focusedControl) && focusedControl.hidden) ||
+          ([clearButton, zoomButton].includes(focusedControl) && rangeControls.hidden)) {
         (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
       }
       if ((requests.contains(focusedControl) || focusedControl === waterfall) &&
@@ -17567,7 +17878,7 @@ const _NetworkPlus = (function () {
     };
     const selectBin = (bin, extend) => {
       if (!extend || !anchor) anchor = { start: bin.start, end: bin.end };
-      applyOverviewRange({ start: Math.min(bin.start, anchor.start), end: Math.max(bin.end, anchor.end) });
+      applyOverviewRange({ start: Math.min(bin.start, anchor.start), end: Math.max(bin.end, anchor.end) }, timeOrigin);
     };
     waterfall.addEventListener('scroll', () => {
       if (requestFrame !== null) return;
@@ -17638,7 +17949,7 @@ const _NetworkPlus = (function () {
       const end = Math.max(start + 1, Math.ceil(toEpoch(Math.max(origin, event.clientX))));
       drag.selection = { start, end };
       paintSelection(drag.selection, scale);
-      readout.textContent = uiTextFormat('overviewSelected', { range: formatOverviewRange(drag.selection) });
+      binReadout.textContent = uiTextFormat('overviewSelected', { range: formatOverviewRange(drag.selection, timeOrigin) });
     };
     window.addEventListener('pointermove', updateDrag);
     window.addEventListener('pointerup', (event) => {
@@ -17649,7 +17960,7 @@ const _NetworkPlus = (function () {
       if (selection) {
         ignorePointerClick = true;
         anchor = selection;
-        applyOverviewRange(selection);
+        applyOverviewRange(selection, timeOrigin);
       } else {
         repaint();
       }
@@ -17685,13 +17996,17 @@ const _NetworkPlus = (function () {
     const readBin = (event) => {
       if (drag) return;
       const button = event.target.closest('[data-overview-bin]');
-      if (button) readout.textContent = button.title;
+      if (button) binReadout.textContent = button.title;
     };
     timeline.addEventListener('focusin', readBin);
     timeline.addEventListener('pointerover', readBin);
-    timeline.addEventListener('focusout', showRangeReadout);
+    timeline.addEventListener('focusout', clearBinReadout);
     timeline.addEventListener('pointerleave', () => {
-      if (!drag) showRangeReadout();
+      if (!drag) clearBinReadout();
+    });
+    zoomButton.addEventListener('click', () => {
+      zoomRange = zoomButton.getAttribute('aria-pressed') === 'true' ? null : state.requestTimeFacet;
+      repaint();
     });
     clearButton.addEventListener('click', () => {
       applyOverviewRange(null);
@@ -17730,11 +18045,20 @@ const _NetworkPlus = (function () {
     const hasSample = state.sampleCaptureActive;
     const hasSearchRestriction = state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options);
     const counts = { all: 0, '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, other: 0, pending: 0 };
+    let bodyIssueCount = 0;
     for (const row of state.requestScopeRows || state.filteredRows) {
       if (!hasSample && (!matchesRequestHostFacet(row) || !requestOverlapsRange(row, state.requestTimeFacet))) continue;
       counts.all += 1;
       counts[classifyRequestFacet(row)] += 1;
+      if (normalizeResponseBodyIssue(row._responseBodyIssue)) bodyIssueCount += 1;
     }
+    const bodyFilter = $('#responseBodyIssuesFilter');
+    bodyFilter.disabled = hasSample;
+    bodyFilter.setAttribute('aria-pressed', String(!hasSample && state.responseBodyIssuesOnly));
+    const bodyCount = bodyFilter.querySelector('.analysis-count');
+    if (bodyCount.textContent !== String(bodyIssueCount)) bodyCount.textContent = bodyIssueCount;
+    const bodyLabel = uiTextFormat('analysisStatusFacetCount', { label: bodyFilter.firstElementChild.textContent, count: bodyIssueCount });
+    if (bodyFilter.getAttribute('aria-label') !== bodyLabel) bodyFilter.setAttribute('aria-label', bodyLabel);
     for (const button of bar.querySelectorAll('[data-status-facet]')) {
       const facet = button.dataset.statusFacet;
       button.disabled = hasSample;
@@ -17762,6 +18086,12 @@ const _NetworkPlus = (function () {
     if (!hasSample && state.requestHostFacet) {
       filters.push(['host', uiTextFormat('analysisHost', { host: state.requestHostFacet }), () => {
         state.requestHostFacet = '';
+        repaintRequestScope();
+      }]);
+    }
+    if (!hasSample && state.responseBodyIssuesOnly) {
+      filters.push(['body-issues', uiText('responseBodyIssuesFilter'), () => {
+        state.responseBodyIssuesOnly = false;
         repaintRequestScope();
       }]);
     }
@@ -17830,13 +18160,19 @@ const _NetworkPlus = (function () {
     }
   }
 
+  function countSearchMatchesInList() {
+    const matches = state.search.rowColors;
+    if (matches.size === 0 || state.filteredRows.length === state.rows.length) return matches.size;
+    return state.filteredRows.reduce((count, row) => count + Number(matches.has(row)), 0);
+  }
+
   function updateTableSummary(visibleRowCount, visibleBytes) {
     if (Number.isFinite(visibleBytes)) state.visibleBytes = visibleBytes;
     const activeFilterCount = countActiveColumnFilters(state.columnFilterRules);
     const summary = planRequestCountSummary({
       shownCount: Number.isFinite(visibleRowCount) ? visibleRowCount : countVisibleRows(),
       totalCount: state.rows.length,
-      matchedCount: state.search.rowColors.size,
+      matchedCount: countSearchMatchesInList(),
       hasActiveSearch: hasActiveSearchKeywords(state.search.keywords, state.search.options),
       matchesOnly: state.search.matchesOnly,
       activeFilterCount,
@@ -17911,13 +18247,27 @@ const _NetworkPlus = (function () {
     // Keep progress and incomplete-search notes out of the fixed-width count.
     const noticeParts = [];
     if (srch.matchesOnly && active) noticeParts.push('Showing matches only');
+    if (active) {
+      const outsideCount = srch.matches.length - countSearchMatchesInList();
+      if (outsideCount > 0) {
+        noticeParts.push(uiTextFormat('searchOutsideListFilters', { count: outsideCount.toLocaleString() }));
+      }
+    }
     if (running) noticeParts.push(uiText('payloadSearchRunning'));
-    const unsearchedBodies = active && srch.scope.resBody
-      ? countUnsearchedResponseBodies(state.filteredRows, srch.fullResponses)
-      : 0;
-    if (unsearchedBodies > 0) noticeParts.push(unsearchedBodies + ' bodies not searched');
+    if (active && srch.scope.resBody) {
+      const reasons = getUnsearchedResponseBodyReasons(state.rows, srch.fullResponses);
+      const unsearchedBodies = Object.values(reasons).reduce((total, count) => total + count, 0);
+      if (unsearchedBodies > 0) noticeParts.push(uiTextFormat('payloadSearchCoverageTotal', { count: unsearchedBodies }));
+      for (const [reason, count] of Object.entries(reasons)) {
+        noticeParts.push(uiTextFormat(RESPONSE_SEARCH_COVERAGE_KEYS[reason], { count }));
+      }
+    }
     const notice = $('#searchPanelNotice');
-    if (notice) notice.textContent = noticeParts.join(' · ');
+    if (notice) {
+      const text = noticeParts.join(' · ');
+      notice.textContent = text;
+      notice.title = text;
+    }
     queueSearchCountAnnouncement([running && noMatches ? '' : countText, ...noticeParts].filter(Boolean).join(' · '));
   }
 
@@ -18035,7 +18385,7 @@ const _NetworkPlus = (function () {
     }
     // A full-render fallback must still receive the requested keyboard focus.
     state.pendingRowFocusId = null;
-    const nextTabStop = (tabStopRow && rowElementById.get(String(tabStopRow.id))) || null;
+    const nextTabStop = (tabStopRow && rowElementById.get(String(tabStopRow.id))) || tbody.querySelector('tr[data-row-id]');
     if (previousTabStop && previousTabStop !== nextTabStop && previousTabStop.isConnected !== false) {
       previousTabStop.tabIndex = -1;
     }
@@ -20081,13 +20431,21 @@ const _NetworkPlus = (function () {
     return new Blob(parts, { type: binary ? 'application/octet-stream' : 'text/plain;charset=utf-8' });
   }
 
+  function describeArchivedResponsePayload(content) {
+    return {
+      content: content?.text,
+      encoding: content?.encoding,
+      reason: content?._networkPlus?.reason === HAR_OVERSIZED_BODY_REASON ? 'overBudget' : undefined,
+    };
+  }
+
   async function readFullResponseDownload(row, isCurrent) {
     if (typeof row.responseContent === 'string') {
       return { content: row.responseContent, encoding: row.responseContentEncoding };
     }
     if (row._originalHarHasBody && row._readImportedHarEntry) {
       const entry = await row._readImportedHarEntry(isCurrent);
-      return { content: entry.response.content?.text, encoding: entry.response.content?.encoding };
+      return describeArchivedResponsePayload(entry.response.content);
     }
     if (row._responseSearchSource?.id) {
       const { file, id } = row._responseSearchSource;
@@ -20099,10 +20457,18 @@ const _NetworkPlus = (function () {
     return fetchRawLiveResponsePayload(row);
   }
 
-  function getSearchableResponseText(row, { content, encoding }) {
-    if (typeof content !== 'string' || content.length > PAYLOAD_SEARCH_MAX_CHARS) return null;
+  function classifySearchableResponseText(row, { content, encoding, reason }) {
+    if (typeof content !== 'string') return { text: null, reason: reason || 'missing' };
+    if (content.length > PAYLOAD_SEARCH_MAX_CHARS) return { text: null, reason: 'overBudget' };
     const text = decodeResponseContent(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
-    return encoding === 'base64' && content && (!text || isUndecodableBodyText(text)) ? null : text;
+    if (encoding === 'base64' && content && (!text || isUndecodableBodyText(text))) {
+      return { text: null, reason: 'binary' };
+    }
+    return { text, reason: null };
+  }
+
+  function getSearchableResponseText(row, payload) {
+    return classifySearchableResponseText(row, payload).text;
   }
 
   async function readSearchableResponse(row, isCurrent) {
@@ -20163,11 +20529,15 @@ const _NetworkPlus = (function () {
     const issue = normalizeResponseBodyIssue(row?._responseBodyIssue);
     notice.hidden = !issue;
     if (!issue) return;
-    $('#responseBodyIssueReason').textContent = uiText(RESPONSE_BODY_ISSUE_REASONS[issue]);
+    const retryAvailable = canReadResponseBody(row);
+    const disconnected = issue !== 'navigation' && !retryAvailable && row._mirrorBodyConnected?.() === false;
+    const baseReason = uiText(RESPONSE_BODY_ISSUE_REASONS[issue]);
+    $('#responseBodyIssueReason').textContent = disconnected ? baseReason + ' ' + uiText('responseBodyRetryDisconnected') : baseReason;
     const retry = $('#retryResponseBody');
-    retry.hidden = !canReadResponseBody(row);
-    retry.disabled = row.responseContentState === 'loading';
-    retry.textContent = uiText(retry.disabled ? 'responseBodyRetryPending' : 'responseBodyRetryAction');
+    const loading = row.responseContentState === 'loading';
+    retry.hidden = !disconnected && !retryAvailable;
+    retry.disabled = disconnected || loading;
+    retry.textContent = uiText(loading ? 'responseBodyRetryPending' : 'responseBodyRetryAction');
   }
 
   function readSelectedResponseBody(row, trigger) {
@@ -21728,6 +22098,7 @@ const _NetworkPlus = (function () {
       state.columnFilterRules = restorePlan.columnFilterRules;
       state.webSocketOnly = restorePlan.webSocketOnly;
       state.requestStatusFacet = restorePlan.requestStatusFacet;
+      state.responseBodyIssuesOnly = restorePlan.responseBodyIssuesOnly;
       state.requestHostFacet = restorePlan.requestHostFacet;
       state.requestTimeFacet = restorePlan.requestTimeFacet;
       state.sort = restorePlan.sort;
@@ -21810,6 +22181,7 @@ const _NetworkPlus = (function () {
       state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
       state.webSocketOnly = false;
       state.requestStatusFacet = 'all';
+      state.responseBodyIssuesOnly = false;
       state.requestHostFacet = '';
       state.requestTimeFacet = null;
       state.selectedRow = null;
@@ -22520,6 +22892,10 @@ const _NetworkPlus = (function () {
         repaintRequestScope();
       });
     }
+    $('#responseBodyIssuesFilter').addEventListener('click', () => {
+      state.responseBodyIssuesOnly = !state.responseBodyIssuesOnly;
+      repaintRequestScope();
+    });
     $('#analysisCompareBtn').addEventListener('click', () => {
       openRequestComparison([...state.selectedRows], null);
     });
@@ -22571,9 +22947,11 @@ const _NetworkPlus = (function () {
         return;
       }
       const scopeRows = state.requestScopeRows || state.filteredRows;
-      const hasScope = !state.sampleCaptureActive && (state.requestStatusFacet !== 'all' || state.requestTimeFacet);
+      const hasScope = !state.sampleCaptureActive &&
+        (state.requestStatusFacet !== 'all' || state.responseBodyIssuesOnly || state.requestTimeFacet);
       const summary = computeDomainSummary(hasScope
-        ? scopeRows.filter((row) => matchesRequestStatusFacet(row) && requestOverlapsRange(row, state.requestTimeFacet)) : scopeRows);
+        ? scopeRows.filter((row) => matchesRequestStatusFacet(row) && matchesBodyIssueFacet(row) &&
+          requestOverlapsRange(row, state.requestTimeFacet)) : scopeRows);
       const activeHost = state.sampleCaptureActive ? '' : state.requestHostFacet;
       // The signature includes the pressed state: clicking a domain that
       // already spans every filtered row changes no aggregate but must still
@@ -24064,9 +24442,10 @@ const _NetworkPlus = (function () {
         importBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
       };
 
-      const stageHarImport = async (file, retainSource) => {
+      const stageHarImport = async (file, retainSource, sourceToken) => {
         const rowLimit = state.retention.unlimited ? Infinity : state.retention.requestLimit;
         const rows = [];
+        const byteIndex = retainSource || sourceToken ? { usable: true } : null;
         const bodies = new Map();
         const metadataCosts = new Map();
         let stagedMetadataBytes = 0;
@@ -24082,20 +24461,18 @@ const _NetworkPlus = (function () {
           row.responseContentReason = reason;
         };
         let index = 0;
-        const totalCount = await readHarEntries(file.stream(), (rawEntry, metadataChars, metadataNodes) => {
+        const totalCount = await readHarEntries(file.stream(), (rawEntry, metadataChars, metadataNodes, byteRange) => {
           const entry = normalizeHarEntry(rawEntry);
           const row = buildRowFromRequest(entry, 0);
           row._reqObj = null;
-          // Only retain the actual File selected in this window. A streamed
-          // mirror import cannot be reopened, and a chunk-built File would
-          // otherwise pin an extra copy of the entire archive in memory.
-          if (retainSource) {
+          // The file picker owns the original File. A viewer import only
+          // sends entry coordinates back over the port, not another copy.
+          if (retainSource || sourceToken) {
             row._originalHarHasBody = typeof entry.response.content.text === 'string' ||
               entry.response.content._networkPlus?.reason === HAR_OVERSIZED_BODY_REASON;
             if (row._originalHarHasBody || Array.isArray(rawEntry._webSocketMessages)) {
-              const entryIndex = index;
-              row._readImportedHarEntry = (isCurrent) => readImportedHarEntry(file, entryIndex, isCurrent);
-              if (row._originalHarHasBody) row._responseSearchSource = { file, index: entryIndex };
+              if (retainSource) attachImportedHarSource(row, file, index, byteRange, byteIndex);
+              else row._mirrorHarSource = { token: sourceToken, index, size: file.size, range: byteRange, byteIndex };
             }
           }
           const availability = classifyImportedResponseContent(entry);
@@ -24148,7 +24525,7 @@ const _NetworkPlus = (function () {
             bodies.set(row, payload.bytes);
             stagedBytes += payload.bytes;
           }
-        });
+        }, HAR_MAX_RESPONSE_TEXT_CHARS, byteIndex);
         const start = totalCount > rowLimit ? totalCount % rowLimit : 0;
         return {
           format: 'HAR',
@@ -24217,6 +24594,7 @@ const _NetworkPlus = (function () {
         resetPendingLiveRows();
         clearStoredRows();
         state.requestTimeFacet = null;
+        state.responseBodyIssuesOnly = false;
         state.selectedRow = null;
         state.focusedRow = null;
         state.selectedRows.clear();
@@ -24243,7 +24621,7 @@ const _NetworkPlus = (function () {
 
       // Shared by the local file picker and the mirror tab's transferred
       // imports; resolves with '' on success or the user-facing reason.
-      importCapturedFile = async (file, retainHarSource = false) => {
+      importCapturedFile = async (file, retainHarSource = false, sourceToken = null) => {
         if (importInProgress) return 'Another import is already in progress.';
         const sourceValidation = validateImportSource(file.name, file.size);
         setImportBusy(true);
@@ -24252,7 +24630,7 @@ const _NetworkPlus = (function () {
           setStatus(uiTextFormat('statusImportInProgress', { format: sourceValidation.format.toUpperCase() }));
           const stagedImport =
             sourceValidation.format === 'har'
-              ? await stageHarImport(file, retainHarSource)
+              ? await stageHarImport(file, retainHarSource, sourceToken)
               : await stageSazImport(file);
           const retainedCount = commitStagedImport(stagedImport);
           setStatus(uiTextFormat('statusImportSummary', {
@@ -24308,12 +24686,20 @@ const _NetworkPlus = (function () {
       if (!shouldRenderSelectedRow(state.selectedRow, row)) return;
       renderCachedResponseContent(row);
     };
-    state.onResponseBodyIssueChanged = (row) => {
+    let bodyIssueFrame = false;
+    state.onResponseBodyIssueChanged = (row, membershipChanged) => {
       if (!isActiveRetainedRow(row, state.retainedRows, state.activeRows)) return;
       const element = document.getElementById('request-row-' + row.id);
       if (element) syncResponseBodyIssueBadge(element, row);
       if (!state.comparedRows && shouldRenderSelectedRow(state.selectedRow, row)) renderResponseBodyIssue(row);
       state.publishResponseBodyIssue?.(row);
+      if (!membershipChanged || bodyIssueFrame) return;
+      bodyIssueFrame = true;
+      scheduleCaptureRender(() => {
+        bodyIssueFrame = false;
+        if (state.responseBodyIssuesOnly && !state.sampleCaptureActive) repaintRequestScope();
+        else renderAnalysisBar();
+      });
     };
     $('#retryResponseBody').addEventListener('click', (event) => {
       const row = state.selectedRow;
@@ -24662,6 +25048,8 @@ const _NetworkPlus = (function () {
       let activeMirrorPort = null;
       let mirrorHostPaused = false;
       let mirrorEverConnected = false;
+      let pendingViewerHarSource = null;
+      let viewerHarSource = null;
       const updateMirrorStatus = () => {
         if (activeMirrorPort) {
           setStatus(
@@ -24674,6 +25062,7 @@ const _NetworkPlus = (function () {
         } else {
           setStatus(uiText('statusWaitingForDevtools'));
         }
+        if (!state.comparedRows && state.selectedRow?._responseBodyIssue) renderResponseBodyIssue(state.selectedRow);
       };
       const bumpNextId = (rowId) => {
         if (Number.isInteger(rowId) && rowId >= state.nextId) state.nextId = rowId + 1;
@@ -24681,6 +25070,11 @@ const _NetworkPlus = (function () {
       const applyResponseBodyIssueFromWire = (row, value) => {
         const issue = normalizeResponseBodyIssue(value);
         if ((!issue && value !== null) || (issue && typeof row.responseContent === 'string')) return;
+        if (issue === 'navigation') {
+          row.responseContentState = 'unavailable';
+          row.responseContentReason = NAVIGATION_BODY_UNAVAILABLE_REASON;
+          row.responseContentError = null;
+        }
         if (!setResponseBodyIssue(row, issue)) return;
         if (!shouldRenderSelectedRow(state.selectedRow, row) || state.comparedRows || $('#details').hidden ||
             row._pendingRequest || row._mirrorStreamRevision != null || row._responseContentPromise ||
@@ -24694,19 +25088,37 @@ const _NetworkPlus = (function () {
         // WebSocket rows claim no HTTP status; keep the blank instead of a 0.
         if (wireRow.response && wireRow.response.status === '') row.status = '';
         row._reqObj = null;
+        const harSource = wireRow.harSource;
+        if (isRecord(harSource) && normalizeHarSourceToken(harSource.token) &&
+            Number.isSafeInteger(harSource.index) && harSource.index >= 0 &&
+            Number.isSafeInteger(harSource.size) && harSource.size > 0 && typeof harSource.body === 'boolean') {
+          const source = pendingViewerHarSource?.token === harSource.token ? pendingViewerHarSource :
+            viewerHarSource?.token === harSource.token ? viewerHarSource : null;
+          if (source && harSource.size === source.file.size && (!source.session || source.session === session)) {
+            source.session = session;
+            const range = isHarByteRange(harSource.range, source.file.size) ? harSource.range : null;
+            row._originalHarHasBody = harSource.body;
+            attachImportedHarSource(row, source.file, harSource.index, range, { usable: !!range });
+            if (harSource.omitted === true) {
+              row.responseContentState = 'omitted';
+              row.responseContentReason = HAR_EXPLICIT_RESPONSE_REASON;
+            }
+          }
+        }
         row._pendingRequest = wireRow.pending === true;
         if (Number.isSafeInteger(wireRow.streamRevision)) row._mirrorStreamRevision = wireRow.streamRevision;
         if (row._pendingRequest) {
           row.responseContentState = 'unavailable';
           row.responseContentReason = UI_TEXT.statusPendingResponse.en;
         }
+        row._mirrorBodyConnected = () => activeMirrorPort !== null;
         row._mirrorFetchBody = () =>
           new Promise((resolve, reject) => {
             viewerSession.requestBody(row.id, (error, payload) => (error ? reject(error) : resolve(payload)));
           });
         if (viewerSession.supportsFullSearch()) {
-          row._mirrorSearchResponse = (queries, options, after, signal) =>
-            viewerSession.requestFullSearch(row.id, session, queries, options, after, null, signal);
+          row._mirrorSearchResponse = (queries, options, after, signal, coverage) =>
+            viewerSession.requestFullSearch(row.id, session, queries, options, after, null, signal, coverage);
         }
         // Older hosts had no revision on live rows. They still distinguished
         // a capture with no observed HTTP status from a normalized HAR import.
@@ -24821,7 +25233,11 @@ const _NetworkPlus = (function () {
       const applyWireSnapshot = (wireRows, options) => {
         commitPendingLiveRows();
         state.liveRowsAwaitingRender.splice(0, state.liveRowsAwaitingRender.length);
-        if (options?.sessionChanged) state.requestTimeFacet = null;
+        if (options?.sessionChanged) {
+          state.requestTimeFacet = null;
+          state.responseBodyIssuesOnly = false;
+          if (viewerHarSource?.session !== options.session) viewerHarSource = null;
+        }
         if (options && options.sessionChanged && state.rows.length > 0) {
           // A new DevTools session restarts row ids at 1. Matching its rows
           // by id against the old session's would alias stale evidence onto
@@ -25050,8 +25466,13 @@ const _NetworkPlus = (function () {
           return;
         }
         setViewerImportBusy(true);
+        const format = getImportFormat(file.name);
+        const harSource = format === 'har' ? { token: mirrorSessionToken(), file } : null;
+        pendingViewerHarSource = harSource;
         setStatus(uiTextFormat('statusSendingImportToDevtools', { file: file.name }));
         const reportImportResult = (error) => {
+          if (!error) viewerHarSource = harSource;
+          if (pendingViewerHarSource === harSource) pendingViewerHarSource = null;
           setViewerImportBusy(false);
           if (!error && state.requestTimeFacet) {
             state.requestTimeFacet = null;
@@ -25059,21 +25480,23 @@ const _NetworkPlus = (function () {
           }
           setStatus(error ? formatImportFailure(error.message) : uiText('statusImportFinished'));
         };
-        if (getImportFormat(file.name) === 'har' && file.size > MAX_SAZ_SOURCE_BYTES) {
-          await viewerSession.sendHarStream(file, reportImportResult);
+        if (format === 'har' && file.size > MAX_SAZ_SOURCE_BYTES) {
+          await viewerSession.sendHarStream(file, reportImportResult, harSource.token);
           return;
         }
         let importBytes;
         try {
           importBytes = new Uint8Array(await file.arrayBuffer());
         } catch (_error) {
+          pendingViewerHarSource = null;
           setViewerImportBusy(false);
           setStatus(uiText('statusImportUnreadable'));
           return;
         }
         try {
-          viewerSession.sendImportFile(file.name, importBytes, reportImportResult);
+          viewerSession.sendImportFile(file.name, importBytes, reportImportResult, harSource?.token);
         } catch (error) {
+          pendingViewerHarSource = null;
           setViewerImportBusy(false);
           setStatus(
             error && error.message
@@ -25198,7 +25621,7 @@ const _NetworkPlus = (function () {
             return Promise.resolve({ content: row.responseContent, encoding: row.responseContentEncoding });
           }
           if (
-            (!row._reqObj || typeof row._reqObj.getContent !== 'function') &&
+            !canReadResponseBody(row) &&
             typeof row.responseContentReason === 'string' &&
             row.responseContentReason
           ) {
@@ -25224,6 +25647,11 @@ const _NetworkPlus = (function () {
               admitResponsePayload(row, payload);
             }
             return { content: payload.content, encoding: payload.encoding };
+          }, (error) => {
+            if (row._reqObj === sourceRequest && markUnavailableBodyAfterNavigation(row, error)) {
+              throw new Error(NAVIGATION_BODY_UNAVAILABLE_REASON);
+            }
+            throw error;
           });
         },
         getControlState: () => ({
@@ -25313,20 +25741,20 @@ const _NetworkPlus = (function () {
             done(error && error.message ? error.message : 'The command failed in the DevTools session.');
           }
         },
-        receiveHarStream: (fileName, stream, done) => {
+        receiveHarStream: (fileName, stream, done, harSourceToken, size) => {
           if (typeof importCapturedFile !== 'function') {
             done('Import is not available in this DevTools session.');
             return;
           }
-          importCapturedFile({ name: fileName, size: 0, stream: () => stream }).then(done);
+          importCapturedFile({ name: fileName, size, stream: () => stream }, false, harSourceToken).then(done);
         },
-        receiveImportFile: (fileName, parts, done) => {
+        receiveImportFile: (fileName, parts, done, harSourceToken) => {
           if (typeof importCapturedFile !== 'function') {
             done('Import is not available in this DevTools session.');
             return;
           }
           Promise.resolve()
-            .then(() => importCapturedFile(new File(parts, fileName)))
+            .then(() => importCapturedFile(new File(parts, fileName), false, harSourceToken))
             .then(
               (importError) => done(importError || ''),
               (error) => done(error && error.message ? error.message : 'The transferred file could not be imported.'),
@@ -26325,6 +26753,7 @@ const _NetworkPlus = (function () {
     normalizeHarHeaders,
     validateHarDocument,
     readHarEntries,
+    readImportedHarEntry,
     scheduleCaptureRender,
     normalizeHarEntry,
     parseSazEntryPath,
@@ -26342,6 +26771,7 @@ const _NetworkPlus = (function () {
     getUtf8ByteLength,
     measureResponsePayload,
     countUnsearchedResponseBodies,
+    getUnsearchedResponseBodyReasons,
     buildRowFromRequest,
     fetchResponsePayload,
     resolveHarResponseContent,
