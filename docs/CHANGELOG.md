@@ -2,6 +2,10 @@
 
 All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/himiyosh/network-plus-extension/releases).
 
+## Unreleased
+
+- No changes have been recorded since v1.19.0.
+
 ## v1.19.0 - 2026-11-18
 
 - ✨ **WebSocket Messages** — See sent and received messages in time order, expand syntax-colored JSON previews, and open or save long captured messages.
