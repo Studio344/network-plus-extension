@@ -1418,13 +1418,12 @@ describe('capture retention static contracts', () => {
     const detailsStart = js.indexOf('function selectRow');
     const detailsEnd = js.indexOf('// Section 14: Export', detailsStart);
     const detailsBlock = js.slice(detailsStart, detailsEnd);
-    expect(detailsBlock).toContain('cacheResponseContent(row)');
-    expect(js).toContain('Response-body retry failed for request {id}. Open Response > Body for details.');
-    expect(detailsBlock).toContain("uiTextFormat('statusResponseBodyRetryFailed', { id: row.id })");
-    expect(detailsBlock).toContain("uiTextFormat('statusResponseBodyRetryFailed', { id: row.id }),\n            true,");
+    expect(detailsBlock).toContain('else readSelectedResponseBody(row);');
+    expect(js).toContain('readSelectedResponseBody(row, event.currentTarget);');
+    expect(html).toContain('id="retryResponseBody"');
+    expect(js).not.toContain('Network+ automatic response prefetch failed for');
     expect(js).toContain('const pending = fetchResponsePayload(row);');
     expect(js).toContain('let statusGeneration = 0;');
-    expect(js).toContain('if (failureStatusGeneration === statusGeneration)');
     const statusStart = js.indexOf('function setStatus');
     const statusEnd = js.indexOf('let requestCountAnnouncementTimer', statusStart);
     const statusBlock = js.slice(statusStart, statusEnd);
@@ -1760,11 +1759,15 @@ describe('release trust static contracts', () => {
     const selectStart = js.indexOf('function selectRow');
     const selectEnd = js.indexOf('// Section 14: Export', selectStart);
     const selectBlock = js.slice(selectStart, selectEnd);
-    expect(selectBlock).toContain('cacheResponseContent(row)');
-    expect(selectBlock).toContain('shouldRenderSelectedRow(state.selectedRow, cachedRow)');
-    expect(selectBlock).toContain('shouldRenderSelectedRow(state.selectedRow, row)');
-    expect(selectBlock).toContain('renderCachedResponseContent(cachedRow)');
-    expect(selectBlock).not.toContain('row._reqObj.getContent');
+    const readStart = js.indexOf('function readSelectedResponseBody');
+    const readEnd = js.indexOf('function renderUnavailableResponseContent', readStart);
+    const readBlock = js.slice(readStart, readEnd);
+    expect(selectBlock).toContain('else readSelectedResponseBody(row);');
+    expect(readBlock).toContain('cacheResponseContent(row)');
+    expect(readBlock).toContain('shouldRenderSelectedRow(state.selectedRow, row)');
+    expect(readBlock).toContain('streamRevision === row._mirrorStreamRevision');
+    expect(readBlock).toContain('renderCachedResponseContent(cachedRow)');
+    expect(selectBlock + readBlock).not.toContain('row._reqObj.getContent');
     expect(js).toContain("iframe.sandbox = '';");
     // The frame's accessible name goes through the dictionary like every
     // other Body-pane string, so it is not the one English name in a

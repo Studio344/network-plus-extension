@@ -157,6 +157,13 @@
         <button id="detailsCloseBtn" class="details-close-btn" type="button" title="Close request details" data-i18n-title="titleDetailsClose" aria-label="Close request details" data-i18n-aria-label="titleDetailsClose">✕</button>
       </div>
       <div id="detailsSummary" class="details-summary" hidden></div>
+      <div id="responseBodyIssue" class="response-body-issue" hidden>
+        <div class="response-body-issue-text" role="status">
+          <strong data-i18n="responseBodyIssueTitle">Could not read the response body</strong>
+          <p id="responseBodyIssueReason"></p>
+        </div>
+        <button id="retryResponseBody" class="link-btn" type="button" title="Reads the captured body from DevTools." data-i18n-title="responseBodyRetryHint">Retry body</button>
+      </div>
       <div id="analysisOutsideView" class="analysis-outside-view" data-i18n="analysisOutsideView" hidden>Selected request is outside the current filters</div>
       <div id="comparePanel" class="compare-panel" hidden aria-label="Request comparison" data-i18n-aria-label="ariaComparePanel" aria-hidden="true"></div>
       <p id="inspectorEmptyState" class="inspector-empty" data-i18n="inspectorEmptyHint" hidden>Select a request to inspect it — click a row, ↑↓ to move, Enter to open</p>

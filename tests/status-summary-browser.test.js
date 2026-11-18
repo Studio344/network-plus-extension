@@ -7154,6 +7154,154 @@ const LIVE_CAPTURE_INIT_SCRIPT = `(() => {
 })();`;
 
 browserTest(
+  'failed response prefetch stays on its row and recovers only on explicit retry',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: LIVE_CAPTURE_INIT_SCRIPT + "localStorage.setItem('networkPlus.lang', 'en');",
+    });
+    const { cdp } = page;
+    const errors = [];
+    cdp.onEvent('Runtime.consoleAPICalled', ({ type, args }) => {
+      if (type === 'error') errors.push(args.map(({ value, description }) => value ?? description).join(' '));
+    });
+    cdp.onEvent('Runtime.exceptionThrown', ({ exceptionDetails }) => {
+      errors.push(exceptionDetails.exception?.description || exceptionDetails.text);
+    });
+    const read = () => evaluate(cdp, `({
+      rows: [...document.querySelectorAll('#tbody tr[data-row-id]')].map((row) => ({
+        id: row.dataset.rowId,
+        status: row.querySelector('[data-col-id="status"]').textContent.trim(),
+        badges: row.querySelectorAll('.response-body-issue-badge').length,
+      })),
+      count: document.querySelector('#counter').textContent,
+      successful: document.querySelector('[data-status-facet="2xx"] .analysis-count').textContent,
+      issue: Boolean(document.querySelector('#responseBodyIssue')?.getClientRects().length),
+      reason: document.querySelector('#responseBodyIssueReason')?.textContent.trim() || '',
+      canRetry: document.querySelector('#retryResponseBody')?.disabled === false &&
+        document.querySelector('#retryResponseBody').getClientRects().length > 0,
+      attempts: window.bodyRetryFixture.attempts,
+      lateErrorReads: window.bodyRetryFixture.lateErrorReads,
+      body: document.querySelector('#res-body').textContent,
+      raw: document.querySelector('#res-raw').textContent,
+    })`);
+    const waitForState = async (description, isReady, timeoutMs = 2500) => {
+      const deadline = Date.now() + timeoutMs;
+      let observed;
+      do {
+        observed = await read();
+        if (isReady(observed)) return observed;
+        await delay(50);
+      } while (Date.now() < deadline);
+      throw new Error(description + '; last observed ' + JSON.stringify(observed));
+    };
+    try {
+      await waitForLiveNetworkListener(cdp);
+      await evaluate(cdp, `(() => {
+        const fixture = window.bodyRetryFixture = { attempts: 0, lateErrorReads: 0 };
+        const emit = (id, getContent) => window.__networkPlusLiveListener({
+          startedDateTime: new Date(1704067200000 + id).toISOString(),
+          time: 10,
+          request: { method: 'GET', url: 'https://example.test/body-retry/' + id, headers: [] },
+          response: {
+            status: 200, statusText: 'OK', headers: [], bodySize: 21,
+            content: { size: 21, mimeType: 'text/plain' },
+          },
+          timings: { wait: 10 },
+          getContent,
+        });
+        const replyWithError = (callback, onRead) => {
+          Object.defineProperty(chrome.runtime, 'lastError', {
+            configurable: true,
+            get() {
+              if (onRead) onRead();
+              return { message: 'Fixture DevTools error detail' };
+            },
+          });
+          try {
+            callback(undefined, '');
+          } finally {
+            Object.defineProperty(chrome.runtime, 'lastError', {
+              configurable: true, writable: true, value: null,
+            });
+          }
+        };
+        emit(1, (callback) => {
+          fixture.attempts += 1;
+          if (fixture.attempts === 1) {
+            fixture.replyAfterTimeout = () => replyWithError(callback, () => { fixture.lateErrorReads += 1; });
+          } else if (fixture.attempts === 2) {
+            replyWithError(callback);
+          } else {
+            callback('Recovered response content', '');
+          }
+        });
+        emit(2, (callback) => callback('Other response content', ''));
+      })()`);
+      const first = await waitForState('both requests captured before the prefetch times out',
+        ({ rows, attempts }) => rows.length === 2 && attempts === 1);
+      expect(first).toMatchObject({
+        rows: [{ id: '1', status: '200', badges: 0 }, { id: '2', status: '200', badges: 0 }],
+        count: '2 requests', successful: '2', issue: false,
+      });
+      const timedOut = await waitForState('only the failed row marked after timeout',
+        ({ rows }) => rows[0]?.badges === 1, 15000);
+      expect(timedOut).toMatchObject({
+        rows: [{ id: '1', status: '200', badges: 1 }, { id: '2', status: '200', badges: 0 }],
+        count: first.count, successful: first.successful, issue: false, attempts: 1,
+      });
+      await evaluate(cdp, `window.bodyRetryFixture.replyAfterTimeout();
+        document.querySelector('#tbody tr[data-row-id="1"]').click();`);
+      const selected = await waitForState('selected failure exposes its retry',
+        ({ issue, canRetry }) => issue && canRetry);
+      expect(selected.attempts).toBe(1);
+      expect(selected.lateErrorReads).toBeGreaterThan(0);
+      expect(selected.reason).toMatch(/timed out|took too long/i);
+
+      await evaluate(cdp, `window.__networkPlusLiveListener({
+        startedDateTime: new Date(1704067200003).toISOString(),
+        time: 10,
+        request: { method: 'GET', url: 'wss://example.test/body-retry/3', headers: [] },
+        response: { status: 101, headers: [], content: { size: 0, text: '' } },
+      })`);
+      await waitForState('the WebSocket request is available to select', ({ rows }) => rows.length === 3);
+      expect(await evaluate(cdp, `document.querySelector('#request-row-3').click();
+        document.querySelector('#responseBodyIssue').hidden &&
+        !document.querySelector('#ws-messages-panel').hidden`)).toBe(true);
+      await evaluate(cdp, "document.querySelector('#request-row-1').click()");
+      const beforeRetry = await waitForState('reselecting the failed request restores its warning',
+        ({ issue, canRetry }) => issue && canRetry);
+      expect(beforeRetry.attempts).toBe(1);
+
+      await evaluate(cdp, "document.querySelector('#retryResponseBody').click()");
+      const stillFailed = await waitForState('failed retry leaves the same request retryable',
+        ({ attempts, issue, canRetry, reason }) => attempts === 2 && issue && canRetry && reason !== selected.reason);
+      expect(stillFailed).toMatchObject({ rows: beforeRetry.rows, count: beforeRetry.count, successful: first.successful });
+      expect(stillFailed.reason).toMatch(/devtools|browser/i);
+
+      await evaluate(cdp, "document.querySelector('#retryResponseBody').click()");
+      const recovered = await waitForState('successful retry restores the body and clears the warning',
+        ({ body, issue, rows }) => body.includes('Recovered response content') && !issue && rows[0]?.badges === 0);
+      expect(recovered).toMatchObject({
+        attempts: 3, rows: beforeRetry.rows.map((row) => ({ ...row, badges: 0 })),
+        count: beforeRetry.count, successful: first.successful,
+      });
+      expect(recovered.raw).toContain('Recovered response content');
+      expect(await evaluate(cdp, `(() => {
+        document.querySelector('#settingsBtn').click();
+        const open = document.querySelector('#settingsDialog').open;
+        document.querySelector('#settingsCloseBtn').click();
+        return open && !document.querySelector('#settingsDialog').open;
+      })()`)).toBe(true);
+      expect(errors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
   'matches-only grid navigation and range selection exclude hidden rows and comparison Escape restores focus',
   async () => {
     const page = await launchPanelPage({
