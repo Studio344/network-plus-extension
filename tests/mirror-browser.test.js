@@ -205,6 +205,83 @@ const answerCommand = (cdp, commandId, control) =>
   );
 
 browserTest(
+  'a successful pop-out body retry clears the original request issue in both views',
+  async () => {
+    const host = await launchPanelPage({ executable: browserExecutable, initScript: HOST_STUB });
+    let viewer;
+    try {
+      viewer = await launchPanelPage({
+        executable: browserExecutable, query: '?view=window&src=7', initScript: VIEWER_STUB,
+      });
+      await attachScriptedHostPort(viewer.cdp);
+      const issues = [];
+      const relay = async () => {
+        const requests = await evaluate(viewer.cdp, 'window.__sentToHost.splice(0)');
+        if (requests.length) {
+          await evaluate(host.cdp, `${JSON.stringify(requests)}.forEach(window.__hostPortListener); true`);
+        }
+        const replies = await evaluate(host.cdp, 'window.__fromHost.splice(0)');
+        for (const reply of replies) if (reply.type === 'response-body-issue') issues.push(reply);
+        if (replies.length) {
+          await evaluate(viewer.cdp, `${JSON.stringify(replies)}.forEach(window.__send); true`);
+        }
+      };
+      const waitForViewer = async (condition) => {
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+          await relay();
+          if (await evaluate(viewer.cdp, condition)) return true;
+          await delay(25);
+        }
+        return false;
+      };
+      await relay();
+      await evaluate(host.cdp, `(() => {
+        const request = ${JSON.stringify(wireRow(1))};
+        window.__bodyReadCount = 0;
+        request.getContent = (callback) => {
+          if (++window.__bodyReadCount === 1) {
+            chrome.runtime.lastError = { message: 'synthetic browser detail' };
+            try {
+              callback('', '');
+            } finally {
+              chrome.runtime.lastError = null;
+            }
+          } else {
+            callback('{"result":"pop-out retry succeeded"}', '');
+          }
+        };
+        window.__requestListeners[0](request);
+        return true;
+      })()`);
+      const badge = "document.querySelector('#request-row-1 .response-body-issue-badge') !== null";
+      expect(await waitForViewer(badge)).toBe(true);
+      for (const page of [host, viewer]) {
+        await evaluate(page.cdp, "document.querySelector('#request-row-1').click(); true");
+        expect(await evaluate(page.cdp, "!document.querySelector('#responseBodyIssue').hidden")).toBe(true);
+      }
+      expect(await evaluate(host.cdp, 'window.__bodyReadCount')).toBe(1);
+
+      await evaluate(viewer.cdp, "document.querySelector('#retryResponseBody').click(); true");
+      const recovered = `document.querySelector('#responseBodyIssue').hidden &&
+        !(${badge}) && document.querySelector('#res-body').textContent.includes('pop-out retry succeeded')`;
+      expect(await waitForViewer(recovered)).toBe(true);
+      expect(await evaluate(host.cdp, recovered)).toBe(true);
+      expect(await evaluate(host.cdp, 'window.__bodyReadCount')).toBe(2);
+      expect(issues.map(({ rowId, responseBodyIssue }) => [rowId, responseBodyIssue]))
+        .toEqual([[1, 'browser'], [1, null]]);
+      expect(JSON.stringify(issues)).not.toContain('synthetic browser detail');
+      await evaluate(viewer.cdp, `window.__send(${JSON.stringify(issues[0])}); true`);
+      expect(await evaluate(viewer.cdp, recovered)).toBe(true);
+    } finally {
+      if (viewer) await viewer.close();
+      await host.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
   'full pop-out HAR keeps one stream revision when an older export reply arrives after a live update',
   async () => {
     const host = await launchPanelPage({

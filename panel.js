@@ -192,7 +192,7 @@ const _NetworkPlus = (function () {
    }),
   });
   const TIMING_EVIDENCE_LIMITATION = 'Browser-observed timing phases help locate reported delay. They do not prove packet loss, cabling or RF faults, or a definitive root cause on the server.';
-  const TEST_EXTENSION_VERSION_FALLBACK = '1.19.0';
+  const TEST_EXTENSION_VERSION_FALLBACK = '1.19.1';
   const SAFE_SUPPORT_UNKNOWN = 'unknown';
   const SAFE_SUPPORT_OTHER_OS = 'Other/unknown';
   const SAFE_SUPPORT_REVIEW_NOTICE = 'This summary intentionally excludes captured traffic. Review it before posting to a public issue.';
@@ -4712,6 +4712,38 @@ const _NetworkPlus = (function () {
     });
   }
 
+  const RESPONSE_BODY_ISSUE_REASONS = Object.freeze({
+    timeout: 'responseBodyIssueTimeout',
+    browser: 'responseBodyIssueBrowser',
+    processing: 'responseBodyIssueProcessing',
+    unavailable: 'responseBodyIssueUnavailable',
+  });
+
+  function normalizeResponseBodyIssue(issue) {
+    return typeof issue === 'string' && Object.hasOwn(RESPONSE_BODY_ISSUE_REASONS, issue) ? issue : null;
+  }
+
+  function classifyResponseBodyIssue(error) {
+    const message = error?.message || '';
+    if (/timed out/i.test(message)) return 'timeout';
+    if (message.startsWith('Failed to process response content')) return 'processing';
+    if (/unavailable|disconnected/i.test(message)) return 'unavailable';
+    return 'browser';
+  }
+
+  function canReadResponseBody(row) {
+    return !row._pendingRequest &&
+      (typeof row._reqObj?.getContent === 'function' || typeof row._mirrorFetchBody === 'function');
+  }
+
+  function setResponseBodyIssue(row, issue) {
+    const next = normalizeResponseBodyIssue(issue);
+    if (row._retentionDisposed || normalizeResponseBodyIssue(row._responseBodyIssue) === next) return false;
+    row._responseBodyIssue = next;
+    state.onResponseBodyIssueChanged?.(row);
+    return true;
+  }
+
   function describeResponseContentState(row, error) {
     const rawState = row && row.responseContentState ? row.responseContentState : 'unavailable';
     const state = rawState === 'row-evicted' ? 'evicted' : rawState;
@@ -5572,6 +5604,8 @@ const _NetworkPlus = (function () {
     comparisonInvokingRowId: null, // [U8] row id that opened the comparison (for focus restoration)
     highlightedRows: new Map(), // [U7] highlighted rows: row -> color class
     onResponseContentChanged: null,
+    onResponseBodyIssueChanged: null,
+    publishResponseBodyIssue: null,
     syncSearchUI: null,
     syncDomainSummary: null,
     syncTrafficOverview: null,
@@ -6037,6 +6071,7 @@ const _NetworkPlus = (function () {
       releaseResponseContent(row, 'omitted', false);
       row.responseContentReason =
         'Body is ' + fmtBytes(payload.bytes) + '; the per-body cache limit is ' + fmtBytes(MAX_RESPONSE_BODY_BYTES) + '.';
+      setResponseBodyIssue(row, null);
       if (!row._responseOmissionCounted) {
         row._responseOmissionCounted = true;
         state.retention.omittedBodies += 1;
@@ -6067,6 +6102,7 @@ const _NetworkPlus = (function () {
     row.responseContentState = 'cached';
     row.responseContentReason = '';
     row.responseContentError = null;
+    setResponseBodyIssue(row, null);
     if (state.automaticResponsePrefetchScheduler) {
       state.automaticResponsePrefetchScheduler.markRecovered(row);
     }
@@ -8972,9 +9008,41 @@ const _NetworkPlus = (function () {
       en: 'Network+ opened in a browser tab; DevTools stayed put — undock it into its own window to have it minimized automatically.',
       ja: 'Network+ をブラウザータブで開きました。DevTools は元の位置にあります。独立したウィンドウにすると、自動で最小化できます。',
     },
-    statusResponseBodyRetryFailed: {
-      en: 'Response-body retry failed for request {id}. Open Response > Body for details.',
-      ja: 'リクエスト {id} のレスポンスボディの再取得に失敗しました。詳細は Response > Body で確認してください。',
+    responseBodyIssueTitle: {
+      en: 'Could not read the response body',
+      ja: 'レスポンス本文を取得できませんでした',
+    },
+    responseBodyIssueRowLabel: {
+      en: 'Response body could not be read. Select the request for details.',
+      ja: 'レスポンス本文を取得できませんでした。リクエストを選択すると詳細を確認できます。',
+    },
+    responseBodyIssueTimeout: {
+      en: 'The browser did not return the recorded body before the read timed out.',
+      ja: 'ブラウザーから記録済みの本文が返らず、取得がタイムアウトしました。',
+    },
+    responseBodyIssueBrowser: {
+      en: 'DevTools returned an error while reading the recorded body.',
+      ja: '記録済みの本文を読み取る際に、DevToolsからエラーが返りました。',
+    },
+    responseBodyIssueProcessing: {
+      en: 'Network+ could not process the body returned by the browser.',
+      ja: 'ブラウザーから返った本文をNetwork+で処理できませんでした。',
+    },
+    responseBodyIssueUnavailable: {
+      en: 'DevTools could not provide the recorded body.',
+      ja: 'DevToolsから記録済みの本文を取得できる状態ではありません。',
+    },
+    responseBodyRetryAction: {
+      en: 'Retry body',
+      ja: '本文を再取得',
+    },
+    responseBodyRetryPending: {
+      en: 'Reading body…',
+      ja: '本文を取得中…',
+    },
+    responseBodyRetryHint: {
+      en: 'Reads the captured body from DevTools.',
+      ja: 'DevToolsに記録済みの本文を読み直します。',
     },
     reasonResponseRetrievalFailed: {
       en: 'Failed to retrieve response content for request {id}: {reason}',
@@ -10668,8 +10736,10 @@ const _NetworkPlus = (function () {
   }
 
   function serializeRowForMirror(row) {
+    const issue = normalizeResponseBodyIssue(row._responseBodyIssue);
     return {
       id: row.id,
+      ...(issue || row._responseBodyIssue === null ? { responseBodyIssue: issue } : {}),
       ...(row._pendingRequest ? { pending: true } : {}),
       ...(row._overviewUnknownStart ? { overviewUnknownStart: true } : {}),
       ...(row._overviewUnknownDuration ? { overviewUnknownDuration: true } : {}),
@@ -11832,6 +11902,14 @@ const _NetworkPlus = (function () {
         }
         postMessage({ type: 'row', session: sessionToken, row: serializeRowForMirror(row) });
       },
+      pushResponseBodyIssue: (row) => {
+        postMessage({
+          type: 'response-body-issue',
+          session: sessionToken,
+          rowId: row.id,
+          responseBodyIssue: normalizeResponseBodyIssue(row._responseBodyIssue),
+        });
+      },
       resetPeer: () => {
         pendingRowsEnabled = false;
         for (const search of fullSearches.values()) search.abort();
@@ -11849,6 +11927,7 @@ const _NetworkPlus = (function () {
     postMessage,
     appendWireRow,
     applyWireSnapshot,
+    applyWireResponseBodyIssue,
     getLocalCount,
     getLocalMaxId,
     onHostSync,
@@ -12200,6 +12279,15 @@ const _NetworkPlus = (function () {
           if (message.session != null && hostSessionToken == null) hostSessionToken = message.session;
           if (message.row && typeof message.row === 'object') appendWireRow(message.row, message.session);
           break;
+        case 'response-body-issue': {
+          if (!hostSessionToken || message.session !== hostSessionToken ||
+              !Number.isSafeInteger(message.rowId) || message.rowId <= 0) break;
+          const issue = normalizeResponseBodyIssue(message.responseBodyIssue);
+          if (issue || message.responseBodyIssue === null) {
+            applyWireResponseBodyIssue?.(message.rowId, issue);
+          }
+          break;
+        }
         case 'sync': {
           if (typeof onHostSync === 'function') onHostSync(message);
           const sessionChanged =
@@ -12388,13 +12476,18 @@ const _NetworkPlus = (function () {
 
       try {
         row._reqObj.getContent((content, encoding) => {
-          if (settled) return;
+          // Chromium expects lastError to be read even after our timeout has fired.
           const runtimeError =
             typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError
               ? chrome.runtime.lastError.message
               : '';
+          if (settled) return;
           if (runtimeError) {
             fail('Failed to retrieve response content for ' + requestLabel + ': ' + runtimeError);
+            return;
+          }
+          if (typeof content !== 'string' && (row.responseContentSize > 0 || row.responseBodySize > 0)) {
+            fail('Response content is unavailable for ' + requestLabel);
             return;
           }
           settled = true;
@@ -12424,7 +12517,7 @@ const _NetworkPlus = (function () {
     }
     if (
       ['unavailable', 'evicted'].includes(row.responseContentState) &&
-      (!row._reqObj || typeof row._reqObj.getContent !== 'function')
+      !canReadResponseBody(row)
     ) {
       return Promise.reject(new Error(row.responseContentReason || 'Response content is unavailable.'));
     }
@@ -12457,6 +12550,7 @@ const _NetworkPlus = (function () {
         row.responseContentState = 'cached';
         row.responseContentReason = '';
         row.responseContentError = null;
+        setResponseBodyIssue(row, null);
         if (state.automaticResponsePrefetchScheduler) {
           state.automaticResponsePrefetchScheduler.markRecovered(row);
         }
@@ -12472,6 +12566,7 @@ const _NetworkPlus = (function () {
         ) {
           row.responseContentState = /unavailable/i.test(error.message) ? 'unavailable' : 'error';
           row.responseContentReason = error.message;
+          setResponseBodyIssue(row, classifyResponseBodyIssue(error));
         }
         throw error;
       });
@@ -14208,6 +14303,31 @@ const _NetworkPlus = (function () {
   // rowState is the seam a test seeds to prove the row-state classes are
   // wired in: the selection, highlight and search state createTableRow reads
   // for this row, defaulting to the live module state.
+  function syncResponseBodyIssueBadge(tr, row) {
+    const issue = normalizeResponseBodyIssue(row._responseBodyIssue);
+    const existing = tr.querySelector('.response-body-issue-badge');
+    if (!issue) {
+      existing?.remove();
+      return;
+    }
+    const label = uiText('responseBodyIssueRowLabel');
+    const badge = existing || document.createElement('span');
+    badge.className = 'response-body-issue-badge';
+    badge.textContent = '!';
+    badge.title = label;
+    badge.setAttribute('role', 'img');
+    badge.setAttribute('aria-label', label);
+    badge.setAttribute('data-i18n-title', 'responseBodyIssueRowLabel');
+    badge.setAttribute('data-i18n-aria-label', 'responseBodyIssueRowLabel');
+    if (!existing) {
+      const cell = tr.querySelector('td[data-col-id="path"]') ||
+        tr.querySelector('td[data-col-id="method"]') ||
+        tr.querySelector('td:not([data-col-id="match"])') ||
+        tr.querySelector('td[data-col-id="match"]');
+      if (cell) cell.insertBefore(badge, cell.firstChild);
+    }
+  }
+
   function createTableRow(row, onClick, isTabStop, rowState) {
     const rowStateSource = rowState || state;
     const tr = document.createElement('tr');
@@ -14415,6 +14535,7 @@ const _NetworkPlus = (function () {
         badgeCell.appendChild(badgeGroup);
       }
     }
+    if (row._responseBodyIssue) syncResponseBodyIssueBadge(tr, row);
     return tr;
   }
 
@@ -18099,6 +18220,7 @@ const _NetworkPlus = (function () {
   }
 
   function clearDetailsPanel() {
+    renderResponseBodyIssue(null);
     setDetailsTitleText(uiText('detailsEmptyTitle'));
     resetDetailsHeader();
     resetInspectorTabSignals();
@@ -20035,6 +20157,48 @@ const _NetworkPlus = (function () {
     pane.appendChild(notice);
   }
 
+  function renderResponseBodyIssue(row) {
+    const notice = $('#responseBodyIssue');
+    if (!notice) return;
+    const issue = normalizeResponseBodyIssue(row?._responseBodyIssue);
+    notice.hidden = !issue;
+    if (!issue) return;
+    $('#responseBodyIssueReason').textContent = uiText(RESPONSE_BODY_ISSUE_REASONS[issue]);
+    const retry = $('#retryResponseBody');
+    retry.hidden = !canReadResponseBody(row);
+    retry.disabled = row.responseContentState === 'loading';
+    retry.textContent = uiText(retry.disabled ? 'responseBodyRetryPending' : 'responseBodyRetryAction');
+  }
+
+  function readSelectedResponseBody(row, trigger) {
+    const streamRevision = row._mirrorStreamRevision;
+    const focusedRetry = trigger && document.activeElement === trigger;
+    const isCurrent = () => !state.comparedRows &&
+      shouldRenderSelectedRow(state.selectedRow, row) &&
+      streamRevision === row._mirrorStreamRevision;
+    const restoreFocus = (target) => {
+      if (focusedRetry && !$('#details').hidden && target?.getClientRects().length &&
+          (document.activeElement === trigger || document.activeElement === document.body)) {
+        target.focus({ preventScroll: true });
+      }
+    };
+    setResponsePaneMessage(uiText('bodyPaneLoading'));
+    const pending = cacheResponseContent(row);
+    renderResponseBodyIssue(row);
+    pending.then((cachedRow) => {
+      if (!isCurrent()) return;
+      renderCachedResponseContent(cachedRow);
+      renderResponseBodyIssue(row);
+      const activeTab = $('#res-tab-bar [aria-selected="true"]');
+      restoreFocus(activeTab);
+    }).catch((error) => {
+      if (!isCurrent()) return;
+      renderUnavailableResponseContent(row, error);
+      renderResponseBodyIssue(row);
+      restoreFocus(trigger);
+    });
+  }
+
   function renderUnavailableResponseContent(row, error) {
     const display = describeResponseContentState(row, error);
     setResponsePaneMessage(formatBodyPaneMessage(display));
@@ -20393,6 +20557,7 @@ const _NetworkPlus = (function () {
     titleParts.push(row.url || '');
     renderDetailsTitle(row, titleParts);
     const summaryPlan = renderDetailsSummary(row);
+    renderResponseBodyIssue(row);
     if (updateWsDetailTabs(row)) return;
     renderInspectorTimingOverview(row);
 
@@ -20608,24 +20773,9 @@ const _NetworkPlus = (function () {
         ),
       );
     }
-    // Response > Body and Raw — populated from the shared response cache
-    setResponsePaneMessage(uiText('bodyPaneLoading'));
-    const streamRevision = row._mirrorStreamRevision;
-    cacheResponseContent(row)
-      .then((cachedRow) => {
-        if (!shouldRenderSelectedRow(state.selectedRow, cachedRow) || streamRevision !== row._mirrorStreamRevision) return;
-        renderCachedResponseContent(cachedRow);
-      })
-      .catch((error) => {
-        if (!shouldRenderSelectedRow(state.selectedRow, row) || streamRevision !== row._mirrorStreamRevision) return;
-        const display = renderUnavailableResponseContent(row, error);
-        if (display.label === 'error') {
-          setStatus(
-            uiTextFormat('statusResponseBodyRetryFailed', { id: row.id }),
-            true,
-          );
-        }
-      });
+    // A failed read stays visible on selection. Retry uses the same bounded cache.
+    if (row._responseBodyIssue && row.responseContentState !== 'loading') renderUnavailableResponseContent(row);
+    else readSelectedResponseBody(row);
 
     // Response > Cookies
     const resCookiesPane = $('#res-cookies');
@@ -20793,6 +20943,7 @@ const _NetworkPlus = (function () {
    * Uses only data already in the row objects — never triggers a new body fetch.
    */
   function renderComparisonPanel(rowA, rowB) {
+    renderResponseBodyIssue(null);
     setDetailsTitleText(uiText('detailsComparingTwo'));
     const panel = $('#comparePanel');
     if (!panel) return;
@@ -24157,6 +24308,24 @@ const _NetworkPlus = (function () {
       if (!shouldRenderSelectedRow(state.selectedRow, row)) return;
       renderCachedResponseContent(row);
     };
+    state.onResponseBodyIssueChanged = (row) => {
+      if (!isActiveRetainedRow(row, state.retainedRows, state.activeRows)) return;
+      const element = document.getElementById('request-row-' + row.id);
+      if (element) syncResponseBodyIssueBadge(element, row);
+      if (!state.comparedRows && shouldRenderSelectedRow(state.selectedRow, row)) renderResponseBodyIssue(row);
+      state.publishResponseBodyIssue?.(row);
+    };
+    $('#retryResponseBody').addEventListener('click', (event) => {
+      const row = state.selectedRow;
+      if (!row?._responseBodyIssue || !canReadResponseBody(row) || row._responseContentPromise) return;
+      if ($('#details').classList.contains('is-ws-messages')) {
+        wsDetailsChoice = 'ws-tab-details';
+        renderRowDetails(row);
+      }
+      const activePane = $('#res-tab-bar [aria-selected="true"]')?.dataset.tab;
+      if (activePane !== 'res-body' && activePane !== 'res-raw') activateInspectorTab('res-tab-bar', 'res-body', false);
+      readSelectedResponseBody(row, event.currentTarget);
+    });
     state.automaticResponsePrefetchScheduler = createAutomaticResponsePrefetchScheduler({
       concurrency: AUTOMATIC_RESPONSE_PREFETCH_CONCURRENCY,
       isEligible: (row) => isActiveRetainedRow(row, state.retainedRows, state.activeRows),
@@ -24190,19 +24359,9 @@ const _NetworkPlus = (function () {
         }
         scheduleResponseSearchRefresh(row);
       },
-      shouldReportFailure: (row, error) =>
-        describeResponseContentState(row, error).label === 'error',
-      getFailureContext: () => statusGeneration,
-      onFailureSummary: (failureCount, failureStatusGeneration) => {
-        console.error(
-          'Network+ automatic response prefetch failed for ' +
-            failureCount.toLocaleString() +
-            ' requests.',
-        );
-        if (failureStatusGeneration === statusGeneration) {
-          setStatus(formatAutomaticResponsePrefetchFailureSummary(failureCount));
-        }
-      },
+      // Expected body-read failures are shown on the request, rather than
+      // recorded as persistent extension errors.
+      shouldReportFailure: () => false,
       onInternalError: () =>
         console.error('Network+ automatic response prefetch scheduler failed internally.'),
     });
@@ -24519,6 +24678,16 @@ const _NetworkPlus = (function () {
       const bumpNextId = (rowId) => {
         if (Number.isInteger(rowId) && rowId >= state.nextId) state.nextId = rowId + 1;
       };
+      const applyResponseBodyIssueFromWire = (row, value) => {
+        const issue = normalizeResponseBodyIssue(value);
+        if ((!issue && value !== null) || (issue && typeof row.responseContent === 'string')) return;
+        if (!setResponseBodyIssue(row, issue)) return;
+        if (!shouldRenderSelectedRow(state.selectedRow, row) || state.comparedRows || $('#details').hidden ||
+            row._pendingRequest || row._mirrorStreamRevision != null || row._responseContentPromise ||
+            typeof row.responseContent === 'string') return;
+        if (issue) renderUnavailableResponseContent(row);
+        else readSelectedResponseBody(row);
+      };
       const buildViewerRowFromWire = (wireRow, session) => {
         const row = buildRowFromRequest(buildMirrorEntryFromWire(wireRow), wireRow.id);
         if (wireRow.initiator && typeof wireRow.initiator === 'object') row.initiator = wireRow.initiator;
@@ -24574,13 +24743,13 @@ const _NetworkPlus = (function () {
         }
         return row;
       };
-      // Dedupe by id in O(1): every id ever admitted this session. Stale
-      // entries after eviction are harmless — the host never reuses an id
-      // within a session, and a session change rebuilds the set below.
-      const knownRowIds = new Set();
-      const mutableMirrorRows = new Map();
+      // Look up retained and pending rows by id. An evicted id keeps a null
+      // entry to reject duplicate pushes without retaining its row object.
+      const mirrorRowsById = new Map();
       state.streamRowEvictionSweep = (evicted) => {
-        for (const row of evicted) mutableMirrorRows.delete(row.id);
+        for (const row of evicted) {
+          if (mirrorRowsById.get(row.id) === row) mirrorRowsById.set(row.id, null);
+        }
       };
       const refreshMirrorDetails = (changed) => {
         if (state.comparedRows && state.comparedRows.some((row) => changed.has(row))) {
@@ -24598,7 +24767,6 @@ const _NetworkPlus = (function () {
       const updateExistingMirrorRow = (row, wireRow, session) => {
         if (row._pendingRequest && wireRow.pending !== true) {
           Object.assign(row, buildViewerRowFromWire(wireRow, session));
-          mutableMirrorRows.delete(row.id);
           return true;
         }
         if (row._mirrorStreamRevision == null || !Number.isSafeInteger(wireRow.streamRevision) ||
@@ -24632,16 +24800,17 @@ const _NetworkPlus = (function () {
       };
       const appendWireRow = (wireRow, session) => {
         if (!Number.isInteger(wireRow.id)) return;
-        if (knownRowIds.has(wireRow.id)) {
-          const existing = mutableMirrorRows.get(wireRow.id);
+        if (mirrorRowsById.has(wireRow.id)) {
+          const existing = mirrorRowsById.get(wireRow.id);
           if (existing && (state.activeRows.has(existing) || pendingLiveRows.includes(existing))) {
+            applyResponseBodyIssueFromWire(existing, wireRow.responseBodyIssue);
             if (updateExistingMirrorRow(existing, wireRow, session)) scheduleMirrorRowUpdate(existing);
-          } else mutableMirrorRows.delete(wireRow.id);
+          } else mirrorRowsById.set(wireRow.id, null);
           return;
         }
         const row = buildViewerRowFromWire(wireRow, session);
-        knownRowIds.add(row.id);
-        if (row._pendingRequest || row._mirrorStreamRevision != null) mutableMirrorRows.set(row.id, row);
+        applyResponseBodyIssueFromWire(row, wireRow.responseBodyIssue);
+        mirrorRowsById.set(row.id, row);
         bumpNextId(row.id);
         const wasAtBottom =
           state.autoScroll &&
@@ -24670,11 +24839,13 @@ const _NetworkPlus = (function () {
           seenIds.add(wireRow.id);
           const existing = existingById.get(wireRow.id);
           if (existing) {
+            applyResponseBodyIssueFromWire(existing, wireRow.responseBodyIssue);
             if (updateExistingMirrorRow(existing, wireRow, options?.session)) changedRows.add(existing);
             orderedRows.push(existing);
             continue;
           }
           const row = buildViewerRowFromWire(wireRow, options?.session);
+          applyResponseBodyIssueFromWire(row, wireRow.responseBodyIssue);
           freshRows.push(row);
           orderedRows.push(row);
         }
@@ -24688,13 +24859,9 @@ const _NetworkPlus = (function () {
             (orderIndex.has(b.id) ? orderIndex.get(b.id) : Number.MAX_SAFE_INTEGER),
         );
         for (const row of state.rows) bumpNextId(row.id);
-        knownRowIds.clear();
-        mutableMirrorRows.clear();
-        for (const row of state.rows) {
-          knownRowIds.add(row.id);
-          if (row._pendingRequest || row._mirrorStreamRevision != null) mutableMirrorRows.set(row.id, row);
-        }
-        for (const row of pendingLiveRows) knownRowIds.add(row.id);
+        mirrorRowsById.clear();
+        for (const row of state.rows) mirrorRowsById.set(row.id, row);
+        for (const row of pendingLiveRows) mirrorRowsById.set(row.id, row);
         render();
         refreshMirrorDetails(changedRows);
         if (wsMessagesView && wsMessagesView.row === state.selectedRow) {
@@ -24714,6 +24881,10 @@ const _NetworkPlus = (function () {
         },
         appendWireRow,
         applyWireSnapshot,
+        applyWireResponseBodyIssue: (rowId, issue) => {
+          const row = mirrorRowsById.get(rowId);
+          if (row) applyResponseBodyIssueFromWire(row, issue);
+        },
         getLocalCount: () => state.rows.length + pendingLiveRows.length,
         getLocalMaxId: () => {
           let maxId = 0;
@@ -25041,12 +25212,17 @@ const _NetworkPlus = (function () {
           if (row.responseContentSize > MAX_RESPONSE_BODY_BYTES) {
             return Promise.reject(rejectOversized(row.responseContentSize));
           }
+          const sourceRequest = row._reqObj;
           return fetchResponsePayload(row, RESPONSE_CONTENT_TIMEOUT_MS, MAX_RESPONSE_BODY_BYTES).then((payload) => {
             // The local panel refuses bodies over the per-body limit at cache
             // admission; the mirror path must not serve what the host itself
             // would refuse — and one oversize port message throws, is
             // swallowed, and leaves the viewer with a bare 10-second timeout.
             if (payload.bytes > MAX_RESPONSE_BODY_BYTES) throw rejectOversized(payload.bytes);
+            if (row._responseBodyIssue && row._reqObj === sourceRequest && !isLiveStreamRow(row) &&
+                isActiveRetainedRow(row, state.retainedRows, state.activeRows)) {
+              admitResponsePayload(row, payload);
+            }
             return { content: payload.content, encoding: payload.encoding };
           });
         },
@@ -25234,6 +25410,9 @@ const _NetworkPlus = (function () {
       };
       notifyMirrorRowCaptured = (row, completedPending) => {
         if (mirrorPort) hostSession.pushRow(row, completedPending);
+      };
+      state.publishResponseBodyIssue = (row) => {
+        if (mirrorPortConfirmed) hostSession.pushResponseBodyIssue(row);
       };
       syncMirrorPendingRows = () => {
         if (mirrorPortConfirmed) hostSession.sendSync();
