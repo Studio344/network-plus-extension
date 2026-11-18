@@ -8,17 +8,17 @@ This dossier is a repository-local recommendation for a future Chrome Web Store 
 
 ### Upload artifact
 
-- **Release candidate** — `v1.19.0` (cut 2026-11-18)
-- **ZIP** — `network-plus-extension-1.19.0.zip`
-- **Size** — `422053 bytes`
-- **SHA-256** — `6ec66cce6629ef78bfca785e354413b631c735b1f93090c53b0cabe66c4e47ce`
-- **Download after publication** — https://github.com/himiyosh/network-plus-extension/releases/download/v1.19.0/network-plus-extension-1.19.0.zip
+- **Release candidate** — `v1.19.1` (cut 2026-11-18)
+- **ZIP** — `network-plus-extension-1.19.1.zip`
+- **Size** — `424236 bytes`
+- **SHA-256** — `70cd924bd4efbb136ecce6a19a71c7861c3cf1419f98387daeb1a7da5382af08`
+- **Download after publication** — https://github.com/himiyosh/network-plus-extension/releases/download/v1.19.1/network-plus-extension-1.19.1.zip
 
-Two `TZ=UTC npm run extension:package` builds produced identical bytes. The archive was built from reviewed commit `fbbf231e861b07ed19df62d9b6a5d8ef063a5d57` with the version update applied. Public observation of the release is a post-merge step and is not claimed here. Verify the downloaded GitHub asset against this archive after publication. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature. Only upload after obtaining the ZIP from the trusted release route and comparing the complete digest.
+Two `TZ=UTC npm run extension:package` builds produced identical bytes. The archive was built from reviewed commit `0cbca5c0e12434243de3a3dc0bbdf0477e84ace9` with the version update applied. Public observation of the release is a post-merge step and is not claimed here. Verify the downloaded GitHub asset against this archive after publication. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature. Only upload after obtaining the ZIP from the trusted release route and comparing the complete digest.
 
 ### Observed repository facts
 
-- The `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.19.0`, with one required permission (`storage`), optional scripting and per-origin access for user-initiated resend, packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
+- The `manifest.json` identifies a Manifest V3 DevTools extension named `Network+ for DevTools`, version `1.19.1`, with one required permission (`storage`), optional scripting and per-origin access for user-initiated resend, packaged 16, 48, and 128 pixel PNG icons, and the extension-page CSP `script-src 'self'; object-src 'self'`.
 - The package guard allows only the sixteen audited runtime files and rejects remote resources, inline scripts, unexpected privileged manifest surfaces, and permission drift. The browser action opens a packaged launcher for the local offline workspace or live recording setup. The background service worker minimizes undocked DevTools when the pop-out opens. These operations require no additional permission, read no current-tab URLs or page data, and do not override New Tab.
 - The same runtime uses Chromium extension APIs without an Edge-only code path. Historical pre-v1.16.0 verification used Chrome 151: it loaded the manifest without extension errors, all 98 real-browser regression scenarios passed, and the Network+ DevTools panel was confirmed manually. This is not a new manual verification of the candidate release.
 
@@ -160,9 +160,9 @@ No account, credentials, subscription, remote service, or live customer traffic 
 
 The sections above describe a first submission. When a Chrome Web Store item already exists for this extension, the work is a package update against that item: the account prerequisites are already satisfied and no new item is created.
 
-- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.19.0 is higher than v1.18.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
-- After publication, upload `network-plus-extension-1.19.0.zip` obtained from the trusted release route as a new package on the existing item, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
-- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the dashboard, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for v1.16.0 and are reused for v1.19.0 to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- chrome` compares each listing image with `docs/store-assets/`, replaces only the ones that differ, and saves a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
+- The `manifest.json` version must be strictly higher than the version the store currently carries. v1.19.1 is higher than v1.19.0; the operator must still confirm the current store version before upload, and the release workflow refuses to publish a version that already has a GitHub release, so a version cannot be silently reused.
+- After publication, upload `network-plus-extension-1.19.1.zip` obtained from the trusted release route as a new package on the existing item, and compare the complete 64-character SHA-256 recorded above against the downloaded file before submitting.
+- Re-check the listing text, screenshots, and privacy answers against this dossier. The listing is not versioned in the dashboard, so a stale screenshot or description stays live until it is replaced; the four 1280 x 800 screenshots in `docs/store-assets/` were re-captured for v1.16.0 and are reused for v1.19.1 to reflect the adopted Inspector-first layout, status-summary badges, and request count indicator. Compare the live detailed description with this dossier every release, since portal text remains unchanged until separately edited. The image swap itself is scripted: `npm run store:pages -- chrome` compares each listing image with `docs/store-assets/`, replaces only the ones that differ, and saves a draft, submitting nothing. It runs on the operator's machine, not in CI. The slot-by-slot procedure below remains the fallback when a console changes shape under it.
 - An update is a fresh review. Distribution and visibility settings carry over from the existing item unless the operator changes them, and the previously reviewed package stays live until the new one is approved.
 - Field labels and the navigation path for package updates must be confirmed in the live dashboard, which can change independently of this repository.
 
