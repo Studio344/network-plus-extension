@@ -1,5 +1,5 @@
 /**
- * Jest setup: mock browser globals for panel.js
+ * Browser globals for the Node.js panel tests
  */
 global.chrome = {
   storage: { local: { get: jest.fn(), set: jest.fn() } },

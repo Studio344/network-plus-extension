@@ -2,24 +2,28 @@
 name: Network+ for DevTools
 description: A precise, high-density network forensics workbench for Microsoft Edge DevTools.
 colors:
-  signal-indigo: '#6366f1'
-  signal-indigo-soft: '#6366f11f'
-  canvas-light: '#fafbfc'
-  surface-light: '#f0f2f5'
+  accent-light: '#096b9c'
+  accent-ink-light: '#075980'
+  accent-tint-light: 'rgba(9,105,154,0.12)'
+  accent-dark: '#efbc79'
+  accent-ink-dark: '#f3cc99'
+  accent-tint-dark: 'rgba(239,188,121,0.13)'
+  canvas-light: '#f3f6fa'
+  surface-light: '#e9eff6'
   content-light: '#ffffff'
-  ink-light: '#1a1a2e'
-  muted-light: '#606d7b'
-  border-light: '#dde1e6'
-  control-border-light: '#7c8794'
-  separator-light: '#7c8794'
-  canvas-dark: '#0f172a'
-  surface-dark: '#1e293b'
-  content-dark: '#162032'
-  ink-dark: '#e2e8f0'
-  muted-dark: '#94a3b8'
-  border-dark: '#334155'
-  control-border-dark: '#7c8794'
-  separator-dark: '#7c8794'
+  ink-light: '#172a40'
+  muted-light: '#52677d'
+  border-light: '#d0dce8'
+  control-border-light: '#748598'
+  separator-light: '#6d8196'
+  canvas-dark: '#121110'
+  surface-dark: '#24211e'
+  content-dark: '#1a1816'
+  ink-dark: '#d8cdbf'
+  muted-dark: '#a59889'
+  border-dark: '#413a33'
+  control-border-dark: '#8d8276'
+  separator-dark: '#776b5e'
   success: '#059669'
   caution: '#d97706'
   error: '#dc2626'
@@ -88,8 +92,8 @@ components:
     padding: '5px 12px'
     height: '32px'
   toolbar-button-active:
-    backgroundColor: '{colors.signal-indigo-soft}'
-    textColor: '{colors.signal-indigo}'
+    backgroundColor: '{colors.accent-tint-light}'
+    textColor: '{colors.accent-ink-light}'
     typography: '{typography.body}'
     rounded: '{rounded.lg}'
     padding: '5px 12px'
@@ -101,8 +105,8 @@ components:
     rounded: '{rounded.md}'
     padding: '4px 8px'
   tab-active:
-    backgroundColor: '{colors.signal-indigo-soft}'
-    textColor: '{colors.signal-indigo}'
+    backgroundColor: '{colors.accent-tint-light}'
+    textColor: '{colors.accent-ink-light}'
     typography: '{typography.label}'
     rounded: '{rounded.xs}'
     padding: '5px 12px'
@@ -132,13 +136,13 @@ already diagnosing a live problem.
 
 ## Colors
 
-The palette is operational: cool neutral layers separate work areas while Signal Indigo identifies the current action or
-selection.
+Light uses cool neutral surfaces with a blue accent. Dark uses warm charcoal surfaces with amber for active controls, selection, and keyboard focus.
 
 ### Primary
 
-- **Signal Indigo** (`#6366f1`): Primary actions, active tabs, focus rings, and current selection only.
-- **Signal Indigo Soft** (`#6366f11f`): Low-emphasis active and hover surfaces that preserve text contrast.
+- Focus uses `#096b9c` in Light and `#efbc79` in Dark.
+- Pressed toggles can use a solid accent fill. Tinted backgrounds with matching text identify lower-emphasis states.
+- The dark toolbar menu and live recording guide share the panel's charcoal and amber. Muted green identifies the saved-capture action.
 
 ### Secondary
 
@@ -151,14 +155,10 @@ selection.
 
 ### Neutral
 
-- **Inspection Canvas** (`#fafbfc` light / `#0f172a` dark): The full-panel working background.
-- **Workbench Surface** (`#f0f2f5` light / `#1e293b` dark): Toolbars, tabs, and secondary panels.
-- **Evidence Surface** (`#ffffff` light / `#162032` dark): Request and response content.
-- **Evidence Ink** (`#1a1a2e` light / `#e2e8f0` dark): Primary text and data.
-- **Operational Muted** (`#606d7b` light / `#94a3b8` dark): Labels and supporting metadata.
-- **Structural Border** (`#dde1e6` light / `#334155` dark): Subtle table and panel dividers that do not identify controls.
-- **Control Boundary** (`#7c8794`): Enabled button, input, select, checkbox, and swatch outlines; at least `3:1` against every workbench layer.
-- **Workbench Separator** (`#7c8794`): Main and inspector split boundaries; at least `3:1` against every workbench layer.
+- Use `canvas` for the panel background, `surface` for controls and tabs, and `content` for request and response content.
+- Use `ink` for primary text and `muted` for supporting metadata.
+- In Dark, request paths use warm stone, routine metadata uses a quieter neutral, and selected paths and chart headings use higher-emphasis ink. Timeline volume uses bronze so amber selection and HTTP errors are easier to find.
+- Use `border` for table and panel dividers, `control-border` for control outlines, and `separator` for pane dividers.
 
 ### Tertiary
 
@@ -166,8 +166,7 @@ selection.
 - **Caution Amber** (`#d97706`): Redirects, warnings, and medium-duration evidence.
 - **Error Red** (`#dc2626`): Failed requests, destructive affordances, and recording emphasis.
 
-**The Signal-Not-Decoration Rule.** Signal Indigo is reserved for action, focus, selection, or navigation state. It is
-never ambient decoration.
+Reserve accent colors for actions, focus, selection, and navigation.
 
 **The Four-Theme Parity Rule.** Every new semantic color must be defined for light default, system dark, forced dark, and
 forced light behavior before it ships.
@@ -215,21 +214,21 @@ changes remain unmistakable.
 ### Buttons
 
 - **Shape:** Compact rounded rectangle (`6px`) with a `32px` minimum height in the toolbar.
-- **Primary:** Neutral canvas at rest; icon and brand actions use a ghost treatment. Signal Indigo is reserved for active or selected state.
-- **Hover / Focus:** Border and text shift to Signal Indigo; keyboard focus uses a visible `2px` outline.
+- Primary buttons use the neutral canvas at rest. Filled accent colors identify active controls.
+- Hover shifts the border and text to the accent color. Keyboard focus uses a visible `2px` outline.
 - **Destructive:** Neutral at rest, Error Red only on hover, focus, or confirmed destructive state.
 - **Disabled:** Reduced opacity with the pointer affordance removed.
 
 ### Inputs / Fields
 
 - **Style:** One-pixel Control Boundary, canvas background, `6px` radius, compact `4px 8px` padding.
-- **Focus:** Signal Indigo border plus a restrained soft ring.
+- Focus uses an accent border and a soft ring.
 - **Error / Disabled:** Error text must be explicit; disabled state cannot rely on color alone.
 
 ### Navigation
 
 - **Toolbar:** Left side owns capture and data actions; right side owns configuration and theme.
-- **Tabs:** Single-line scrollable labels with Signal Indigo text and underline for the active tab.
+- Use single-line scrollable labels and accent text and an underline for the active tab.
 - **Keyboard:** Arrow keys move within tablists; Home and End jump to boundaries; focus follows selection.
 
 ### Request Grid
@@ -256,7 +255,7 @@ changes remain unmistakable.
 ### Do:
 
 - **Do** preserve compact `11px` to `13px` typography and `32px` toolbar controls.
-- **Do** use Signal Indigo only for action, focus, selection, or navigation state.
+- **Do** use the accent color for action, focus, selection, and navigation.
 - **Do** keep sticky surfaces opaque and distinguish them with borders or inset shadows.
 - **Do** verify every UI change in System, Dark, and Light themes at wide and approximately `600px` panel widths.
 - **Do** pair semantic colors with labels, shape, icons, or ARIA state.

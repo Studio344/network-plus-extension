@@ -4,7 +4,29 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- No changes have been recorded since v1.18.0.
+- No changes have been recorded since v1.19.0.
+
+## v1.19.0 - 2026-11-18
+
+- ✨ **WebSocket Messages** — See sent and received messages in time order, expand syntax-colored JSON previews, and open or save long captured messages.
+- 🐛 **Live WebSocket capture** — Show DevTools frames on the connection row, including startup traffic, and offer a reload to start recording an existing page.
+- 🐛 **First WebSocket exchange** — When stream capture is first enabled, show the current page’s initial sent and received messages that DevTools already recorded.
+- 🔧 **WebSocket recording** — Start capture by default in a live DevTools session, remember an explicit Off choice, and keep SSE opt-in.
+- 🐛 **Framed WebSocket JSON** — Indent and color JSON in SignalR records and legacy Socket.IO packets while preserving the captured payload.
+- 🐛 **WebSocket Unicode** — Show escaped emoji and printable Unicode in JSON, with search for both spellings and original bytes on save.
+- ✨ **WebSocket filters** — Isolate WebSocket requests from the toolbar and search recorded messages by text and direction.
+- 🔧 **Theme colors** — Use charcoal and amber across the dark panel, toolbar menu, and live guide, and refine control and selection contrast in Light.
+- ⚡ **Large payloads** — Limit large Body and Raw previews to 16 KiB and offer local saves for complete available HTTP bodies and WebSocket text.
+- 🐛 **Search beyond previews** — Find available hidden text in HTTP bodies, Raw views, and WebSocket messages without expanding large payloads.
+- ✨ **Request triage** — Filter by HTTP error family, pending requests, or exact host, remove active conditions, and open two-request comparison from the list.
+- 🐛 **Status filters** — Apply the first checkbox change immediately and include status codes observed in the capture.
+- 🔧 **Column filters** — Align status checkboxes, label each status family with color, and keep the active count and headings readable in narrow DevTools.
+- ✨ **Bulk status selection** — Select or clear all codes within one status family while leaving the other families unchanged.
+- 🔧 **HTTP status filters** — Put all status families and their counts in the request toolbar, leaving timing and transfer details in the footer.
+- 🔧 **Compact list** — Keep Search, Filters, and request paths reachable in narrow panes, and mark selected details outside the current filter.
+- ✨ **Traffic timeline** — See overlapping requests as horizontal bars, drag the time ruler to filter traffic, and locate error peaks and slow requests.
+- 🔧 **Timeline scrolling** — Scroll through the request waterfall with a fixed time ruler and only nearby rows drawn.
+- 🔧 **Dark theme reading contrast** — Use quiet supporting text and vivid, distinct colors for traffic status and timing.
 
 ## v1.18.0 - 2026-11-17
 

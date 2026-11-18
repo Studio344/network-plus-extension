@@ -10,6 +10,165 @@ const np = require('../panel.js');
 
 const PANEL_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
 
+describe('full payload search worker', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'payload-search.js'), 'utf8');
+  const search = (text, rules, after = null, webSocketAliases = false) => {
+    const self = { postMessage: jest.fn() };
+    vm.runInNewContext(source, { self });
+    self.onmessage({ data: { text, rules, after, webSocketAliases } });
+    return self.postMessage.mock.calls[0][0];
+  };
+
+  test('matches full text without returning it to the request list', () => {
+    const text = 'x'.repeat(40000) + ' Needle';
+    expect(search(text, [{ source: '\\bneedle\\b', flags: 'gi' }, { source: 'needle', flags: 'g' }]))
+      .toEqual([true, false]);
+  });
+
+  test('returns only bounded excerpts for matches extending past the preview', () => {
+    const text = 'needle ' + 'x'.repeat(20000) + 'needle' + 'y'.repeat(200);
+    const [result] = search(text, [{ source: 'needle', flags: 'g' }], 20010);
+    expect(result.hits).toEqual([{ offset: 20007, before: 'x'.repeat(80), match: 'needle', after: 'y'.repeat(80) }]);
+    expect(result.more).toBe(false);
+    const [many] = search('a '.repeat(200), [{ source: 'a*', flags: 'g' }], 0);
+    expect(many.hits).toHaveLength(100);
+    expect(many.more).toBe(true);
+  });
+
+  test('matches an escaped emoji in a large framed message without decoding literal escapes', () => {
+    const padding = 'x'.repeat(40000);
+    const tail = '{"padding":"' + padding + '","match":"';
+    const query = [{ source: '👋', flags: 'gi' }];
+    const good = tail + String.raw`\uD83D\uDC4B` + '"}\u001e';
+    const literal = tail + String.raw`\\uD83D\\uDC4B` + '"}\u001e';
+    expect(search(good, query, 2048, true)[0].hits[0].match).toBe('👋');
+    expect(search(literal, query, 2048, true)[0].hits).toEqual([]);
+  });
+});
+
+describe('native WebSocket capture', () => {
+  const start = Date.UTC(2026, 10, 17);
+  const request = { method: 'GET', url: 'wss://example.test/socket' };
+  const entry = {
+    startedDateTime: new Date(start).toISOString(),
+    request,
+    _webSocketMessages: [],
+  };
+
+  test('identifies concurrent browser connections by their handshake nonce', () => {
+    const withKey = (prefix) => ({
+      ...entry,
+      request: { ...request, headers: [{ name: 'Sec-WebSocket-Key', value: prefix.repeat(22) + '==' }] },
+    });
+    expect(np.getNativeWebSocketKey(withKey('A'))).not.toEqual(np.getNativeWebSocketKey(withKey('B')));
+    expect(np.getNativeWebSocketKey(withKey('A'))).toEqual(np.getNativeWebSocketKey({
+      ...withKey('A'), _webSocketMessages: [{ type: 'receive', time: start / 1000, opcode: 1, data: 'observed' }],
+    }));
+    expect(np.getNativeWebSocketKey({ ...entry, _webSocketMessages: undefined })).toEqual('');
+    expect(np.getNativeWebSocketKey(entry)).toEqual('');
+    expect(np.getNativeWebSocketKey({ ...entry, request: { ...request, url: 'https://example.test/socket' } })).toEqual('');
+  });
+
+  test('advances the snapshot cursor and keeps only eligible bounded payloads', () => {
+    const source = {
+      ...entry,
+      _webSocketMessages: [
+        { type: 'receive', opcode: 1, time: start / 1000, data: 'before recording' },
+        { type: 'send', opcode: 1, time: (start + 1000) / 1000, data: 'a'.repeat(3000) },
+        { type: 'receive', opcode: 2, time: (start + 1100) / 1000, data: 'AQIDBA==' },
+        { type: 'send', opcode: 8, time: (start + 1200) / 1000, data: '' },
+      ],
+    };
+    const result = np.planNativeWebSocketFrames(source, 0, 9, start);
+    expect(result.events).toEqual([
+      { kind: 'ws-sent', socketId: 9, at: start + 1000, binary: false, preview: 'a'.repeat(2048),
+        truncated: true, fullIndex: 1, fullLength: 3000 },
+      { kind: 'ws-received', socketId: 9, at: start + 1100, binary: true, preview: '[binary 4 bytes]', truncated: false },
+    ]);
+    expect(np.planNativeWebSocketFrames(source, result.cursor, 9, start)).toEqual({ events: [], cursor: 4, skipped: 0 });
+    expect(np.planNativeWebSocketFrames(source, 5, 9, start)).toEqual({ events: [], cursor: 5, skipped: 0 });
+  });
+});
+
+describe('traffic overview', () => {
+  test('groups absolute starts over midnight and keeps adjacent intervals half-open', () => {
+    const base = Date.UTC(2026, 10, 17, 23, 59, 59, 994);
+    const rows = [
+      { clientStartEpoch: base, status: 404 },
+      { clientStartEpoch: base + 6, status: 503 },
+      { clientStartEpoch: base + 6, status: 429 },
+      { clientStartEpoch: base + 11, status: 200 },
+      { clientStartEpoch: base + 6, status: 500, _pendingRequest: true },
+      { clientStartEpoch: base + 3, status: 500, _overviewUnknownStart: true },
+      { clientStartEpoch: Number.MAX_SAFE_INTEGER, status: 500 },
+    ];
+    const model = np.computeTrafficTimeline(rows);
+    expect(model.bins).toHaveLength(12);
+    expect(model.bins.map((bin) => bin.count)).toEqual([1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1]);
+    expect(model).toMatchObject({ untimed: 2, range: { start: base, end: base + 12 }, peak: { start: base + 6, end: base + 7, errors: 2 } });
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: base, end: base + 6 }))).toEqual([rows[0]]);
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: base + 6, end: base + 12 }))).toEqual([
+      rows[1], rows[2], rows[3], rows[4],
+    ]);
+    expect(np.computeTrafficTimeline([{ clientStartEpoch: 0 }]).bins).toEqual([{ start: 0, end: 1, count: 1, errors: 0 }]);
+  });
+
+  test('uses completion times for waterfall geometry and includes requests active within the selected range', () => {
+    const rows = [
+      { clientStartEpoch: 0, duration: 100, status: 200 },
+      { clientStartEpoch: 25, duration: 75, status: 503 },
+      { clientStartEpoch: 21, duration: 500, status: 0, _pendingRequest: true },
+      { clientStartEpoch: 30, duration: 0 },
+      { clientStartEpoch: 30, duration: 900, _overviewUnknownDuration: true },
+      { clientStartEpoch: 31, duration: 0 },
+      { clientStartEpoch: 40, duration: 0 },
+    ];
+    const { range } = np.computeTrafficTimeline(rows);
+    expect(range).toEqual({ start: 0, end: 100 });
+    expect([rows[0], rows[2], rows[1], ...rows.slice(3)].map((row) => np.buildOverviewRequestEntry(row, range)))
+      .toMatchObject([
+        { startsAt: 0, width: 1, duration: 100 },
+        { startsAt: 0.21, width: 0, duration: null },
+        { startsAt: 0.25, width: 0.75, statusClass: '5xx' },
+        { startsAt: 0.3, width: 0, duration: 0 },
+        { startsAt: 0.3, width: 0, duration: null },
+        { startsAt: 0.31, width: 0 },
+        { startsAt: 0.4, width: 0 },
+      ]);
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 26, end: 30 }))).toEqual(rows.slice(0, 2));
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 100, end: 101 }))).toEqual([]);
+    expect(rows.filter((row) => np.requestOverlapsRange(row, { start: 30, end: 31 }))).toEqual([rows[0], rows[1], rows[3], rows[4]]);
+  });
+
+  test('keeps a bounded waterfall window and clamps past the last request', () => {
+    expect(np.planOverviewRequestWindow(0, 0)).toEqual({ start: 0, end: 0 });
+    expect(np.planOverviewRequestWindow(5, 0)).toEqual({ start: 0, end: 5 });
+    expect(np.planOverviewRequestWindow(1203, 25 * 700 + 3)).toEqual({ start: 697, end: 713 });
+    expect(np.planOverviewRequestWindow(1203, 25 * 1203)).toEqual({ start: 1199, end: 1203 });
+  });
+
+  test('keeps measured zero and band boundaries, and excludes pending and unknown durations', () => {
+    const rows = [0, 99, 100, 299, 300, 999, 1000, 2999, 3000].map((duration) => ({ duration }));
+    const model = np.computeLatencyDistribution(rows.concat([
+      { duration: 0, _pendingRequest: true },
+      { duration: 0, _overviewUnknownDuration: true },
+      { duration: -1 },
+      { duration: 0, _mirrorStreamRevision: 1 },
+    ]));
+    expect(model).toEqual({ bands: [2, 2, 2, 2, 1], measured: 9, slowest: rows[8], pending: 1, unmeasured: 3 });
+  });
+
+  test('keeps timing provenance across normalized HAR and pop-out rows', () => {
+    const source = { startedDateTime: '2026-11-17T23:59:59Z', request: { url: 'https://example.test' }, response: { status: 200 } };
+    const measured = np.buildRowFromRequest(np.normalizeHarEntry({ ...source, time: 0 }), 1);
+    const unknown = np.buildRowFromRequest(np.normalizeHarEntry({ ...source, _networkPlus: { overviewUnknownStart: true } }), 2);
+    expect(np.computeLatencyDistribution([measured, unknown])).toMatchObject({ measured: 1, unmeasured: 1 });
+    expect(np.serializeRowForMirror(unknown)).toMatchObject({ overviewUnknownStart: true, overviewUnknownDuration: true });
+    const wire = np.serializeRowForMirror(unknown);
+    expect(np.buildMirrorEntryFromWire(wire)).toMatchObject({ overviewUnknownStart: true, overviewUnknownDuration: true });
+  });
+});
+
 describe('capture rendering after a hidden document becomes visible', () => {
   let originalWindow;
   let originalDocument;
@@ -1661,6 +1820,25 @@ describe('response content helpers', () => {
     expect(row.responseContentEncoding).toBe('base64');
   });
 
+  test('skips admission of a known oversized response while explicit full HAR can read it', async () => {
+    const original = 'x'.repeat(1024 * 1024) + 'source tail';
+    const getContent = jest.fn((callback) => callback(original, ''));
+    const row = {
+      id: 28,
+      responseContent: null,
+      responseContentState: 'not-loaded',
+      responseContentSize: original.length,
+      responseHeaders: [],
+      _managedRetention: true,
+      _reqObj: { getContent },
+    };
+    await expect(np.cacheResponseContent(row)).rejects.toThrow('per-body cache limit');
+    expect(getContent).not.toHaveBeenCalled();
+    expect(row.responseContentState).toBe('omitted');
+    expect((await np.resolveHarResponseContent(row)).text).toBe(original);
+    expect(getContent).toHaveBeenCalledTimes(1);
+  });
+
   test('normalizes thrown callback registration and runtime failures as rejected payloads', async () => {
     const thrownRow = responseRowForPayloadTest(21, () => {
       throw new Error('registration unavailable');
@@ -2340,6 +2518,7 @@ describe('capture retention helpers', () => {
       originalCount: 3,
       context: {
         columnFilterRules: filterRules,
+        webSocketOnly: true,
         searchKeywords: [{ query: 'failure', colorIdx: 2 }],
         searchScope: {
           url: false,
@@ -2380,6 +2559,7 @@ describe('capture retention helpers', () => {
     expect(plan.searchPerKeywordCurrentRows).toEqual([[0, retained]]);
     expect(plan.columnFilterRules).toEqual(filterRules);
     expect(plan.columnFilterRules).not.toBe(filterRules);
+    expect(plan.webSocketOnly).toBe(true);
     expect(plan.searchKeywords).toEqual([{ query: 'failure', colorIdx: 2 }]);
     expect(plan.searchKeywords[0]).not.toBe(snapshot.context.searchKeywords[0]);
     expect(plan.searchScope.url).toBe(false);
@@ -3308,6 +3488,15 @@ describe('evaluateFilterRule', () => {
     expect(np.evaluateFilterRule('GET', rule, false)).toBe(true);
     expect(np.evaluateFilterRule('post', rule, false)).toBe(true);
     expect(np.evaluateFilterRule('PUT', rule, false)).toBe(false);
+  });
+
+  test('applies status-family defaults to future codes and preserves individual overrides', () => {
+    const rule = { mode: 'statusSet', excludedFamilies: ['4xx', 'other'], include: { 404: true, 503: false } };
+    const restored = np.deserializeFilterState(np.serializeFilterState({ status: rule })).status;
+    expect(np.isRuleActive(restored)).toBe(true);
+    expect([200, 304, 418, 499, 404, 503, 599, 101, 0].map((code) => np.evaluateFilterRule(code, restored, true)))
+      .toEqual([true, true, false, false, true, false, true, false, false]);
+    expect(np.isRuleActive({ mode: 'statusSet', excludedFamilies: ['4xx'], include: {} })).toBe(true);
   });
 
   test('supports statusSet mode for status code filtering', () => {
@@ -5008,15 +5197,15 @@ describe('outbound sensitive-data policy', () => {
 
   test('reads HAR creator versions from the extension runtime with a Node-test fallback', () => {
     expect(np.getExtensionVersion({ getManifest: () => ({ version: '9.8.7' }) })).toBe('9.8.7');
-    expect(np.getExtensionVersion({ getManifest: () => { throw new Error('runtime-failed'); } })).toBe('1.18.0');
-    expect(np.getExtensionVersion(null)).toBe('1.18.0');
+    expect(np.getExtensionVersion({ getManifest: () => { throw new Error('runtime-failed'); } })).toBe('1.19.0');
+    expect(np.getExtensionVersion(null)).toBe('1.19.0');
   });
 
   test('uses the current extension version for full and sanitized HAR creators', () => {
     const row = makeSensitiveRow();
     const fullHar = np.buildHarLogFromRows([row], new Map([[row, np.buildHarResponseContent(row)]]));
-    expect(fullHar.log.creator.version).toBe('1.18.0');
-    expect(np.sanitizeHar(fullHar).log.creator.version).toBe('1.18.0');
+    expect(fullHar.log.creator.version).toBe('1.19.0');
+    expect(np.sanitizeHar(fullHar).log.creator.version).toBe('1.19.0');
   });
 });
 
@@ -5056,14 +5245,11 @@ describe('status class statistics', () => {
     },
   );
 
-  test('builds ordered semantic indicator descriptors without trusting malformed counts', () => {
-    expect(np.getStatusClassIndicators({ '2xx': 4, '3xx': -1, '4xx': 2.5, '5xx': 1, other: 3 })).toEqual([
-      { statusClass: '2xx', count: 4, text: '2xx 4' },
-      { statusClass: '3xx', count: 0, text: '3xx 0' },
-      { statusClass: '4xx', count: 0, text: '4xx 0' },
-      { statusClass: '5xx', count: 1, text: '5xx 1' },
-      { statusClass: 'other', count: 3, text: 'other 3' },
-    ]);
+  test('classifies request facets and counts pending independently from other', () => {
+    expect([200, 302, 404, 503, 101, 0, undefined].map((status) => np.classifyRequestFacet({ status })))
+      .toEqual(['2xx', '3xx', '4xx', '5xx', 'other', 'other', 'other']);
+    expect(np.classifyRequestFacet({ status: 0, _pendingRequest: true })).toBe('pending');
+    expect(np.classifyRequestFacet({ status: 200, _pendingRequest: false })).toBe('2xx');
   });
 
   test.each([
@@ -5078,35 +5264,8 @@ describe('status class statistics', () => {
     expect(statusClasses).toEqual(expectedClasses);
   });
 
-  test('formats a compact textual summary in status-class order', () => {
-    expect(
-      np.formatStatusClassSummary({ '2xx': 4, '3xx': 3, '4xx': 2, '5xx': 1, other: 5 }),
-    ).toBe('status 2xx 4 · 3xx 3 · 4xx 2 · 5xx 1 · other 5');
-  });
-
-  test('finds the first matching status-class row in the supplied visible order', () => {
-    const visibleSortedRows = [
-      { id: 'latest-2xx', status: 204 },
-      { id: 'first-5xx', status: 503 },
-      { id: 'second-5xx', status: 500 },
-      { id: 'other-status' },
-    ];
-
-    expect(np.findFirstStatusClassRow(visibleSortedRows, '5xx')).toBe(visibleSortedRows[1]);
-    expect(np.findFirstStatusClassRow(visibleSortedRows, 'other')).toBe(visibleSortedRows[3]);
-    expect(np.findFirstStatusClassRow(visibleSortedRows, '1xx')).toBeNull();
-    expect(np.findFirstStatusClassRow([null, undefined], 'other')).toBeNull();
-    expect(visibleSortedRows.map((row) => row.id)).toEqual([
-      'latest-2xx',
-      'first-5xx',
-      'second-5xx',
-      'other-status',
-    ]);
-  });
-
-  test('renders non-empty status classes as accessible inspection buttons', () => {
+  test('keeps average duration visible and the full duration range accessible in the footer', () => {
     const statsElement = { textContent: '', appendChild: jest.fn() };
-    const onInspect = jest.fn();
     document.createElement.mockClear();
 
     np.renderStatsSummary(
@@ -5117,44 +5276,14 @@ describe('status class statistics', () => {
         minDuration: 10,
         maxDuration: 40,
       },
-      onInspect,
     );
 
-    const createdElements = document.createElement.mock.calls.map((call, index) => ({
-      tagName: call[0],
-      element: document.createElement.mock.results[index].value,
-    }));
-    const fiveHundreds = createdElements.find(({ element }) =>
-      element.className.includes('status-summary-chip--5xx'),
-    );
-    const redirects = createdElements.find(({ element }) =>
-      element.className.includes('status-summary-chip--3xx'),
-    );
-    const accessibleSummary = createdElements.find(
-      ({ element }) => element.className === 'sr-only status-summary-accessible',
-    ).element;
-
-    expect(fiveHundreds.tagName).toBe('button');
-    expect(fiveHundreds.element.type).toBe('button');
-    expect(fiveHundreds.element.title).toBe(
-      'Inspect first visible 5xx request (1 matching)',
-    );
-    expect(fiveHundreds.element.setAttribute).toHaveBeenCalledWith(
-      'aria-label',
-      'Inspect first visible 5xx request (1 matching)',
-    );
-    const clickHandler = fiveHundreds.element.addEventListener.mock.calls.find(
-      ([eventName]) => eventName === 'click',
-    )[1];
-    clickHandler();
-    expect(onInspect).toHaveBeenCalledWith('5xx');
-
-    expect(redirects.tagName).toBe('span');
-    expect(redirects.element.className).toContain('status-summary-chip--empty');
-    expect(redirects.element.setAttribute).toHaveBeenCalledWith('aria-hidden', 'true');
-    expect(accessibleSummary.textContent).toBe(
-      'status 2xx 2 · 3xx 0 · 4xx 0 · 5xx 1 · other 0 | avg 25 ms · min 10 ms · max 40 ms',
-    );
+    const [accessibleSummary, duration] = statsElement.appendChild.mock.calls.map(([element]) => element);
+    expect(document.createElement.mock.calls).toEqual([['span'], ['span']]);
+    expect(accessibleSummary.textContent).toBe('avg 25 ms · min 10 ms · max 40 ms');
+    expect(duration.textContent).toBe('avg 25 ms');
+    expect(duration.title).toBe(accessibleSummary.textContent);
+    expect(duration.setAttribute).toHaveBeenCalledWith('aria-hidden', 'true');
   });
 
   test('counts every row exactly once, including malformed and missing statuses', () => {
@@ -6385,6 +6514,7 @@ describe('details reopen status', () => {
     for (const [key, text] of Object.entries(ENGLISH)) expect([key, np.uiText(key)]).toEqual([key, text]);
     expect(np.uiTextFormat('menuFilterOnly', { column: 'Domain', value: 'api.test' })).toBe('Only Domain api.test');
     expect(np.uiTextFormat('menuFilterExclude', { column: 'Path', value: '/v1' })).toBe('Exclude Path /v1');
+    expect(np.uiTextFormat('analysisSingleColumnFilter', { column: 'Status' })).toBe('Status filter');
     expect(np.uiTextFormat('menuHighlightRows', { count: 3 })).toBe('Highlight (3 rows)');
     expect(np.uiTextFormat('menuUnhighlightRows', { count: 3 })).toBe('Unhighlight (3)');
     expect(np.uiTextFormat('menuKeepSelected', { count: 2 })).toBe('Keep Selected (2)');
@@ -6545,6 +6675,7 @@ describe('details reopen status', () => {
       { key: 'statusCopiedFullUnsanitized', slot: 'label', values: PANE_NAME_KEYS },
       { key: 'menuFilterOnly', slot: 'column', texts: COLUMN_LABELS, others: { value: 'r-42' } },
       { key: 'menuFilterExclude', slot: 'column', texts: COLUMN_LABELS, others: { value: 'r-42' } },
+      { key: 'analysisSingleColumnFilter', slot: 'column', texts: COLUMN_LABELS },
       // The auto-hide opt-out names the column it pins back, in both places.
       { key: 'columnsShowAnywayLabel', slot: 'column', texts: COLUMN_LABELS },
       { key: 'columnsShowAnywayStatus', slot: 'column', texts: COLUMN_LABELS },
@@ -6564,6 +6695,7 @@ describe('details reopen status', () => {
       { key: 'statusImportFailed', slot: 'reason', values: ['importReasonHarEntriesMissing', 'importReasonSessionTimeout'] },
       { key: 'reasonResponseRetrievalFailed', slot: 'reason', values: ['importReasonSessionDisconnected', 'importReasonSessionDisconnectedBeforeResponse'], others: { id: 5 } },
       { key: 'importRetentionSummary', slot: 'action', values: ['importRetentionBodyOmitted'] },
+      { key: 'analysisRemove', slot: 'filter', values: ['analysisSearchOnly'] },
     ];
     for (const frame of COMPOSED_JAPANESE_FRAMES) {
       // A row names either the dictionary keys whose text can land in the slot
@@ -6700,6 +6832,24 @@ describe('WebSocket frame HAR export', () => {
       { type: 'send', time: 1.5, opcode: 1, data: 'one' },
       { type: 'receive', time: 2.5, opcode: 1, data: 'two' },
     ]);
+  });
+
+  test('preserves WebSocket omission metadata through the mirror and HAR re-export', () => {
+    const row = np.buildRowFromRequest({
+      startedDateTime: new Date(0).toISOString(),
+      time: 1,
+      request: { method: 'GET', url: 'https://a.test/ws' },
+      response: { status: 200 },
+      wsArchive: true,
+      wsArchiveOmitted: 7,
+    }, 1);
+    const wire = np.serializeRowForMirror(row);
+    expect(wire.webSocket).toBeUndefined();
+    const mirrored = np.buildRowFromRequest(np.buildMirrorEntryFromWire(wire), wire.id);
+    expect(mirrored).toMatchObject({ _wsArchive: true, _wsArchiveOmitted: 7 });
+    const exported = np.sanitizeHar(np.buildHarLogFromRows([mirrored])).log.entries[0];
+    expect(exported._networkPlus.webSocketFramesOmitted).toBe(7);
+    expect(exported._webSocketMessages).toBeUndefined();
   });
 
   test('sanitized export omits the frames and marks the omission per entry', () => {
@@ -8232,6 +8382,54 @@ describe('websocket capture pieces', () => {
     ]);
   });
 
+  test('keeps a small preview and makes complete WebSocket text available in bounded chunks', () => {
+    class SyntheticWebSocket {
+      constructor(url) {
+        this.url = url;
+      }
+      addEventListener() {}
+      send() {}
+    }
+    const window = { WebSocket: SyntheticWebSocket };
+    const context = vm.createContext({ window, structuredClone });
+    const key = 'test-frame-capture-key';
+    vm.runInContext(np.buildWsWrapperSource(true, key), context);
+    const socket = new window.WebSocket('wss://example.test/stream');
+    const capture = window.__networkPlusWS__;
+    capture.drain();
+
+    const message = 'a'.repeat(65535) + '🙂tail';
+    socket.send(message);
+    const [frame] = JSON.parse(vm.runInContext(np.buildStreamDrainSource('__networkPlusWS__'), context));
+    expect(frame).toMatchObject({ truncated: true, fullLength: message.length, preview: message.slice(0, 2048) });
+    expect(frame.fullId).toMatch(/^[a-z0-9-]+$/);
+    expect(capture.readFullFrame('another-reader', frame.fullId, 0)).toBeNull();
+    const first = vm.runInContext(np.buildWsFullFrameReadSource(key, frame, 0), context);
+    expect(first).toHaveLength(65536);
+    expect(first + vm.runInContext(np.buildWsFullFrameReadSource(key, frame, first.length), context)).toBe(message);
+    expect(capture.readFullFrame(key, frame.fullId, message.length)).toBeNull();
+
+    capture.setFullCapture(key, false);
+    socket.send(message);
+    expect(capture.drain()[0].fullId).toBeUndefined();
+    capture.configureFullCapture('next-session', true);
+    expect(capture.readFullFrame(key, frame.fullId, 0)).toBeNull();
+    expect(capture.readFullFrame('next-session', frame.fullId, 0)).toBeNull();
+    capture.setEnabled(false);
+    socket.send(message);
+    expect(capture.drain()).toEqual([]);
+  });
+
+  test('never transfers a malformed or oversized full WebSocket chunk from the inspected world', () => {
+    const request = np.buildWsFullFrameReadSource('reader', { fullId: 'frame', fullLength: 65537 }, 65536);
+    for (const response of ['xy', { payload: 'x' }, undefined]) {
+      const window = { __networkPlusWS__: { readFullFrame: () => response } };
+      expect(vm.runInNewContext(request, { window })).toBeNull();
+    }
+    const window = { __networkPlusWS__: { readFullFrame: () => 'x' } };
+    expect(vm.runInNewContext(request, { window })).toBe('x');
+  });
+
   test('frame lines carry direction arrows and bounded text trims from the front', () => {
     const at = Date.parse('2026-08-22T01:02:03.456Z');
     expect(np.formatWsFrameLine({ kind: 'ws-sent', at, preview: 'hello' })).toBe('↑ 01:02:03.456 hello');
@@ -8244,6 +8442,142 @@ describe('websocket capture pieces', () => {
     expect(text.startsWith('… earlier frames trimmed …')).toBe(true);
     expect(text.endsWith('line-9')).toBe(true);
     expect(text).not.toContain('line-0');
+  });
+
+  test('formats WebSocket JSON without changing captured numbers, keys, or escapes', () => {
+    expect(np.planWsMessageJson('{"id":9007199254740993,"id":-0,"nested":[{},1.2e+8,"a\\n"]}').formatted).toBe(
+      '{\n  "id": 9007199254740993,\n  "id": -0,\n  "nested": [\n    {},\n    1.2e+8,\n    "a\\n"\n  ]\n}',
+    );
+    expect(np.planWsMessageJson('{"unfinished":')).toBeNull();
+    expect(np.planWsMessageJson('['.repeat(80) + '0' + ']'.repeat(80))).toBeNull();
+  });
+
+  test('formats only captured JSON tokens and keeps an incomplete literal verbatim', () => {
+    expect(np.planWsMessageJson('{"list":[{"ok":true}],"note":"a\\uD8', true)).toEqual({
+      envelope: '',
+      formatted: '{\n  "list": [\n    {\n      "ok": true\n    }\n  ],\n  "note": ',
+      tail: '"a\\uD8',
+    });
+    expect(np.planWsMessageJson('{"latency":1.2e-', true)).toMatchObject({ tail: '1.2e-' });
+    expect(np.planWsMessageJson('{"ok":tr', true)).toMatchObject({ tail: 'tr' });
+    expect(np.planWsMessageJson('{"id":1 2,"message":', true)).toBeNull();
+    expect(np.planWsMessageJson('{"nested":[1}', true)).toBeNull();
+    expect(np.planWsMessageJson('["invalid\\x', true)).toBeNull();
+  });
+
+  test('retains Socket.IO envelopes and respects the inline JSON budget', () => {
+    expect(np.planWsMessageJson('42/chat,17["joined",{"success":true}]')).toMatchObject({
+      envelope: '42/chat,17',
+      formatted: '[\n  "joined",\n  {\n    "success": true\n  }\n]',
+    });
+    expect(np.planWsMessageJson('\ufeff{"id":1}')).toMatchObject({ formatted: '{\n  "id": 1\n}' });
+    expect(np.planWsMessageJson('label={"ok":true}')).toBeNull();
+    expect(np.planWsMessageJson('["' + 'x'.repeat(17 * 1024) + '"]')).toBeNull();
+    expect(np.planWsMessageJson('[' + '0,'.repeat(2050) + '0]')).toBeNull();
+  });
+
+  test.each([
+    ['4:::', '{"count":1}', '{\n  "count": 1\n}'],
+    ['4:7:/chat:', '[1,true]', '[\n  1,\n  true\n]'],
+    ['5:::', '{"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['5:1::', '{"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['5:1+::', '{"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['5:2+:/group/chat:', ' {"name":"demo"}', '{\n  "name": "demo"\n}'],
+    ['6:::1+', '["pong"]', '[\n  "pong"\n]'],
+    ['6::/chat:17+', '[null]', '[\n  null\n]'],
+  ])('formats legacy Socket.IO packet %s and retains the original envelope', (envelope, body, formatted) => {
+    expect(np.planWsMessageJson(envelope + body)).toEqual({ envelope, formatted, tail: '' });
+  });
+
+  test('formats a truncated legacy Socket.IO preview without guessing malformed or control packets', () => {
+    expect(np.planWsMessageJson('5:1+::{"name":"demo","body":"part', true)).toEqual({
+      envelope: '5:1+::',
+      formatted: '{\n  "name": "demo",\n  "body": ',
+      tail: '"part',
+    });
+    for (const packet of ['1::', '3:::{"x":1}', '5:abc::{"name":"demo"}',
+      '5:::[1]', '5:::{"name":}', '6:::1', '6:::["pong"]', '6:::1+{"x":1}', 'prefix 5:::{"name":"demo"}']) {
+      expect(np.planWsMessageJson(packet)).toBeNull();
+    }
+    expect(np.planWsMessageJson('5:::{"text":"' + 'x'.repeat(17 * 1024) + '"}')).toBeNull();
+  });
+
+  test('formats bounded SignalR records without changing malformed or escaped text', () => {
+    const record = '\u001e';
+    expect(np.planWsMessageJson('{"protocol":"json","version":1}' + record)?.formatted)
+      .toBe('{\n  "protocol": "json",\n  "version": 1\n}');
+    const grouped = '{"id":9007199254740993,"escaped":"\\u001e"}' + record + '{"ok":true}' + record;
+    expect(np.planWsMessageJson(grouped)?.formatted)
+      .toBe('{\n  "id": 9007199254740993,\n  "escaped": "\\u001e"\n}\n\n{\n  "ok": true\n}');
+    expect(np.planWsMessageJson('{"first":1}' + record + '{"body":"part', true))
+      .toMatchObject({ formatted: '{\n  "first": 1\n}\n\n{\n  "body": ', tail: '"part' });
+    expect(np.planWsMessageJson('{"first":1}' + record + '{"body":true}')).toBeNull();
+    expect(np.planWsMessageJson('{"first":1}' + record + 'bad' + record)).toBeNull();
+    expect(np.planWsMessageJson(('{}' + record).repeat(17))).toBeNull();
+  });
+
+  test('shows printable Unicode in WebSocket JSON and preserves escapes used as literal text or syntax', () => {
+    const original = String.raw`{"\u65E5":"\uD83D\uDC4B\uD83D\uDE0A \u2705 \uD83D\uDC69\uD83C\uDFFD\u200D\uD83D\uDD2C","raw":"\\uD83D\\uDC4B \u0022 \u005c \u001e \u202e \ud83d \n"}` + '\u001e';
+    const visible = String.raw`{"日":"👋😊 ✅ 👩🏽‍🔬","raw":"\\uD83D\\uDC4B \u0022 \u005c \u001e \u202e \ud83d \n"}` + '\u001e';
+    expect(np.getWsMessageDisplayText(original, false)).toBe(visible);
+    expect(np.planWsMessageJson(original).formatted).toContain(String.raw`\uD83D\uDC4B`);
+    expect(np.getWsMessageDisplayText(String.raw`5:2+::{"name":"\uD83D\uDC4B"}`, false)).toBe('5:2+::{"name":"👋"}');
+    expect(np.getWsMessageDisplayText(String.raw`42["\uD83D\uDC4B"]`, false)).toBe('42["👋"]');
+  });
+
+  test('uses complete escapes only in truncated WebSocket previews and leaves malformed and raw text intact', () => {
+    const prefix = String.raw`{"text":"\uD83D\uDC4B \uD83D\uDC`;
+    expect(np.getWsMessageDisplayText(prefix, true)).toBe(String.raw`{"text":"👋 \uD83D\uDC`);
+    for (const data of [prefix, String.raw`{"text":"\uD83D\uDC4B",}`, String.raw`plain \uD83D\uDC4B`]) {
+      expect(np.getWsMessageDisplayText(data, false)).toBe(data);
+    }
+    const long = String.raw`{"text":"\uD83D\uDC4B` + 'a'.repeat(17 * 1024) + '"}';
+    expect(np.getWsMessageDisplayText(long, false)).toBe(long);
+  });
+
+  test('the latest WebSocket history keeps recording after the full HAR frame cap', () => {
+    const at = Date.parse('2026-08-22T02:00:00.000Z');
+    const row = { method: 'WS' };
+    const count = np.HAR_WS_MESSAGE_IMPORT_LIMIT + 5;
+    np.ingestWsEvents(Array.from({ length: count }, (_, index) => ({
+      kind: index % 2 === 0 ? 'ws-sent' : 'ws-received',
+      socketId: 1,
+      at,
+      preview: String(index),
+    })), { variant: 'ws', getRow: () => row });
+    expect(row._wsFrames).toHaveLength(np.HAR_WS_MESSAGE_IMPORT_LIMIT);
+    expect(row._wsFrames.at(-1).data).toBe(String(np.HAR_WS_MESSAGE_IMPORT_LIMIT - 1));
+    expect(row._wsMessages).toHaveLength(100);
+    expect(row._wsMessages[0].id).toBe(count - 99);
+    expect(row._wsMessages.at(-1)).toMatchObject({ id: count, type: 'send', time: at, data: String(count - 1) });
+    expect(row._wsMessagesOmitted).toBe(count - 100);
+  });
+
+  test('HAR message history orders mixed epoch units and preserves the latest bounded payload', () => {
+    const start = Date.parse('2026-08-22T02:00:00.000Z');
+    const row = { method: 'GET' };
+    np.applyHarWebSocketMessages(row, [
+      { type: 'receive', time: (start + 1000) / 1000, data: 'x'.repeat(2100) },
+      { type: 'send', time: start, data: 'first' },
+      { type: 'receive', time: (start + 1000) / 1000, opcode: 2, data: 'aQ==' },
+    ]);
+    expect(row._wsMessages.map(({ type, data }) => [type, data.length])).toEqual([
+      ['send', 5], ['receive', 2048], ['receive', 0],
+    ]);
+    expect(row._wsMessages[1]).toMatchObject({ id: 2, time: start + 1000, truncated: true });
+    expect(row._wsMessages[2]).toMatchObject({ id: 3, time: start + 1000, binary: true, bytes: null });
+  });
+
+  test('malformed HAR data outside the exported frame cap cannot abort import', () => {
+    const messages = Array.from({ length: 1100 }, (_, i) => ({
+      type: 'receive', time: 1700000000 + i, data: 'record-' + i,
+    }));
+    messages.push({ type: 'receive', time: 1700002000, data: { toString: 1 } });
+    messages.push({ type: 'send', time: { toString: 1 }, data: 'no-timestamp' });
+    const row = { method: 'GET' };
+    expect(np.applyHarWebSocketMessages(row, messages)).toBe(np.HAR_WS_MESSAGE_IMPORT_LIMIT);
+    expect(row._wsMessages).toHaveLength(100);
+    expect(row._wsMessages.at(-1)).toMatchObject({ data: '', time: 1700002000000 });
   });
 
   test('ingest creates rows on open attempts and threads frames into both directions', () => {
@@ -9262,6 +9596,161 @@ describe('mirror WebSocket export protocol', () => {
     expect(chunks[0].frames[0]).toEqual({ type: 'send', time: 1.234, opcode: 1, data: '\u0000'.repeat(2048) });
     expect(chunks[1].frames[0]).toEqual({ type: 'send', time: 1.298, opcode: 2 });
     expect(fetchBodyForRow).not.toHaveBeenCalled();
+  });
+});
+
+describe('mirror WebSocket Messages protocol', () => {
+  const frame = (id = 1, overrides = {}) => ({
+    id, type: 'send', time: 1755750000000, binary: false, bytes: null, data: 'message', truncated: false,
+    ...overrides,
+  });
+  const row = (overrides = {}) => ({
+    id: 7, method: 'WS', url: 'wss://example.test/stream', status: '',
+    requestHeaders: [], responseHeaders: [], _streamRevision: 3,
+    _wsMessages: [frame()], _wsMessagesOmitted: 2,
+    ...overrides,
+  });
+  const connect = (rows = [row()], capable = true) => {
+    const toHost = [];
+    const toViewer = [];
+    const host = np.createMirrorHostSession({
+      postMessage: (message) => toViewer.push(message),
+      getRows: () => rows, isPaused: () => false, fetchBodyForRow: jest.fn(),
+    });
+    const viewer = np.createMirrorViewerSession({
+      postMessage: (message) => toHost.push(message),
+      appendWireRow: jest.fn(), applyWireSnapshot: jest.fn(),
+      getLocalCount: () => rows.length, getLocalMaxId: () => rows.at(-1)?.id ?? 0,
+    });
+    host.handleMessage({ type: 'hello' });
+    const snapshot = toViewer.find(({ type }) => type === 'snapshot-start');
+    for (const message of toViewer) {
+      viewer.handleMessage(message === snapshot ? { ...snapshot, webSocketMessages: capable && snapshot.webSocketMessages } : message);
+    }
+    return { host, viewer, toHost, toViewer, snapshot };
+  };
+  const request = (pair, rowId = 7, minimumRevision = 3) => {
+    const done = jest.fn();
+    pair.viewer.requestWsMessages(rowId, pair.snapshot.session, minimumRevision, done);
+    return { done, wire: pair.toHost.at(-1) };
+  };
+  const reply = (pair, wire) => {
+    pair.host.handleMessage(wire);
+    return pair.toViewer.at(-1);
+  };
+
+  test('returns an immutable bounded message snapshot on demand without putting frames into row pushes', () => {
+    const initial = frame(1, { data: '\u0000'.repeat(2048), extra: 'never transferred' });
+    const frames = Array.from({ length: 100 }, (_unused, index) => ({
+      ...initial,
+      id: index + 1,
+    }));
+    const wsRow = row({ _wsSocketId: 3, _wsMessages: frames });
+    const pair = connect([wsRow]);
+    expect(pair.snapshot.webSocketMessages).toBe(true);
+    pair.host.pushRow(wsRow);
+    const rowPush = pair.toViewer.at(-1);
+    expect(rowPush).toMatchObject({ type: 'row', row: { streamRevision: 3, webSocket: true } });
+    expect(JSON.stringify(pair.toViewer)).not.toContain('never transferred');
+    expect(pair.toViewer.some(({ type }) => type === 'ws-messages-result')).toBe(false);
+    const { done, wire } = request(pair);
+    const result = reply(pair, wire);
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(2 * 1024 * 1024);
+    expect(result).toMatchObject({ type: 'ws-messages-result', revision: 3, omitted: 2, ok: true });
+    expect(result.frames).toHaveLength(100);
+    expect(result.frames[0].extra).toBeUndefined();
+    wsRow._wsMessages[0].data = 'new revision';
+    expect(result.frames[0].data).toHaveLength(2048);
+    pair.viewer.handleMessage(result);
+    expect(done).toHaveBeenCalledWith(null, { revision: 3, frames: result.frames, omitted: 2 });
+  });
+
+  test('serves an imported HTTP upgrade and a known empty socket at revision zero', () => {
+    const message = frame(4, { type: 'receive', time: null, binary: true, bytes: 16, data: '' });
+    const imported = row({ method: 'GET', url: 'https://example.test/stream', status: 101,
+      responseHeaders: [{ name: 'Upgrade', value: 'websocket' }], _streamRevision: undefined,
+      _wsMessages: [message], _wsMessagesOmitted: 0 });
+    const empty = row({ id: 8, _streamRevision: undefined, _wsMessages: undefined, _wsMessagesOmitted: undefined });
+    const pair = connect([imported, empty]);
+    const importRequest = request(pair, 7, 0);
+    pair.viewer.handleMessage(reply(pair, importRequest.wire));
+    expect(importRequest.done).toHaveBeenCalledWith(null, { revision: 0, frames: [message], omitted: 0 });
+    const emptyRequest = request(pair, 8, 0);
+    pair.viewer.handleMessage(reply(pair, emptyRequest.wire));
+    expect(emptyRequest.done).toHaveBeenCalledWith(null, { revision: 0, frames: [], omitted: 0 });
+  });
+
+  test('rejects another viewer, row, session or request without settling the callback', () => {
+    const pair = connect();
+    const { done, wire } = request(pair);
+    const result = reply(pair, wire);
+    pair.viewer.handleMessage({ ...result, viewer: 'different-viewer' });
+    pair.viewer.handleMessage({ ...result, rowId: 8 });
+    pair.viewer.handleMessage({ ...result, session: 'different-session' });
+    pair.viewer.handleMessage({ ...result, requestId: wire.requestId + 1 });
+    expect(done).not.toHaveBeenCalled();
+    pair.viewer.handleMessage(result);
+    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).toHaveBeenCalledWith(null, { revision: 3, frames: [frame()], omitted: 2 });
+  });
+
+  test.each([
+    ['stale revision', { revision: 2 }],
+    ['too many messages', { frames: Array.from({ length: 101 }, (_unused, index) => frame(index + 1)) }],
+    ['duplicate IDs', { frames: [frame(), frame()] }],
+    ['invalid type', { frames: [frame(1, { type: 'unknown' })] }],
+    ['invalid time', { frames: [frame(1, { time: 9000000000000000 })] }],
+    ['invalid binary size', { frames: [frame(1, { binary: true, bytes: -1 })] }],
+    ['oversized preview', { frames: [frame(1, { data: 'y'.repeat(2049) })] }],
+    ['invalid omission count', { omitted: -1 }],
+  ])('fails closed for a %s reply', (_description, override) => {
+    const pair = connect();
+    const { done, wire } = request(pair);
+    pair.viewer.handleMessage({ ...reply(pair, wire), ...override });
+    expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  test('older hosts fail immediately and a replacement session clears an in-flight request', () => {
+    const legacy = connect([row()], false);
+    const unsupported = request(legacy);
+    expect(unsupported.done).toHaveBeenCalledWith(expect.any(Error), null);
+    expect(legacy.toHost).toEqual([]);
+
+    const pair = connect();
+    const { done, wire } = request(pair);
+    const oldReply = reply(pair, wire);
+    pair.viewer.handleMessage({ type: 'snapshot-start', generation: 2, session: 'next-host', webSocketMessages: true });
+    pair.viewer.handleMessage({ type: 'snapshot-end', generation: 2 });
+    expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+    pair.viewer.handleMessage(oldReply);
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  test('a timeout settles once and discards a late result', () => {
+    jest.useFakeTimers();
+    try {
+      const pair = connect();
+      const { done, wire } = request(pair);
+      jest.runOnlyPendingTimers();
+      expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+      pair.viewer.handleMessage(reply(pair, wire));
+      expect(done).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the host rejects an ordinary HTTP row and a requested revision it has not reached', () => {
+    const pair = connect([row(), row({ id: 8, method: 'GET', url: 'https://example.test/plain',
+      _wsMessages: undefined, _wsMessagesOmitted: undefined })]);
+    for (const { done, wire } of [request(pair, 8, 0), request(pair, 7, 4)]) {
+      const result = reply(pair, wire);
+      expect(result).toMatchObject({ requestId: wire.requestId, ok: false });
+      expect(result.frames).toBeUndefined();
+      pair.viewer.handleMessage(result);
+      expect(done).toHaveBeenCalledWith(expect.any(Error), null);
+    }
   });
 });
 

@@ -58,6 +58,7 @@ const RUNTIME_FILES = Object.freeze([
   'panel.css',
   'panel.html',
   'panel.js',
+  'payload-search.js',
   'vendor/fflate.js',
 ]);
 const TEXT_RUNTIME_EXTENSIONS = new Set(['.css', '.html', '.js', '.json']);
@@ -375,7 +376,11 @@ const validateExtension = (root, archiveFiles = RUNTIME_FILES) => {
 
   const panelHtml = inspectHtml('panel.html', runtimeText.get('panel.html') ?? '');
   errors.push(...panelHtml.errors);
-  validateExactReferences(errors, 'panel.html scripts', panelHtml.scripts, ['vendor/fflate.js', 'panel.js']);
+  validateExactReferences(errors, 'panel.html scripts', panelHtml.scripts, [
+    'vendor/fflate.js',
+    'payload-search.js',
+    'panel.js',
+  ]);
   validateExactReferences(errors, 'panel.html stylesheets', panelHtml.stylesheets, ['panel.css']);
 
   const launcherHtml = inspectHtml('launcher.html', runtimeText.get('launcher.html') ?? '');

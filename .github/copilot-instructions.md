@@ -18,7 +18,7 @@
 | **目的** | Microsoft Edge DevTools に強化版の Network パネルを追加する拡張機能 |
 | **技術スタック** | Vanilla JS (ES2020), CSS Custom Properties, Edge Extension (Manifest V3) |
 | **ビルドツール** | なし (ビルドレス) |
-| **テスト** | Jest (Node.js 環境 + ブラウザ API モック) |
+| **テスト** | Node.js 標準テストランナー + ブラウザ API モック |
 | **Lint / Format** | ESLint (flat config) + Prettier |
 | **対象ブラウザ** | Microsoft Edge (最新安定版, Chromium ベース) |
 
@@ -211,7 +211,7 @@ Microsoft Edge DevTools
 
 | 対象 | 手法 | 場所 |
 |------|------|------|
-| **純粋関数** | Jest ユニットテスト | `tests/panel.test.js` |
+| **純粋関数** | Node.js ユニットテスト | `tests/panel.test.js` |
 | **DOM 操作** | 手動テスト (Edge DevTools で拡張機能をロードして確認) | - |
 | **テーマ** | 手動テスト (System/Dark/Light 切替確認) | - |
 | **エクスポート** | 手動テスト (HAR ファイルの内容検証) | - |
@@ -222,7 +222,7 @@ Microsoft Edge DevTools
 `node -e "console.log(Object.keys(require('./package.json').scripts).join('\\n'))"` で確認すること。
 
 ```bash
-npm test                   # Jest (カバレッジ付き)
+npm test                   # Node.js テスト (カバレッジ付き)
 npm run lint               # ESLint
 npm run changelog:check -- --base <base-sha> --head <head-sha>
 ```
@@ -237,7 +237,7 @@ npm run changelog:check -- --base <base-sha> --head <head-sha>
   管理外のファイル（`panel.js` 等）を整形すると契約テストが大量に壊れる。詳細は `CLAUDE.md`
 - user-facing な runtime / UI / icon / funding / privacy / store asset / README の変更では、同じ PR で `docs/CHANGELOG.md` の `Unreleased` に bullet を追加すること。CI の `npm run changelog:check` が PR 全体の差分で強制する
 - ESLint: **0 errors, 0 warnings** を維持 (未使用の catch 変数は `_` プレフィックスでマーク)
-- Jest: **全テスト PASS** を維持
+- Node.js テスト: **全テスト PASS** を維持
 - 新しい純粋関数を追加した場合は、対応するテストも同一コミットで追加すること
 
 ### 6.4 バージョン管理 (SemVer)

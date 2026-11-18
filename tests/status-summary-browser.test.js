@@ -18,7 +18,7 @@ const BROWSER_REQUIRED_IN_CI_MESSAGE =
 const TRANSIENT_PROFILE_CLEANUP_ERRORS = new Set(['ENOTEMPTY', 'EBUSY']);
 const TOOLBAR_VIEWPORT_WIDTHS = [375, 500, 800, 1254, 1255, 1280, 1500];
 const TOOLBAR_FOCUS_VIEWPORT_WIDTHS = [375, 500, 800, 1280];
-const GRID_FOCUS_VIEWPORT_WIDTHS = [375, 500, 800, 1280];
+const GRID_FOCUS_VIEWPORT_WIDTHS = [300, 375, 500, 800, 1280];
 const STATUS_WORKSPACE_VIEWPORT_WIDTHS = [320, 375, 414, 768, 1280];
 const SEPARATOR_FOCUS_VIEWPORT_WIDTHS = [320, 375, 414, 768, 800, 801, 1280];
 const SEPARATOR_FOCUS_THEMES = [
@@ -564,6 +564,7 @@ function createInstrumentedPanelFixture() {
   fs.mkdirSync(vendorDirectory);
   fs.copyFileSync(path.join(repositoryRoot, 'panel.html'), path.join(fixtureDirectory, 'panel.html'));
   fs.copyFileSync(path.join(repositoryRoot, 'panel.css'), path.join(fixtureDirectory, 'panel.css'));
+  fs.copyFileSync(path.join(repositoryRoot, 'payload-search.js'), path.join(fixtureDirectory, 'payload-search.js'));
   fs.copyFileSync(path.join(repositoryRoot, 'vendor', 'fflate.js'), path.join(vendorDirectory, 'fflate.js'));
 
   const panelSource = fs.readFileSync(path.join(repositoryRoot, 'panel.js'), 'utf8');
@@ -824,6 +825,7 @@ browserTest(
           const section = Array.from(document.querySelectorAll('#columnFilterPopup .filter-section'))
             .find((item) => item.querySelector('.filter-section-name')?.textContent === 'Server done');
           if (!section) throw new Error('Server done filter control is missing.');
+          section.querySelector('.filter-section-toggle').click();
           const [start, end] = section.querySelectorAll('input[type="time"]');
           if (!start || !end) throw new Error('Server done time inputs are missing.');
           start.value = '22:00';
@@ -894,6 +896,8 @@ browserTest(
           };
           const controls = (label, conditionIndex = 0) => {
             const root = section(label);
+            const toggle = root.querySelector('.filter-section-toggle');
+            if (toggle.getAttribute('aria-expanded') === 'false') toggle.click();
             const row = root.querySelectorAll('.filter-condition-row')[conditionIndex] || root;
             const operator = row.querySelector('.filter-op');
             const input = row.querySelector('.filter-value');
@@ -921,7 +925,7 @@ browserTest(
             const error = descriptionId ? document.getElementById(descriptionId) : null;
             return {
               rows: rows(),
-              header: document.querySelector('#columnFilterPopup .filter-popup-header').textContent,
+              activeCount: document.querySelector('#columnFilterPopup .filter-popup-count').textContent,
               active: fields.root.querySelector('.filter-section-state').textContent,
               invalid: fields.input.getAttribute('aria-invalid'),
               description: error?.textContent || '',
@@ -944,7 +948,7 @@ browserTest(
       expect(initial.before).toEqual(['1', '2', '3']);
       expect(initial.malformed).toMatchObject({
         rows: ['1', '2', '3'],
-        header: 'Column Filters (0 active)',
+        activeCount: '0 active',
         active: '',
         invalid: 'true',
         role: 'status',
@@ -989,7 +993,7 @@ browserTest(
         })()`,
       );
       expect(reopened).toMatchObject({
-        rows: ['1', '2', '3'], header: 'Column Filters (0 active)',
+        rows: ['1', '2', '3'], activeCount: '0 active',
         invalid: 'true', role: 'status', errorVisible: true,
       });
 
@@ -1045,33 +1049,33 @@ browserTest(
       );
 
       expect(corrected.genericValid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (1 active)',
+        rows: ['1', '3'], activeCount: '1 active',
         active: 'Active', invalid: null, description: '', focus: 'input',
       });
       expect(corrected.genericPlain).toMatchObject({
-        rows: ['2'], header: 'Column Filters (1 active)', invalid: null, description: '',
+        rows: ['2'], activeCount: '1 active', invalid: null, description: '',
       });
       expect(corrected.domainInvalid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (1 active)',
+        rows: ['1', '3'], activeCount: '1 active',
         active: '', invalid: 'true', role: 'status', errorVisible: true, focus: 'input',
       });
       expect(corrected.domainInvalid.description).toMatch(/^Invalid regular expression:/);
       expect(corrected.domainOperatorChanged).toMatchObject({
-        rows: [], header: 'Column Filters (2 active)', invalid: null, description: '', focus: 'operator',
+        rows: [], activeCount: '2 active', invalid: null, description: '', focus: 'operator',
       });
       expect(corrected.domainValid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (2 active)', invalid: null, description: '',
+        rows: ['1', '3'], activeCount: '2 active', invalid: null, description: '',
       });
       expect(corrected.pathInvalid).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (3 active)',
+        rows: ['1', '3'], activeCount: '3 active',
         invalid: 'true', role: 'status', errorVisible: true, focus: 'input',
       });
       expect(corrected.pathInvalid.description).toMatch(/^Invalid regular expression:/);
       expect(corrected.pathValid).toMatchObject({
-        rows: ['1'], header: 'Column Filters (3 active)', invalid: null, description: '',
+        rows: ['1'], activeCount: '3 active', invalid: null, description: '',
       });
       expect(corrected.pathRemoved).toMatchObject({
-        rows: ['1', '3'], header: 'Column Filters (3 active)',
+        rows: ['1', '3'], activeCount: '3 active',
         invalid: null, description: '', focus: 'input',
       });
       expect(corrected.lingeringErrors).toBe(0);
@@ -1572,7 +1576,7 @@ browserTest(
               rowIds: renderedRows.map((row) => Number(row.dataset.rowId)),
               counter: document.querySelector('#counter').textContent,
               totalSize: document.querySelector('#totalSize').textContent,
-              statsText: document.querySelector('#statsSummary').textContent.replace(/\\s+/g, ' ').trim(),
+              successCount: document.querySelector('[data-status-facet="2xx"] .analysis-count').textContent,
               tabStopIds: Array.from(tbody.querySelectorAll('tr[tabindex="0"]')).map(
                 (row) => row.dataset.rowId,
               ),
@@ -2134,8 +2138,7 @@ browserTest(
           tabStopIds: ['1'],
         }),
       );
-      expect(boundaryResult.exportBoundary.statsText).toContain('2xx');
-      expect(boundaryResult.exportBoundary.statsText).toContain('1');
+      expect(boundaryResult.exportBoundary.successCount).toBe('1');
       expect(boundaryResult.invalidRetentionBoundary).toEqual(
         expect.objectContaining({
           rowCount: 2,
@@ -2145,8 +2148,7 @@ browserTest(
           tabStopIds: ['1'],
         }),
       );
-      expect(boundaryResult.invalidRetentionBoundary.statsText).toContain('2xx');
-      expect(boundaryResult.invalidRetentionBoundary.statsText).toContain('2');
+      expect(boundaryResult.invalidRetentionBoundary.successCount).toBe('2');
       expect(boundaryResult.undoBoundary).toEqual(
         expect.objectContaining({
           rowCount: 100,
@@ -2156,8 +2158,7 @@ browserTest(
           undoWasAvailable: true,
         }),
       );
-      expect(boundaryResult.undoBoundary.statsText).toContain('2xx');
-      expect(boundaryResult.undoBoundary.statsText).toContain('100');
+      expect(boundaryResult.undoBoundary.successCount).toBe('100');
       expect(result.firstBurst).toEqual(
         expect.objectContaining({
           cleanupQueries: 1,
@@ -2734,112 +2735,53 @@ browserTest(
 browserTest(
   'live summary update preserves focused status chip identity and the pending click gesture',
   async () => {
-    const { browserProcess, profileDirectory, browserWebSocketUrl } = await startPanelBrowser(
-      'network-plus-status-dom-',
-    );
-
-    let cdp;
+    const page = await launchPanelPage({ executable: browserExecutable, width: 500, height: 800, initScript: LIVE_CAPTURE_INIT_SCRIPT });
+    const { cdp } = page;
+    const read = () => evaluate(cdp, `(() => {
+      const button = document.querySelector('[data-status-facet="5xx"]');
+      const rect = button.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+        sameButton: window.__focusedStatusFacet === button,
+        focused: document.activeElement === button,
+        pressed: button.getAttribute('aria-pressed') === 'true',
+        counts: Object.fromEntries([...document.querySelectorAll('[data-status-facet]')].map(button =>
+          [button.dataset.statusFacet, Number(button.querySelector('.analysis-count').textContent)])),
+        visible: [...document.querySelectorAll('#tbody tr[data-row-id]')].map(row => row.querySelector('[data-col-id="status"]').textContent),
+        footerHasActions: !!document.querySelector('#statsSummary button'),
+      };
+    })()`);
     try {
-      const panelTarget = await findPanelTarget(browserWebSocketUrl);
-      cdp = await connectCdp(panelTarget.webSocketDebuggerUrl);
-      await cdp.send('Runtime.enable');
-      await cdp.send('Page.bringToFront');
-      await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: 500,
-        height: 800,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
-      await waitForSampleCaptureAction(cdp);
-
-      const before = await evaluate(
-        cdp,
-        `(async () => {
-          if (document.readyState === 'loading') {
-            await new Promise((resolve) => window.addEventListener('DOMContentLoaded', resolve, { once: true }));
-          }
-          const sampleButton = Array.from(document.querySelectorAll('button')).find(
-            (button) => button.textContent.trim() === 'Explore sample capture',
-          );
-          if (!sampleButton) throw new Error('Sample capture action was not found.');
-          sampleButton.click();
-          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const statusDetailsToggle = document.querySelector('#statusDetailsToggle');
-          if (!statusDetailsToggle || statusDetailsToggle.hidden) {
-            throw new Error('Narrow status details disclosure was not available.');
-          }
-          statusDetailsToggle.click();
-          await new Promise((resolve) => requestAnimationFrame(resolve));
-          const chip = document.querySelector('.status-summary-chip--5xx');
-          if (!chip) throw new Error('5xx status triage chip was not rendered.');
-          chip.focus();
-          window.__statusSummaryFocusedChip = chip;
-          const rect = chip.getBoundingClientRect();
-          return {
-            selectedRowId: document.querySelector('#tbody tr.selected')?.dataset.rowId || null,
-            first5xxRowId: document.querySelector('#tbody tr.status-5xx')?.dataset.rowId || null,
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-          };
-        })()`,
-        true,
-      );
-
-      expect(before.selectedRowId).not.toBe(before.first5xxRowId);
-      await cdp.send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x: before.x,
-        y: before.y,
-        button: 'left',
-        clickCount: 1,
-      });
-
-      const duringFlush = await evaluate(
-        cdp,
-        `(() => {
-          const chip = window.__statusSummaryFocusedChip;
-          _NetworkPlus.updateTableSummary();
-          return {
-            sameNode: document.querySelector('.status-summary-chip--5xx') === chip,
-            focusHeld: document.activeElement === chip,
-            connected: chip.isConnected,
-          };
-        })()`,
-      );
-      expect(duringFlush).toEqual({
-        sameNode: true,
-        focusHeld: true,
-        connected: true,
-      });
-
-      await cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x: before.x,
-        y: before.y,
-        button: 'left',
-        clickCount: 1,
-      });
-      await evaluate(
-        cdp,
-        'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
-        true,
-      );
-
-      const after = await evaluate(
-        cdp,
-        `(() => ({
-          selectedRowId: document.querySelector('#tbody tr.selected')?.dataset.rowId || null,
-          focusedRowId: document.activeElement?.closest?.('tr[data-row-id]')?.dataset.rowId || null,
-          detailsTitle: document.querySelector('#detailsTitle')?.textContent || '',
-        }))()`,
-      );
-      expect(after.selectedRowId).toBe(before.first5xxRowId);
-      expect(after.focusedRowId).toBe(before.first5xxRowId);
-      expect(after.detailsTitle).toBe('POST checkout.network-plus.test/v1/orders/preview');
+      await waitForLiveNetworkListener(cdp);
+      await evaluate(cdp, `(() => {
+        window.__emitStatusFixture = (status) => window.__networkPlusLiveListener({
+          startedDateTime: new Date().toISOString(), time: 25,
+          request: { method: 'GET', url: 'https://example.test/status/' + status, headers: [] },
+          response: { status, headers: [], content: { size: 0 } },
+          getContent(callback) { callback('', ''); },
+        });
+        [200, 302, 404, 503, 101].forEach(window.__emitStatusFixture);
+      })()`);
+      await settleLayout(cdp);
+      await evaluate(cdp, `(() => {
+        window.__focusedStatusFacet = document.querySelector('[data-status-facet="5xx"]');
+        window.__focusedStatusFacet.focus();
+      })()`);
+      const before = await read();
+      expect(before.counts).toEqual({ all: 5, '2xx': 1, '3xx': 1, '4xx': 1, '5xx': 1, other: 1, pending: 0 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: before.x, y: before.y, button: 'left', clickCount: 1 });
+      await evaluate(cdp, 'window.__emitStatusFixture(500)');
+      await settleLayout(cdp);
+      expect(await read()).toMatchObject({ sameButton: true, focused: true, pressed: false, counts: { '5xx': 2 } });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: before.x, y: before.y, button: 'left', clickCount: 1 });
+      await settleLayout(cdp);
+      expect(await read()).toMatchObject({ sameButton: true, focused: true, pressed: true, visible: ['503', '500'], footerHasActions: false });
+      await evaluate(cdp, "document.querySelector('[data-status-facet=other]').click()");
+      expect(await read()).toMatchObject({ visible: ['101'], counts: { all: 6, '5xx': 2, other: 1 } });
+      await evaluate(cdp, "document.querySelector('[data-status-facet=other]').click()");
+      expect((await read()).visible).toHaveLength(6);
     } finally {
-      if (cdp) await cdp.close();
-      await stopBrowser(browserProcess);
-      removeProfileDirectory(profileDirectory);
+      await page.close();
     }
   },
   TEST_TIMEOUT_MS,
@@ -3211,6 +3153,7 @@ browserTest(
           if (document.readyState === 'loading') {
             await new Promise((resolve) => window.addEventListener('DOMContentLoaded', resolve, { once: true }));
           }
+          document.querySelector('#webSocketOnlyBtn').click();
           const sampleButton = Array.from(document.querySelectorAll('button')).find(
             (button) => button.textContent.trim() === 'Explore sample capture',
           );
@@ -3228,6 +3171,8 @@ browserTest(
           return {
             activeResponseTabId: document.querySelector('#res-tab-bar [aria-selected="true"]')?.id || null,
             pauseDisabled: document.querySelector('#pauseBtn').disabled,
+            webSocketFilterSuspended: document.querySelector('#webSocketOnlyBtn').disabled &&
+              document.querySelector('#webSocketOnlyBtn').getAttribute('aria-pressed') === 'false',
             pauseLabel: document.querySelector('#pauseBtn').getAttribute('aria-label'),
             requestCount: document.querySelector('#counter').textContent,
             requestCountAnnouncement: document.querySelector('#requestCountStatus').textContent,
@@ -3242,6 +3187,7 @@ browserTest(
       expect(initialState).toMatchObject({
         activeResponseTabId: 'res-tab-timing',
         pauseDisabled: true,
+        webSocketFilterSuspended: true,
         requestCount: '3 requests · 1 matching',
         requestCountAnnouncement: '3 requests, 1 matching the search',
         searchPanelDisplay: 'block',
@@ -3424,10 +3370,6 @@ browserTest(
         deviceScaleFactor: 1,
         mobile: false,
       });
-      // The media-query change is asynchronous. Focusing the chip before the
-      // wide sync ran only ever worked because [hidden] used to be defeated by
-      // display:contents at wide widths — focusing a display:none element is a
-      // no-op, so wait for the details to actually be visible first.
       await waitForStatusDetailsState(
         cdp,
         { detailsHidden: false, toggleHidden: true },
@@ -3437,9 +3379,7 @@ browserTest(
       const reverseBreakpointBaseline = await evaluate(
         cdp,
         `(() => {
-          const chip = document.querySelector('.status-summary-chip--5xx');
-          if (!chip) throw new Error('Wide status action was not available.');
-          chip.focus({ preventScroll: true });
+          document.querySelector('#filterBtn').focus({ preventScroll: true });
           return {
             activeResponseTabId:
               document.querySelector('#res-tab-bar [aria-selected="true"]')?.id || null,
@@ -3464,12 +3404,12 @@ browserTest(
       await waitForStatusDetailsState(
         cdp,
         {
-          activeElementId: 'statusDetailsToggle',
+          activeElementId: 'filterBtn',
           detailsHidden: true,
           expanded: 'false',
           toggleHidden: false,
         },
-        'Narrow breakpoint status-action focus transfer',
+        'Narrow breakpoint does not steal toolbar focus',
       );
       const reverseNarrowState = await evaluate(
         cdp,
@@ -3493,6 +3433,7 @@ browserTest(
         ...reverseBreakpointBaseline,
         documentOverflow: 0,
       });
+      await evaluate(cdp, "document.querySelector('#statusDetailsToggle').focus({ preventScroll: true })");
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1280,
         height: 800,
@@ -3630,8 +3571,8 @@ browserTest(
       ]) {
         expect(expandedAccessibleNames.some((name) => name.includes(disclosedFact))).toBe(true);
       }
-      expect(expandedAccessibleNames.some((name) => name.includes('Inspect first visible 2xx request'))).toBe(true);
-      expect(expandedAccessibleNames.some((name) => name.includes('Inspect first visible 5xx request'))).toBe(true);
+      expect(expandedAccessibleNames).toEqual(expect.arrayContaining(['2xx: 1', '5xx: 1']));
+      expect(expandedAccessibleNames.some((name) => name.includes('Inspect first visible'))).toBe(false);
 
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1280,
@@ -3857,6 +3798,7 @@ browserTest(
                 return {
                   id: button.id,
                   hidden: button.hidden === true,
+                  disabled: button.disabled === true,
                   width: rect.width,
                   fullyVisible: rect.left >= toolbarRect.left && rect.right <= toolbarRect.right,
                 };
@@ -3887,11 +3829,12 @@ browserTest(
         'pauseBtn',
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
+        'webSocketOnlyBtn',
         'columnsBtn',
         'settingsBtn',
         'popoutBtn',
@@ -3900,8 +3843,9 @@ browserTest(
       for (const measurement of viewportMeasurements) {
         expect(measurement.documentOverflow).toBe(0);
         expect(measurement.toolbarOverflowX).toBe('auto');
-        expect(measurement.actions).toHaveLength(12);
         expect(measurement.actions.map((action) => action.id)).toEqual(expectedActionOrder);
+        const webSocketFilter = measurement.actions.find((action) => action.id === 'webSocketOnlyBtn');
+        expect(webSocketFilter.disabled).toBe(true);
         // The pop-out button exists only for a DevTools session; outside one
         // it must not just carry the hidden attribute but actually render at
         // zero width (the .topbar button[hidden] guard).
@@ -3938,11 +3882,11 @@ browserTest(
       const expectedTabOrder = [
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'shortcutBtn',
@@ -4252,7 +4196,7 @@ browserTest(
         // button's own measured midpoint, so brand or font metric changes can
         // never silently push the cut line off the button.
         { caseId: 'exportHarBtn@mid', actionId: 'exportHarBtn' },
-        { caseId: 'columnsBtn@mid', actionId: 'columnsBtn' },
+        { caseId: 'columnsBtn@mid', actionId: 'columnsBtn', referenceWidth: 600 },
         {
           caseId: 'exportHarBtn@500-sub-4px',
           width: 500,
@@ -4267,7 +4211,7 @@ browserTest(
           // Measure at a width where the toolbar overflows: packed positions
           // are width-independent, unlike the space-between spread layout.
           await cdp.send('Emulation.setDeviceMetricsOverride', {
-            width: 375,
+            width: pointerCase.referenceWidth || 375,
             height: 800,
             deviceScaleFactor: 1,
             mobile: false,
@@ -4487,11 +4431,11 @@ browserTest(
       const toolbarTabOrder = [
         'supportBtn',
         'searchToggleBtn',
+        'filterBtn',
         'clearBtn',
         'importBtn',
         'exportHarBtn',
         'autoScrollBtn',
-        'filterBtn',
         'columnsBtn',
         'settingsBtn',
         'shortcutBtn',
@@ -4509,13 +4453,18 @@ browserTest(
       // never a font measurement — the nearest boundary is 26px away, well
       // outside any scrollbar-width difference between platforms.
       const EXPECTED_PAINTED_COLUMNS = {
-        // Below the undroppable set's own width: only the row's sentence and
-        // the sort key the order needs are left, and the grid scrolls.
+        // A compact row keeps its host below Path. At 300px even the
+        // compact columns can need a small amount of horizontal scroll.
+        300: [
+          ['id', 'ID'],
+          ['method', 'Method'],
+          ['status', 'Status'],
+          ['path', 'Path'],
+        ],
         375: [
           ['id', 'ID'],
           ['method', 'Method'],
           ['status', 'Status'],
-          ['domain', 'Domain'],
           ['path', 'Path'],
         ],
         500: [
@@ -4713,8 +4662,13 @@ browserTest(
         expect([width, paintedColumns]).toEqual([width, EXPECTED_PAINTED_COLUMNS[width]]);
         const expectedGridTargets = buildGridTargets(paintedColumns);
         const reverseGridTargets = expectedGridTargets.slice().reverse();
-        // The wrap may drop columns, never the four the row's sentence needs.
-        for (const requiredId of GRID_PRIORITY_1_COLUMN_IDS) {
+        // The compact row still carries its host if the Domain column yields.
+        const compact = width <= 440;
+        const required = compact ? GRID_PRIORITY_1_COLUMN_IDS.filter((id) => id !== 'domain') : GRID_PRIORITY_1_COLUMN_IDS;
+        if (compact) {
+          expect(await evaluate(cdp, "document.querySelector('.compact-request-host')?.textContent")).toBeTruthy();
+        }
+        for (const requiredId of required) {
           expect([width, requiredId, paintedColumns.map(([id]) => id).includes(requiredId)]).toEqual([
             width,
             requiredId,
@@ -4846,7 +4800,7 @@ browserTest(
       );
 
       await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: 375,
+        width: 500,
         height: 800,
         deviceScaleFactor: 1,
         mobile: false,
@@ -4973,7 +4927,7 @@ browserTest(
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           tableWrap.style.transform = 'translateX(2px)';
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          // Domain, not Size: Size is dropped to fit a 375px wrap, and a
+          // Domain is painted as a column at 500px. Size is dropped, and a
           // separator that is not painted cannot be probed for pointer hits.
           const separator = document.querySelector('th[data-col-id="domain"] .col-resizer');
           separator.style.transform = '';
@@ -5807,6 +5761,7 @@ const ELASTIC_GRID_MEASURE = `(() => {
     firstRowCellIds: Array.from(
       document.querySelectorAll('#tbody tr[data-row-id]')[0]?.querySelectorAll('td[data-col-id]') || [],
     ).map((td) => td.dataset.colId),
+    compactHost: document.querySelector('#tbody .compact-request-host')?.textContent ?? null,
     // Auto-hide is not a preference: this is the raw preference blob, and it
     // has to stay exactly what the reader's own actions put there.
     storedRaw: localStorage.getItem('networkPlus.cols'),
@@ -5823,12 +5778,13 @@ function expectedElasticWidths(measure) {
   const ids = measure.headerIds;
   const storedSum = ids.reduce((sum, id) => sum + measure.storedByAria[id], 0);
   const slack = measure.wrapClientWidth - storedSum;
+  const pathFloor = measure.wrapClientWidth <= 440 ? 100 : ELASTIC_PATH_MIN_WIDTH;
   const elasticId = ids.includes('path') ? 'path' : ids[ids.length - 1];
   const delta =
     slack >= 0
       ? slack
       : elasticId === 'path'
-        ? Math.max(slack, ELASTIC_PATH_MIN_WIDTH - measure.storedByAria.path)
+        ? Math.max(slack, pathFloor - measure.storedByAria.path)
         : 0;
   const expected = {};
   for (const id of ids) expected[id] = measure.storedByAria[id] + (id === elasticId ? delta : 0);
@@ -5841,12 +5797,12 @@ function expectElasticGridInvariants(measure, at) {
   expect([at, measure.headerWidths]).toEqual([at, expected]);
   // Header and cells name the same columns in the same order, or the grid skews.
   expect([at, measure.firstRowCellIds]).toEqual([at, measure.headerIds]);
-  // No column the row's sentence needs is ever dropped.
+  // The compact row keeps its host under the path when Domain is hidden.
   for (const id of GRID_PRIORITY_1_COLUMN_IDS) {
-    expect([at, id, measure.headerIds.includes(id)]).toEqual([at, id, true]);
+    expect([at, id, measure.headerIds.includes(id) || (id === 'domain' && !!measure.compactHost)]).toEqual([at, id, true]);
   }
-  // Path never paints narrower than its floor.
-  expect([at, measure.headerWidths.path >= ELASTIC_PATH_MIN_WIDTH]).toEqual([at, true]);
+  const pathFloor = measure.wrapClientWidth <= 440 ? 100 : ELASTIC_PATH_MIN_WIDTH;
+  expect([at, measure.headerWidths.path >= pathFloor]).toEqual([at, true]);
   const painted = Object.values(expected).reduce((sum, width) => sum + width, 0);
   expect([at, measure.gridStyleWidth]).toEqual([at, painted + 'px']);
   // Horizontal scroll exists exactly when the columns that may not be dropped
@@ -5904,6 +5860,17 @@ browserTest(
         mobile: false,
       });
       await settleLayout(cdp);
+      const compact = await evaluate(cdp, ELASTIC_GRID_MEASURE);
+      expectElasticGridInvariants(compact, 'compact row fits 320px');
+      expect(compact.horizontalScroll).toBe(false);
+      expect(compact.compactHost).toBeTruthy();
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: 280,
+        height: 800,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await settleLayout(cdp);
       const overflowing = await evaluate(cdp, ELASTIC_GRID_MEASURE);
       expectElasticGridInvariants(overflowing, 'undroppable set wider than the wrap');
       expect(overflowing.horizontalScroll).toBe(true);
@@ -5914,7 +5881,7 @@ browserTest(
           (id) => !GRID_PRIORITY_1_COLUMN_IDS.includes(id) && id !== 'id',
         ),
       ).toEqual([]);
-      expect(overflowing.headerWidths.path).toBe(ELASTIC_PATH_MIN_WIDTH);
+      expect(overflowing.headerWidths.path).toBe(100);
       expect(overflowing.gridWidth).toBeGreaterThan(overflowing.wrapClientWidth);
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1280,
@@ -7373,14 +7340,25 @@ browserTest(
           response: { status: 200, headers: [], content: { size: 12, mimeType: 'text/plain', text: 'offline body' } },
           timings: { send: 0, wait: 1, receive: 0 },
         };
+        const handshake = {
+          ...entry,
+          request: { method: 'GET', url: 'https://offline.example.test/socket', headers: [] },
+          response: { status: 101, headers: [{ name: 'Upgrade', value: 'websocket' }], content: { size: 0 } },
+        };
+        const sanitized = {
+          ...entry,
+          request: { ...entry.request, url: 'https://offline.example.test/sanitized' },
+          _networkPlus: { webSocketFramesOmitted: 12 },
+        };
         const transfer = new DataTransfer();
-        transfer.items.add(new File([JSON.stringify({ log: { version: '1.2', entries: [entry] } })], 'offline.har'));
+        transfer.items.add(new File([JSON.stringify({ log: { version: '1.2', entries: [entry, handshake, sanitized] } })], 'offline.har'));
         fileInput.files = transfer.files;
         fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-        if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 1, 2000)) {
+        if (!await waitFor(() => document.querySelectorAll('#tbody tr[data-row-id]').length === 3, 2000)) {
           throw new Error('Offline HAR import did not complete: ' + document.querySelector('#statusText').textContent);
         }
-        document.querySelector('#tbody tr[data-row-id]').click();
+        const [http, socket, redacted] = document.querySelectorAll('#tbody tr[data-row-id]');
+        http.click();
         document.querySelector('#res-tab-body').click();
         if (!await waitFor(() => document.querySelector('#res-body').textContent.includes('offline body'), 2000)) {
           throw new Error('The imported response body did not render offline.');
@@ -7392,8 +7370,20 @@ browserTest(
           scope: document.querySelector('#offlineViewStatus').textContent,
           pauseHidden: document.querySelector('#pauseBtn').hidden,
           recording: document.querySelector('.topbar').classList.contains('recording'),
+          httpTabsHidden: document.querySelector('#ws-detail-tabs').hidden,
         };
-        return { english, japanese, pickerOpened, imported };
+        document.querySelector('#dataSafetyDialog').close();
+        document.querySelector('#webSocketOnlyBtn').click();
+        const snapshotMessages = () => ({
+          tab: document.querySelector('#ws-tab-messages').textContent,
+          panelVisible: !document.querySelector('#ws-messages-panel').hidden,
+          status: document.querySelector('#ws-messages-status').textContent,
+        });
+        document.querySelector('#tbody tr[data-row-id="' + socket.dataset.rowId + '"]').click();
+        const absent = snapshotMessages();
+        document.querySelector('#tbody tr[data-row-id="' + redacted.dataset.rowId + '"]').click();
+        return { english, japanese, pickerOpened, imported, absent, sanitized: snapshotMessages(),
+          promptHidden: document.querySelector('#wsCapturePrompt').hidden };
       })()`, true);
       expect(observed.english).toMatchObject({
         view: 'offline', scope: 'Offline · no live capture', scopeVisible: true,
@@ -7409,8 +7399,13 @@ browserTest(
       });
       expect(observed.pickerOpened).toBe(1);
       expect(observed.imported).toMatchObject({
-        body: expect.stringContaining('offline body'), exportCount: '1',
-        scope: 'オフライン · ライブキャプチャなし', pauseHidden: true, recording: false,
+        body: expect.stringContaining('offline body'), exportCount: '3',
+        scope: 'オフライン · ライブキャプチャなし', pauseHidden: true, recording: false, httpTabsHidden: true,
+      });
+      expect(observed).toMatchObject({
+        absent: { tab: 'メッセージ', panelVisible: true, status: expect.stringContaining('含まれていません') },
+        sanitized: { tab: 'メッセージ', panelVisible: true, status: expect.stringContaining('12 件が省略') },
+        promptHidden: true,
       });
       await page.navigate('');
       await waitForLiveNetworkListener(page.cdp);
@@ -7419,6 +7414,88 @@ browserTest(
         pauseHidden: document.querySelector('#pauseBtn').hidden,
         recording: document.querySelector('.topbar').classList.contains('recording'),
       })`)).toEqual({ offlineScopeHidden: true, pauseHidden: false, recording: true });
+    } finally {
+      await page.close();
+    }
+  },
+  TEST_TIMEOUT_MS,
+);
+
+browserTest(
+  'native WebSocket snapshots capture the first exchange and refresh the selected row across recording boundaries',
+  async () => {
+    const page = await launchPanelPage({
+      executable: browserExecutable,
+      initScript: LIVE_CAPTURE_INIT_SCRIPT + `
+        window.__harEntries = [];
+        window.__captureWrites = [];
+        window.__sseWrapperRequested = false;
+        const storageSet = chrome.storage.local.set;
+        chrome.storage.local.set = (value, callback) => {
+          if (value['networkPlus.webSocketCapture']) window.__captureWrites.push(value['networkPlus.webSocketCapture']);
+          storageSet(value, callback);
+        };
+        chrome.devtools.network.getHAR = (callback) => callback({ entries: window.__harEntries });
+        window.__wsNavigated = [];
+        chrome.devtools.network.onNavigated = { addListener: (listener) => window.__wsNavigated.push(listener) };
+        chrome.devtools.inspectedWindow = { eval(expression, callback) {
+          if (expression.includes('function pageSseWrapper')) window.__sseWrapperRequested = true;
+          callback('[]');
+        } };
+      `,
+    });
+    try {
+      const result = await evaluate(page.cdp, `(async () => {${WAIT_FOR_IN_PAGE}
+        const nextStamp = async () => {
+          const mark = Date.now();
+          if (!await waitFor(() => Date.now() > mark, 1000)) throw new Error('The clock did not advance');
+          return Date.now();
+        };
+        const frame = (type, data, stamp) => ({ type, opcode: 1, time: stamp / 1000, data });
+        const connection = (key, start, frames) => ({
+          startedDateTime: new Date(start).toISOString(), time: 0,
+          request: { method: 'GET', url: 'wss://example.test/messages/' + key,
+            headers: [{ name: 'Sec-WebSocket-Key', value: key.repeat(22) + '==' }] },
+          response: { status: 101, headers: [], content: {} },
+          _webSocketMessages: frames,
+        });
+        const capture = document.querySelector('#wsCaptureBtn');
+        if (!await waitFor(() => capture.getAttribute('aria-pressed') === 'true', 2000)) throw new Error('Capture was not on by default');
+        await nextStamp();
+        window.__wsNavigated.forEach((listener) => listener('https://example.test'));
+        const startup = await nextStamp();
+        const first = [frame('send', 'first message', startup), frame('receive', 'first reply', startup)];
+        const entry = connection('A', startup, first);
+        window.__harEntries = [entry];
+        const rows = () => Array.from(document.querySelectorAll('#tbody tr[data-row-id]'));
+        if (!await waitFor(() => rows().length === 1, 3000)) throw new Error('No native WebSocket connection');
+        const id = rows()[0].dataset.rowId;
+        rows()[0].click();
+        const messages = () => Array.from(document.querySelectorAll('.ws-message-list .ws-message-snippet'),
+          (element) => element.textContent);
+        const initial = messages();
+        capture.click();
+        first.push(frame('send', 'while off', await nextStamp()));
+        await nextStamp();
+        capture.click();
+        const pause = document.querySelector('#pauseBtn');
+        pause.click();
+        first.push(frame('receive', 'while paused', await nextStamp()));
+        await nextStamp();
+        pause.click();
+        first.push(frame('receive', 'later reply', await nextStamp()));
+        if (!await waitFor(() => messages().includes('later reply'), 3000)) throw new Error('Selected timeline did not refresh');
+        window.__networkPlusLiveListener({ ...entry, time: 50 });
+        await waitFor(() => rows()[0].querySelector('[data-col-id="status"]').textContent === 'Closed', 2000);
+        return { id, initial, messages: messages(), stored: window.__captureWrites, sse: window.__sseWrapperRequested, rows: rows().map((row) => ({
+          id: row.dataset.rowId, status: row.querySelector('[data-col-id="status"]').textContent,
+        })) };
+      })()`, true);
+      expect(result.initial).toEqual(['first message', 'first reply']);
+      expect(result.messages).toEqual(['first message', 'first reply', 'later reply']);
+      expect(result.stored).toEqual(['off', 'on']);
+      expect(result.sse).toBe(false);
+      expect(result.rows).toEqual([{ id: result.id, status: 'Closed' }]);
     } finally {
       await page.close();
     }
@@ -13175,9 +13252,12 @@ browserTest(
 const HTML_FRAME_GROUND_MEASURE = `(() => {
   const frame = document.querySelector('#res-body iframe');
   const style = getComputedStyle(frame);
+  const themeStyle = getComputedStyle(document.documentElement);
   const rect = frame.getBoundingClientRect();
   return {
     theme: document.documentElement.getAttribute('data-theme'),
+    themeColor: themeStyle.color,
+    themeColorScheme: themeStyle.colorScheme,
     paneColor: getComputedStyle(document.querySelector('#res-body')).color,
     background: style.backgroundColor,
     colorScheme: style.colorScheme,
@@ -13237,7 +13317,8 @@ browserTest(
       // theme's --fg — so the frame's ground below is measured against it and
       // not against a light theme that happened to leak in.
       expect(measured.theme).toBe('dark');
-      expect(measured.paneColor).toBe('rgb(226, 232, 240)');
+      expect(measured.themeColorScheme).toBe('dark');
+      expect(measured.paneColor).toBe(measured.themeColor);
       expect(measured.sandbox).toBe('');
       expect(measured.visible).toBe(true);
       expect(measured.sized).toBe(true);
@@ -14416,8 +14497,8 @@ const INSPECTOR_COLUMN_MEASURE = `(() => {
   };
 })()`;
 
-// The sticky caption is only a caption if it stays put, stays clickable, and
-// nothing pins itself over it. Scrolled to five positions rather than
+// While its section is visible, the sticky caption stays clickable without
+// another sticky control covering it. Scrolled to five positions rather than
 // spot-checked at one: when the half stops being a scrollport the pane
 // toolbar re-parents its stickiness to the column, and the collision it
 // caused appeared part of the way down, not at the top.
@@ -14431,14 +14512,23 @@ const INSPECTOR_COLUMN_SCROLL_MATRIX = `(() => {
     panels.scrollTop = Math.round(maximum * fraction);
     const panelsBox = panels.getBoundingClientRect();
     const labelBox = requestLabel.getBoundingClientRect();
-    const hit = document.elementFromPoint(
-      Math.round(labelBox.left + labelBox.width / 2),
-      Math.round(labelBox.top + labelBox.height / 2),
-    );
+    const halfBox = requestLabel.closest('.inspector-half').getBoundingClientRect();
+    const expectedTop = Math.min(panelsBox.top, halfBox.bottom - labelBox.height);
+    const expectedVisible = Math.min(expectedTop + labelBox.height, panelsBox.bottom) -
+      Math.max(expectedTop, panelsBox.top) >= 1;
+    const visibleTop = Math.max(panelsBox.top, labelBox.top);
+    const visibleBottom = Math.min(panelsBox.bottom, labelBox.bottom);
+    const labelVisible = visibleBottom - visibleTop >= 1;
+    const hit = labelVisible ? document.elementFromPoint(
+      labelBox.left + labelBox.width / 2,
+      (visibleTop + visibleBottom) / 2,
+    ) : null;
     positions.push({
       fraction,
       labelTopOffset: Math.round(labelBox.top - panelsBox.top),
-      labelVisible: labelBox.bottom > panelsBox.top && labelBox.top < panelsBox.bottom,
+      expectedLabelTopOffset: Math.round(expectedTop - panelsBox.top),
+      expectedVisible,
+      labelVisible,
       // The caption is the collapse toggle, so being on top is not cosmetic.
       labelHit: Boolean(hit) && (hit === requestLabel || requestLabel.contains(hit)),
       scrollTop: panels.scrollTop,
@@ -14565,13 +14655,20 @@ browserTest(
       const scrolled = await evaluate(cdp, INSPECTOR_COLUMN_SCROLL_MATRIX);
       expect(scrolled).toHaveLength(5);
       expect(Object.keys(scrolled[0].barOffsets)).toEqual(['req-raw']);
+      expect(scrolled[0]).toMatchObject({ labelVisible: true, labelHit: true });
       for (const position of scrolled) {
         expect({
           fraction: position.fraction,
           labelVisible: position.labelVisible,
           labelHit: position.labelHit,
-        }).toEqual({ fraction: position.fraction, labelVisible: true, labelHit: true });
-        expect(Math.abs(position.labelTopOffset)).toBeLessThanOrEqual(1);
+        }).toEqual({
+          fraction: position.fraction,
+          labelVisible: position.expectedVisible,
+          labelHit: position.expectedVisible,
+        });
+        // At the very end a sticky caption can leave with its section while
+        // the response remains reachable. Compare with its containing block.
+        expect(Math.abs(position.labelTopOffset - position.expectedLabelTopOffset)).toBeLessThanOrEqual(1);
       }
       // Both loops below skip: a position the column did not actually scroll
       // to, and a bar the previous reading did not have. A column that stopped
@@ -16728,93 +16825,39 @@ browserTest(
             expect(countLayout.text).toBe(countLayout.expectedText);
             expect(countLayout.title).toBe(countLayout.expectedTitle);
           }
-          for (const counts of [
-            { '2xx': 1, '3xx': 0, '4xx': 0, '5xx': 1, other: 0 },
-            { '2xx': 999999, '3xx': 1000, '4xx': 0, '5xx': 1, other: 9999 },
-            { '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, other: 0 },
-          ]) {
-            const observed = await evaluate(page.cdp, `(() => {
-              const theme = ${JSON.stringify(theme.dataTheme)};
-              if (theme === null) document.documentElement.removeAttribute('data-theme');
-              else document.documentElement.dataset.theme = theme;
-              _NetworkPlus.renderStatsSummary(document.querySelector('#statsSummary'), {
-                statusClassCounts: ${JSON.stringify(counts)}, avgDuration: 886, minDuration: 24, maxDuration: 2450,
-              }, () => {});
-              const badgeProfile = (style) => Object.fromEntries([
-                'boxSizing', 'minWidth', 'paddingLeft', 'paddingRight', 'borderTopWidth',
-                'borderTopStyle', 'borderTopColor', 'borderRadius', 'backgroundColor',
-                'fontSize', 'fontWeight', 'lineHeight', 'textAlign', 'fontVariantNumeric',
-              ].map((key) => [key, style[key]]));
-              return {
-                referenceBadge: badgeProfile(getComputedStyle(document.querySelector('#req-tab-query'), '::after')),
-                pageOverflow: document.documentElement.scrollWidth > innerWidth,
-                chips: Array.from(document.querySelectorAll('.status-summary-chip')).map((chip) => {
-                  const box = chip.getBoundingClientRect();
-                  const label = chip.querySelector('.status-summary-chip-label');
-                  const count = chip.querySelector('.status-summary-chip-count');
-                  const labelBox = label.getBoundingClientRect();
-                  const countBox = count.getBoundingClientRect();
-                  return {
-                    statusClass: chip.dataset.statusClass, label: label.textContent, count: count.textContent,
-                    tag: chip.tagName, text: chip.textContent, height: box.height,
-                    badgeHeight: countBox.height, badgeStyle: badgeProfile(getComputedStyle(count)),
-                    centered: Math.abs(countBox.top + countBox.height / 2 - box.top - box.height / 2) <= 0.5,
-                    ariaLabel: chip.getAttribute('aria-label'), ariaHidden: chip.getAttribute('aria-hidden'),
-                    separated: labelBox.right <= countBox.left && countBox.right <= box.right - 0.5,
-                    fits: chip.scrollWidth <= chip.clientWidth + 1 && chip.scrollHeight <= chip.clientHeight + 1,
-                  };
-                }),
-              };
-            })()`);
-            expect(observed.pageOverflow).toBe(false);
-            expect(observed.chips).toHaveLength(5);
-            for (const chip of observed.chips) {
-              const count = counts[chip.statusClass];
-              expect(chip).toMatchObject({
-                label: chip.statusClass, count: String(count), text: chip.statusClass + ' ' + count,
-                height: 24, badgeHeight: 16, centered: true,
-                tag: count > 0 ? 'BUTTON' : 'SPAN', fits: true, separated: true,
-                ariaHidden: count > 0 ? null : 'true',
-              });
-              expect(chip.badgeStyle).toEqual(observed.referenceBadge);
-              expect(chip.badgeStyle).toMatchObject({ borderTopWidth: '1px', borderTopStyle: 'solid' });
-              if (count > 0) {
-                expect(chip.ariaLabel).toBe('Inspect first visible ' +
-                  (chip.statusClass === 'other' ? 'other-status' : chip.statusClass) +
-                  ' request (' + count + ' matching)');
-              }
-            }
-            if (counts['2xx'] > 0) {
-              const point = await evaluate(page.cdp, `(() => {
-                const chip = document.querySelector('.status-summary-chip--2xx');
-                const box = chip.getBoundingClientRect();
-                return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-              })()`);
-              await page.cdp.send('Input.dispatchMouseEvent', {
-                type: 'mousePressed', ...point, button: 'left', clickCount: 1,
-              });
-              const contrast = await evaluate(page.cdp, `(() => {
-                const chip = document.querySelector('.status-summary-chip--2xx');
-                const count = chip.querySelector('.status-summary-chip-count');
-                const rgba = (text) => text.match(/[\\d.]+/g).map(Number);
-                const ink = rgba(getComputedStyle(count).color);
-                const front = rgba(getComputedStyle(count).backgroundColor);
-                const back = rgba(getComputedStyle(chip).backgroundColor);
-                const alpha = front[3] ?? 1;
-                const ground = front.slice(0, 3).map((channel, i) => channel * alpha + back[i] * (1 - alpha));
-                const luminance = (rgb) => rgb.slice(0, 3).reduce((sum, channel, i) => {
-                  const c = channel / 255;
-                  return sum + (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * [0.2126, 0.7152, 0.0722][i];
-                }, 0);
-                const a = luminance(ink), b = luminance(ground);
-                return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-              })()`);
-              await page.cdp.send('Input.dispatchMouseEvent', {
-                type: 'mouseReleased', ...point, button: 'left', clickCount: 1,
-              });
-              expect(contrast).toBeGreaterThanOrEqual(4.5);
-            }
-          }
+          const observed = await evaluate(page.cdp, `(() => {
+            const theme = ${JSON.stringify(theme.dataTheme)};
+            if (theme === null) document.documentElement.removeAttribute('data-theme');
+            else document.documentElement.dataset.theme = theme;
+            const counts = { all: 1000000, '2xx': 999999, '3xx': 0, '4xx': 1, '5xx': 0, other: 0, pending: 0 };
+            const luminance = (rgb) => rgb.match(/[\\d.]+/g).slice(0, 3).reduce((sum, value, index) => {
+              const c = Number(value) / 255;
+              return sum + (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)) * [0.2126, 0.7152, 0.0722][index];
+            }, 0);
+            const buttons = [...document.querySelectorAll('.analysis-status [data-status-facet]')];
+            const fits = buttons.every(button => {
+              const count = button.querySelector('.analysis-count');
+              count.textContent = String(counts[button.dataset.statusFacet]);
+              const box = button.getBoundingClientRect();
+              return box.height >= 27 && box.right <= ${width} && button.scrollWidth <= button.clientWidth + 1;
+            });
+            const contrast = buttons.map(button => {
+              const badge = getComputedStyle(button.querySelector('.analysis-count'));
+              const a = luminance(badge.color);
+              const b = luminance(badge.backgroundColor);
+              return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+            });
+            const footer = document.querySelector('#statsSummary');
+            return { fits, pageOverflow: document.documentElement.scrollWidth > innerWidth,
+              names: buttons.map(button => button.getAttribute('aria-label')),
+              footerHasActions: !!footer.querySelector('button'), duration: footer.querySelector('.status-summary-duration').title,
+              minimumContrast: Math.min(...contrast) };
+          })()`);
+          expect(observed).toMatchObject({ fits: true, pageOverflow: false, footerHasActions: false });
+          expect(observed.names).toHaveLength(7);
+          expect(observed.names).toEqual(['All: 3', '2xx: 1', '3xx: 1', '4xx: 0', '5xx: 1', 'Other: 0', 'Pending: 0']);
+          expect(observed.duration).toMatch(/^avg .* · min .* · max /);
+          expect(observed.minimumContrast).toBeGreaterThanOrEqual(4.5);
         }
       }
     } finally {
@@ -16834,8 +16877,33 @@ browserTest(
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers });
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers });
     };
+    const measureFilter = () => evaluate(cdp, `(() => {
+      const popup = document.getElementById('columnFilterPopup');
+      const rect = popup.getBoundingClientRect();
+      const groups = [...popup.querySelectorAll('.filter-status-row')];
+      const positions = groups.map(group => {
+        const labels = [...group.querySelectorAll('.filter-checkbox-inline')];
+        const first = labels[0].getBoundingClientRect();
+        const category = group.querySelector('.filter-status-category').getBoundingClientRect();
+        return {
+          left: first.left,
+          stacked: first.top >= category.bottom - 0.5,
+          fits: labels.every(label => label.getBoundingClientRect().right <= rect.right),
+        };
+      });
+      return {
+        aligned: new Set(positions.map(position => position.left)).size === 1,
+        groups: positions.length,
+        stacked: positions.every(position => position.stacked),
+        fits: positions.every(position => position.fits) && popup.scrollWidth <= popup.clientWidth + 1,
+        labelled: document.getElementById(popup.getAttribute('aria-labelledby')).textContent,
+      };
+    })()`);
     try {
       await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      expect(await measureFilter()).toEqual({ aligned: true, groups: 4, stacked: false, fits: true, labelled: 'Column filters' });
+      expect(await evaluate(cdp, "document.activeElement.getAttribute('aria-expanded')")).toBe('false');
+      await evaluate(cdp, "document.activeElement.click()");
       await press('Tab', 'Tab', 9);
       expect(await evaluate(cdp, `({
         open: document.querySelector('#columnFilterPopup').classList.contains('show'),
@@ -16880,6 +16948,10 @@ browserTest(
       await evaluate(cdp, "document.querySelector('#searchToggleBtn').click(); document.querySelector('.search-color-btn').click()");
       await press('Tab', 'Tab', 9);
       expect(await evaluate(cdp, "document.querySelector('#searchColorMenu').classList.contains('show')")).toBe(false);
+
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 320, height: 540, deviceScaleFactor: 1, mobile: false });
+      await evaluate(cdp, "document.querySelector('#filterBtn').click()");
+      expect(await measureFilter()).toEqual({ aligned: true, groups: 4, stacked: true, fits: true, labelled: 'Column filters' });
     } finally {
       await page.close();
     }

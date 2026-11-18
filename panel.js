@@ -2,6 +2,8 @@
 /* istanbul ignore next */
 const _NetworkPlus = (function () {
   'use strict';
+  const { splitWsJsonRecord, decodeWsJsonDisplayEscapes } = typeof module !== 'undefined' && module.exports
+    ? module.require('./payload-search.js') : globalThis.NetworkPlusPayloadSearch;
 
   // ============================================================
   // Section 1: Constants
@@ -36,6 +38,8 @@ const _NetworkPlus = (function () {
   const COPY_FEEDBACK_DURATION_MS = 1800;
   const SCROLL_THRESHOLD = 10;
   const TRUNCATE_LIMIT = 2000;
+  const INSPECTOR_PAYLOAD_PREVIEW_BYTES = 16 * 1024;
+  const PAYLOAD_DOWNLOAD_CHUNK_CHARS = 256 * 1024;
   const FILTER_DEBOUNCE_MS = 150;
   const DEEP_SEARCH_DEBOUNCE_MS = 250;
   // Cap on in-pane (detail view) search hits so pathological bodies stay responsive.
@@ -54,6 +58,7 @@ const _NetworkPlus = (function () {
   const HAR_MAX_ENTRY_NODES = 65536;
   const HAR_MAX_ENTRY_CHARS = 16 * 1024 * 1024;
   const HAR_MAX_RESPONSE_TEXT_CHARS = 8 * 1024 * 1024;
+  const HAR_REREAD_RESPONSE_TEXT_CHARS = HAR_MAX_ENTRY_CHARS - 65536;
   const HAR_MAX_RETAINED_METADATA_BYTES = 256 * 1024 * 1024;
   const HAR_OVERSIZED_BODY_REASON = 'The imported HAR response body exceeds the parser’s per-body memory budget.';
   const AUTOMATIC_RESPONSE_PREFETCH_FAILURE_DEBOUNCE_MS = 750;
@@ -122,6 +127,7 @@ const _NetworkPlus = (function () {
 
   const THEME_KEY = 'networkPlus.theme';
   const LANG_KEY = 'networkPlus.lang';
+  const WS_CAPTURE_KEY = 'networkPlus.webSocketCapture';
   const SEARCH_PREFS_KEY = 'networkPlus.searchPrefs';
   const RETENTION_KEY = 'networkPlus.retention.v1';
   const THEMES = ['system', 'dark', 'light'];
@@ -186,7 +192,7 @@ const _NetworkPlus = (function () {
    }),
   });
   const TIMING_EVIDENCE_LIMITATION = 'Browser-observed timing phases help locate reported delay. They do not prove packet loss, cabling or RF faults, or a definitive root cause on the server.';
-  const TEST_EXTENSION_VERSION_FALLBACK = '1.18.0';
+  const TEST_EXTENSION_VERSION_FALLBACK = '1.19.0';
   const SAFE_SUPPORT_UNKNOWN = 'unknown';
   const SAFE_SUPPORT_OTHER_OS = 'Other/unknown';
   const SAFE_SUPPORT_REVIEW_NOTICE = 'This summary intentionally excludes captured traffic. Review it before posting to a public issue.';
@@ -373,6 +379,8 @@ const _NetworkPlus = (function () {
   // and absorbs the deficit of a narrow one down to this floor before any
   // column is auto-hidden, so a squeeze costs width before it costs columns.
   const ELASTIC_PATH_MIN_WIDTH = 120;
+  const COMPACT_REQUEST_COLUMNS_WIDTH = 440;
+  const COMPACT_PATH_MIN_WIDTH = 100;
   // The order the grid starts in. Named rather than inlined into the state
   // because planForcedVisibleColumnIds protects whatever column it points at:
   // out of the box that is ID, undroppable at every width, and changing this
@@ -1009,9 +1017,10 @@ const _NetworkPlus = (function () {
   // The width a column still needs once Path has given up everything it may.
   // The fit test runs on these, not on the stored widths, so a narrow wrap
   // squeezes Path first and only then starts dropping columns.
-  function minRenderedColumnWidth(column) {
+  function minRenderedColumnWidth(column, compactIdentity = false) {
     const width = clampColumnWidth(column ? column.width : DEFAULT_COL_WIDTH);
-    return column && column.id === 'path' ? Math.min(width, ELASTIC_PATH_MIN_WIDTH) : width;
+    const pathFloor = compactIdentity ? COMPACT_PATH_MIN_WIDTH : ELASTIC_PATH_MIN_WIDTH;
+    return column && column.id === 'path' ? Math.min(width, pathFloor) : width;
   }
 
   // Pure: which of the reader's visible columns have to step aside for the
@@ -1026,6 +1035,7 @@ const _NetworkPlus = (function () {
     const previousHiddenIds = toSet(opts.previousHiddenIds);
     const hysteresis = Number.isFinite(opts.hysteresis) ? opts.hysteresis : AUTO_HIDE_HYSTERESIS_PX;
     const visibleColumns = (Array.isArray(columns) ? columns : []).filter((column) => column && column.visible);
+    const compactIdentity = opts.compactIdentity === true && visibleColumns.some((column) => column.id === 'path');
     if (!Number.isFinite(wrapWidth) || wrapWidth <= 0) return [];
     // The reader's own pick and the two forced-visible sets are off limits;
     // everything else queues up in drop order.
@@ -1040,19 +1050,19 @@ const _NetworkPlus = (function () {
       .map((column, index) => ({ column, rank: dropRank(column, index) }))
       .filter(
         (entry) =>
-          columnAutoHidePriority(entry.column.id) > 1 &&
+          (columnAutoHidePriority(entry.column.id) > 1 || (compactIdentity && entry.column.id === 'domain')) &&
           !pinnedIds.has(entry.column.id) &&
           !keepIds.has(entry.column.id),
       )
       .sort((a, b) => a.rank - b.rank)
       .map((entry) => entry.column);
-    let remaining = visibleColumns.reduce((sum, column) => sum + minRenderedColumnWidth(column), 0);
+    let remaining = visibleColumns.reduce((sum, column) => sum + minRenderedColumnWidth(column, compactIdentity), 0);
     const hiddenIds = [];
     for (const column of candidates) {
       const budget = previousHiddenIds.has(column.id) ? wrapWidth - hysteresis : wrapWidth;
       if (remaining <= budget) continue;
       hiddenIds.push(column.id);
-      remaining -= minRenderedColumnWidth(column);
+      remaining -= minRenderedColumnWidth(column, compactIdentity);
     }
     return hiddenIds;
   }
@@ -3274,7 +3284,8 @@ const _NetworkPlus = (function () {
       return rule.include ? HTTP_METHODS.some((method) => rule.include[method] !== true) : false;
     }
     if (rule.mode === 'statusSet') {
-      return rule.include ? Object.values(rule.include).some((value) => value === false) : false;
+      return (Array.isArray(rule.excludedFamilies) && rule.excludedFamilies.some((key) => STATUS_CLASS_KEYS.includes(key))) ||
+        Object.values(rule.include || {}).some((value) => value === false);
     }
     if (rule.mode === 'urlAdvanced') {
       return [rule.includeAny, rule.includeAll, rule.excludeAny].some(
@@ -3494,6 +3505,81 @@ const _NetworkPlus = (function () {
     return regex ? scanPaneSearchMatches(text, regex, Infinity) : 0;
   }
 
+  const PAYLOAD_SEARCH_MAX_CHARS = 16 * 1024 * 1024;
+  const PAYLOAD_SEARCH_TIMEOUT_MS = 4000;
+
+  function createPayloadSearcher(signal) {
+    let worker = null;
+    let cancel = null;
+    const close = () => {
+      cancel?.();
+      worker?.terminate();
+      worker = null;
+      signal?.removeEventListener('abort', close);
+    };
+    signal?.addEventListener('abort', close, { once: true });
+    const scan = (text, regexes, after = null, webSocketAliases = false) => {
+      if (signal?.aborted || typeof text !== 'string' || text.length > PAYLOAD_SEARCH_MAX_CHARS) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        const finish = (value) => {
+          clearTimeout(timeout);
+          cancel = null;
+          if (worker) {
+            worker.onmessage = null;
+            worker.onerror = null;
+            if (value === null) {
+              worker.terminate();
+              worker = null;
+            }
+          }
+          resolve(value);
+        };
+        const timeout = setTimeout(() => finish(null), PAYLOAD_SEARCH_TIMEOUT_MS);
+        cancel = () => finish(null);
+        try {
+          if (!worker) worker = new Worker('payload-search.js');
+          worker.onmessage = ({ data }) => finish(data);
+          worker.onerror = (event) => {
+            event.preventDefault();
+            finish(null);
+          };
+          worker.postMessage({ text, after, webSocketAliases, rules: regexes.map(({ source, flags }) => ({ source, flags })) });
+        } catch (_error) {
+          finish(null);
+        }
+      });
+    };
+    return { scan, close };
+  }
+
+  function isPayloadSearchHit(hit) {
+    return isRecord(hit) && Number.isSafeInteger(hit.offset) && hit.offset >= 0 &&
+      typeof hit.before === 'string' && hit.before.length <= 80 &&
+      typeof hit.match === 'string' && hit.match.length > 0 && hit.match.length <= 160 &&
+      typeof hit.after === 'string' && hit.after.length <= 80;
+  }
+
+  function validateMirrorSearchResult(result, pending) {
+    if (Array.isArray(pending.frameIds)) {
+      const ids = new Set(pending.frameIds);
+      if (!Array.isArray(result?.checked) || !Array.isArray(result.matches) ||
+          result.checked.length > ids.size || result.matches.length > ids.size ||
+          result.checked.some(id => !ids.has(id)) ||
+          result.matches.some(entry => !Array.isArray(entry) || !isPayloadSearchHit(entry[1]))) return null;
+      const checked = new Set(result.checked);
+      const matched = new Set(result.matches.map(([id]) => id));
+      if (checked.size !== result.checked.length || matched.size !== result.matches.length ||
+          Array.from(matched).some(id => !checked.has(id))) return null;
+      return result;
+    }
+    if (!Array.isArray(result) || result.length !== pending.queries.length) return null;
+    if (pending.after === null) return result.every(value => typeof value === 'boolean') ? result : null;
+    return result.every(value => isRecord(value) && typeof value.more === 'boolean' &&
+      Array.isArray(value.hits) && value.hits.length <= 100 && value.hits.every(isPayloadSearchHit)) ? result : null;
+  }
+
   // Rows to render given the matches-only toggle: with an active search and the
   // toggle on, only rows present in matchedRows (a Map or Set keyed by row) stay
   // visible; otherwise the full sorted list is returned unchanged.
@@ -3685,6 +3771,10 @@ const _NetworkPlus = (function () {
       originalCount:
         snapshot && Number.isInteger(snapshot.originalCount) ? snapshot.originalCount : sourceRows.length,
       columnFilterRules: deserializeFilterState(serializeFilterState(context.columnFilterRules)),
+      webSocketOnly: context.webSocketOnly === true,
+      requestStatusFacet: context.requestStatusFacet || 'all',
+      requestHostFacet: context.requestHostFacet || '',
+      requestTimeFacet: context.requestTimeFacet || null,
       searchKeywords: Array.isArray(context.searchKeywords)
         ? context.searchKeywords.map((keyword) => ({
           query: String((keyword && keyword.query) || ''),
@@ -3855,7 +3945,7 @@ const _NetworkPlus = (function () {
     return data.log.entries;
   }
 
-  async function readHarEntries(byteStream, onEntry) {
+  async function readHarEntries(byteStream, onEntry, responseTextLimit = HAR_MAX_RESPONSE_TEXT_CHARS) {
     const decoder = new TextDecoder();
     const stack = [{ kind: 'root', state: 'value', role: '' }];
     // JSON forbids all unescaped control characters in strings.
@@ -3903,7 +3993,7 @@ const _NetworkPlus = (function () {
     const appendBodyPart = (part) => {
       if (body.omitted) return;
       body.chars += part.length;
-      if (body.chars > HAR_MAX_RESPONSE_TEXT_CHARS) {
+      if (body.chars > body.limit) {
         body.omitted = true;
         body.parts.length = 0;
       } else if (part) body.parts.push(part);
@@ -3991,7 +4081,8 @@ const _NetworkPlus = (function () {
           // Keep parsing the whole string for JSON validity even when its
           // payload cannot be retained. Preserve the other entry fields.
           appendEntryPart(text.slice(entryStart, index));
-          body = { start: index, chars: 0, parts: [], omitted: false };
+          const limit = typeof responseTextLimit === 'function' ? responseTextLimit(count) : responseTextLimit;
+          body = { start: index, chars: 0, parts: [], omitted: false, limit };
         }
         token = 'string';
         stringIsKey = false;
@@ -4137,6 +4228,32 @@ const _NetworkPlus = (function () {
     return count;
   }
 
+  async function readImportedHarEntry(file, entryIndex, isCurrent = () => true) {
+    // The full import already validated the file. Stop this explicit reread
+    // after its target to avoid scanning any later entries or retaining their
+    // bodies. The same stream parser and entry limits still apply.
+    const found = Symbol('HAR entry found');
+    let entry;
+    let index = 0;
+    async function* chunks() {
+      for await (const chunk of file.stream()) {
+        if (!isCurrent()) throw createImportError('The selected HAR entry changed.');
+        yield chunk;
+      }
+    }
+    try {
+      await readHarEntries(chunks(), (candidate) => {
+        if (index++ !== entryIndex) return;
+        entry = candidate;
+        throw found;
+      }, (index) => index === entryIndex ? HAR_REREAD_RESPONSE_TEXT_CHARS : 0);
+    } catch (error) {
+      if (error !== found) throw error;
+    }
+    if (!entry) throw createImportError('The selected HAR entry is no longer available.');
+    return entry;
+  }
+
   function normalizeHarPostData(postData) {
     if (!isRecord(postData)) return null;
     const normalized = {
@@ -4203,9 +4320,13 @@ const _NetworkPlus = (function () {
     if (requestBodySize !== null && requestBodySize >= -1) normalizedRequest.bodySize = requestBodySize;
     const bodySize = normalizeImportNumber(response.bodySize, null);
     if (bodySize !== null && bodySize >= -1) normalizedResponse.bodySize = bodySize;
+    const duration = normalizeImportNumber(entry.time, null);
     return {
       startedDateTime: normalizeImportString(entry.startedDateTime),
-      time: Math.max(0, normalizeImportNumber(entry.time, 0)),
+      time: Math.max(0, duration ?? 0),
+      ...(entry._networkPlus?.overviewUnknownStart === true ? { overviewUnknownStart: true } : {}),
+      ...(duration === null || duration < 0 || entry._networkPlus?.overviewUnknownDuration === true
+        ? { overviewUnknownDuration: true } : {}),
       request: normalizedRequest,
       response: normalizedResponse,
       timings,
@@ -4645,16 +4766,33 @@ const _NetworkPlus = (function () {
     return new TextEncoder().encode(typeof value === 'string' ? value : '').length;
   }
 
+  function exceedsInspectorPayloadBudget(text) {
+    return text.length > INSPECTOR_PAYLOAD_PREVIEW_BYTES ||
+      getUtf8ByteLength(text) > INSPECTOR_PAYLOAD_PREVIEW_BYTES;
+  }
+
+  function inspectorPayloadPrefix(text) {
+    const scratch = new Uint8Array(INSPECTOR_PAYLOAD_PREVIEW_BYTES);
+    const { read } = new TextEncoder().encodeInto(text.slice(0, scratch.length), scratch);
+    // A source slice can end between the surrogate halves of one character.
+    const last = text.charCodeAt(read - 1);
+    return text.slice(0, read < text.length && last >= 0xd800 && last <= 0xdbff ? read - 1 : read);
+  }
+
   // Charset declared by the response's Content-Type header, if any.
   function resolveRowResponseCharset(row) {
     const headers = row && Array.isArray(row.responseHeaders) ? row.responseHeaders : [];
     return extractCharsetFromContentType(getNormalizedHeaderValue(headers, 'content-type'));
   }
 
-  function measureResponsePayload(content, encoding, charset, sniffHtmlMeta) {
+  function measureResponsePayload(content, encoding, charset, sniffHtmlMeta, maxBytes = Infinity) {
     const rawContent = typeof content === 'string' ? content : '';
-    const text = decodeResponseContent(rawContent, encoding, charset, sniffHtmlMeta);
+    // UTF-8 never occupies fewer bytes than UTF-16 code units. Skip allocation
+    // and decoding when raw text alone already exceeds the cache budget.
+    if (rawContent.length > maxBytes) return { content: null, encoding: '', text: null, bytes: rawContent.length };
     const rawBytes = getUtf8ByteLength(rawContent);
+    if (rawBytes > maxBytes) return { content: null, encoding: '', text: null, bytes: rawBytes };
+    const text = decodeResponseContent(rawContent, encoding, charset, sniffHtmlMeta);
     const decodedBytes = text === rawContent ? 0 : getUtf8ByteLength(text);
     return {
       content: rawContent,
@@ -4772,9 +4910,9 @@ const _NetworkPlus = (function () {
     return false;
   }
 
-  function countUnsearchedResponseBodies(rows) {
+  function countUnsearchedResponseBodies(rows, search) {
     return (rows || []).filter(
-      (row) => row && row.responseContentState !== 'cached',
+      (row) => row && row.responseContentState !== 'cached' && !search?.searched.has(row),
     ).length;
   }
 
@@ -4926,28 +5064,49 @@ const _NetworkPlus = (function () {
     row._wsFrames.push(frame);
   }
 
+  function recordWsMessage(row, frame) {
+    if (!row._wsMessages) row._wsMessages = [];
+    if (row._wsMessages.length === WS_MESSAGE_HISTORY_LIMIT) {
+      row._wsMessages.shift();
+      row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + 1;
+    }
+    row._wsMessageId = (row._wsMessageId || 0) + 1;
+    row._wsMessages.push({ ...frame, id: row._wsMessageId });
+  }
+
+  function getHarWsTime(message) {
+    const input = message.time;
+    const value = typeof input === 'string' && input.trim() ? Number(input) : input;
+    if (!Number.isFinite(value)) return null;
+    // Chrome writes epoch seconds; some tools write milliseconds.
+    const time = value > 1e12 ? value : value * 1000;
+    return message.time != null && isStreamEpoch(time) ? time : null;
+  }
+
   function applyHarWebSocketMessages(row, messages) {
     if (!row || !Array.isArray(messages) || messages.length === 0) return 0;
+    const previewText = (text) => text.length <= WS_FRAME_PREVIEW_CHARS
+      ? text : text.slice(0, WS_FRAME_PREVIEW_CHARS).split('').join('');
     const usable = messages
-      .filter((message) => message && typeof message === 'object' && (message.type === 'send' || message.type === 'receive'))
-      .sort((a, b) => (Number(a.time) || 0) - (Number(b.time) || 0));
+      .map((message, fullIndex) => ({ message, fullIndex }))
+      .filter(({ message }) => message && typeof message === 'object' && (message.type === 'send' || message.type === 'receive'))
+      .sort((a, b) => (getHarWsTime(a.message) ?? 0) - (getHarWsTime(b.message) ?? 0));
     if (usable.length === 0) return 0;
     const limited = usable.slice(0, HAR_WS_MESSAGE_IMPORT_LIMIT);
     let applied = 0;
-    for (const message of limited) {
-      const rawTime = Number(message.time);
-      // Chrome writes epoch seconds; some tools write milliseconds.
-      const at = Number.isFinite(rawTime) ? (rawTime > 1e12 ? rawTime : rawTime * 1000) : NaN;
+    for (const { message } of limited) {
+      const at = getHarWsTime(message);
+      const text = previewText(normalizeImportString(message.data));
       const preview =
         message.opcode === 2
           ? '[binary frame' + (typeof message.data === 'string' ? ', ' + message.data.length + ' base64 chars' : '') + ']'
-          : String(message.data == null ? '' : message.data).slice(0, WS_FRAME_PREVIEW_CHARS);
+          : text;
       const line = formatWsFrameLine({ kind: message.type === 'send' ? 'ws-sent' : 'ws-received', at, preview });
       recordWsFrame(row, {
         type: message.type,
         time: at,
         binary: message.opcode === 2,
-        data: message.opcode === 2 ? '' : String(message.data == null ? '' : message.data).slice(0, WS_FRAME_PREVIEW_CHARS),
+        data: message.opcode === 2 ? '' : text,
       });
       if (message.type === 'send') {
         if (!row.requestPostData || typeof row.requestPostData !== 'object') {
@@ -4968,6 +5127,23 @@ const _NetworkPlus = (function () {
       }
       applied += 1;
     }
+    const recent = usable.slice(-WS_MESSAGE_HISTORY_LIMIT);
+    for (const { message, fullIndex } of recent) {
+      const binary = message.opcode === 2;
+      const data = binary ? '' : normalizeImportString(message.data);
+      const truncated = data.length > WS_FRAME_PREVIEW_CHARS;
+      recordWsMessage(row, {
+        type: message.type,
+        time: getHarWsTime(message),
+        binary,
+        bytes: null,
+        data: previewText(data),
+        truncated,
+        ...(truncated && typeof row._readImportedHarEntry === 'function'
+          ? { fullIndex, fullLength: data.length } : {}),
+      });
+    }
+    row._wsMessagesOmitted = usable.length - recent.length;
     if (usable.length > limited.length) {
       row.responseContent = appendBoundedWsText(
         typeof row.responseContent === 'string' ? row.responseContent : '',
@@ -5118,32 +5294,102 @@ const _NetworkPlus = (function () {
     return STATUS_CLASS_KEYS.includes(statusClass) ? statusClass : 'other';
   }
 
-  function getStatusClassIndicators(statusClassCounts) {
-    const counts =
-      statusClassCounts && typeof statusClassCounts === 'object' ? statusClassCounts : {};
-    return STATUS_CLASS_KEYS.map((statusClass) => {
-      const sourceCount = counts[statusClass];
-      const count = Number.isInteger(sourceCount) && sourceCount >= 0 ? sourceCount : 0;
-      return { statusClass, count, text: statusClass + ' ' + count };
-    });
+  const TRAFFIC_TIMELINE_BINS = 12;
+  const OVERVIEW_ROW_HEIGHT = 25;
+  const OVERVIEW_ROW_POOL = 16;
+  const OVERVIEW_OVERSCAN = 3;
+  const MAX_OVERVIEW_EPOCH = 8640000000000000;
+  const LATENCY_BANDS = [100, 300, 1000, 3000, Infinity];
+
+  function getOverviewStart(row) {
+    const start = row.clientStartEpoch;
+    return row._overviewUnknownStart || !Number.isSafeInteger(start) || Math.abs(start) > MAX_OVERVIEW_EPOCH ? null : start;
   }
 
-  function formatStatusClassSummary(statusClassCounts) {
-    return (
-      'status ' +
-      getStatusClassIndicators(statusClassCounts)
-        .map((indicator) => indicator.text)
-        .join(' · ')
-    );
+  function getOverviewDuration(row) {
+    return row._pendingRequest || row._overviewUnknownDuration || isLiveStreamRow(row) || row._mirrorStreamRevision != null ||
+      !Number.isFinite(row.duration) || row.duration < 0 ? null : row.duration;
   }
 
-  function findFirstStatusClassRow(rows, statusClass) {
-    if (!Array.isArray(rows) || !STATUS_CLASS_KEYS.includes(statusClass)) return null;
+  function requestOverlapsRange(row, range) {
+    if (!range) return true;
+    const start = getOverviewStart(row);
+    if (start === null || start >= range.end) return false;
+    const duration = getOverviewDuration(row);
+    return duration > 0 ? start + duration > range.start : start >= range.start;
+  }
+
+  function computeTrafficTimeline(rows) {
+    let first = Infinity;
+    let end = -Infinity;
+    let untimed = 0;
     for (const row of rows) {
-      if (!row || typeof row !== 'object') continue;
-      if (classifyStatusClass(row.status) === statusClass) return row;
+      const start = getOverviewStart(row);
+      if (start === null) {
+        untimed += 1;
+        continue;
+      }
+      first = Math.min(first, start);
+      end = Math.max(end, start + Math.max(1, Math.ceil(getOverviewDuration(row) ?? 0)));
     }
-    return null;
+    const bins = [];
+    if (first === Infinity) return { bins, untimed, peak: null, range: null };
+
+    end = Math.min(end, MAX_OVERVIEW_EPOCH + 1);
+    const width = Math.max(1, Math.ceil((end - first) / TRAFFIC_TIMELINE_BINS));
+    const count = Math.min(TRAFFIC_TIMELINE_BINS, Math.ceil((end - first) / width));
+    for (let index = 0; index < count; index += 1) {
+      bins.push({ start: first + index * width, end: Math.min(end, first + (index + 1) * width), count: 0, errors: 0 });
+    }
+    for (const row of rows) {
+      const start = getOverviewStart(row);
+      if (start === null) continue;
+      const bin = bins[Math.min(bins.length - 1, Math.floor((start - first) / width))];
+      bin.count += 1;
+      const statusClass = classifyStatusClass(row.status);
+      if (!row._pendingRequest && (statusClass === '4xx' || statusClass === '5xx')) bin.errors += 1;
+    }
+    const peak = bins.reduce((best, bin) => bin.errors > (best?.errors || 0) ? bin : best, null);
+    return { bins, untimed, peak, range: { start: first, end } };
+  }
+
+  function planOverviewRequestWindow(total, scrollTop) {
+    const first = Math.max(0, Math.min(total - 1, Math.floor(scrollTop / OVERVIEW_ROW_HEIGHT)));
+    const start = Math.max(0, first - OVERVIEW_OVERSCAN);
+    return { start, end: Math.min(total, start + OVERVIEW_ROW_POOL) };
+  }
+
+  function buildOverviewRequestEntry(row, range) {
+    const span = range.end - range.start;
+    const start = getOverviewStart(row);
+    const duration = getOverviewDuration(row);
+    return {
+      row,
+      startsAt: (start - range.start) / span,
+      width: Math.min(duration ?? 0, range.end - start) / span,
+      duration,
+      statusClass: row._pendingRequest ? 'pending' : classifyStatusClass(row.status),
+    };
+  }
+
+  function computeLatencyDistribution(rows) {
+    const bands = LATENCY_BANDS.map(() => 0);
+    let measured = 0;
+    let pending = 0;
+    let slowest = null;
+    for (const row of rows) {
+      if (row._pendingRequest) {
+        pending += 1;
+        continue;
+      }
+      const duration = getOverviewDuration(row);
+      if (duration === null) continue;
+      const index = LATENCY_BANDS.findIndex((limit) => duration < limit);
+      bands[index] += 1;
+      measured += 1;
+      if (!slowest || row.duration > slowest.duration) slowest = row;
+    }
+    return { bands, measured, slowest, pending, unmeasured: rows.length - measured - pending };
   }
 
   /**
@@ -5296,6 +5542,11 @@ const _NetworkPlus = (function () {
     retainedRows: new Set(),
     activeRows: new Set(),
     filteredRows: [], // [U5] cache for filtered rows
+    webSocketOnly: false,
+    requestStatusFacet: 'all',
+    requestHostFacet: '',
+    requestTimeFacet: null,
+    requestScopeRows: null,
     pendingLiveRows: [],
     liveRowsAwaitingRender: [],
     retention: {
@@ -5323,6 +5574,7 @@ const _NetworkPlus = (function () {
     onResponseContentChanged: null,
     syncSearchUI: null,
     syncDomainSummary: null,
+    syncTrafficOverview: null,
     domainSummaryVisible: false,
     automaticResponsePrefetchScheduler: null,
     columnFilterRules: DEFAULT_COLUMN_FILTER_RULES(),
@@ -5856,6 +6108,7 @@ const _NetworkPlus = (function () {
       0,
     );
     state.filteredRows = state.filteredRows.filter((row) => !evictedSet.has(row));
+    if (state.requestScopeRows) state.requestScopeRows = state.requestScopeRows.filter((row) => !evictedSet.has(row));
     state.liveRowsAwaitingRender = state.liveRowsAwaitingRender.filter((row) => !evictedSet.has(row));
     state.visibleBytes = Math.max(0, state.visibleBytes - evictedVisibleBytes);
     state.selectedRows = new Set(plan.retainedSelectedRows);
@@ -5885,6 +6138,11 @@ const _NetworkPlus = (function () {
       releaseResponseContent(row, 'row-evicted', false);
       row._responseContentPromise = null;
       row._responsePayloadPromise = null;
+      row._boundedResponsePayloadPromise = null;
+      row._liveRawResponsePromise = null;
+      row._readImportedHarEntry = null;
+      row._readWsHarEntry = null;
+      row._responseSearchSource = null;
       row._retentionDisposed = true;
       state.retainedRows.delete(row);
       state.activeRows.delete(row);
@@ -6043,8 +6301,11 @@ const _NetworkPlus = (function () {
   }
 
   function clearStoredRows() {
+    state.search.fullResponses?.controller.abort();
+    state.search.fullResponses = null;
     removeRowsFromState(state.rows.slice(), false);
     state.filteredRows = [];
+    state.requestScopeRows = null;
     state.visibleBytes = 0;
   }
 
@@ -6069,6 +6330,10 @@ const _NetworkPlus = (function () {
       sampleCaptureActive: state.sampleCaptureActive,
       context: {
         columnFilterRules: deserializeFilterState(serializeFilterState(state.columnFilterRules)),
+        webSocketOnly: state.webSocketOnly,
+        requestStatusFacet: state.requestStatusFacet,
+        requestHostFacet: state.requestHostFacet,
+        requestTimeFacet: state.requestTimeFacet,
         searchKeywords: state.search.keywords.map((keyword) => ({
           query: String(keyword.query || ''),
           colorIdx: Number.isInteger(keyword.colorIdx) ? keyword.colorIdx : 0,
@@ -6098,10 +6363,13 @@ const _NetworkPlus = (function () {
   }
 
   function detachStoredRowsForClearUndo() {
+    state.search.fullResponses?.controller.abort();
+    state.search.fullResponses = null;
     cancelAutomaticResponsePrefetchRows(state.rows, true);
     for (const row of state.rows) state.activeRows.delete(row);
     state.rows = [];
     state.filteredRows = [];
+    state.requestScopeRows = null;
     state.visibleBytes = 0;
     if (state.sampleCaptureActive) exitSampleCaptureMode();
   }
@@ -6353,6 +6621,230 @@ const _NetworkPlus = (function () {
   // Every entry carries both languages; the English text doubles as the
   // authored fallback in panel.html, so the two must stay in sync.
   const UI_TEXT = {
+    overviewToggle: {
+      en: 'Timeline',
+      ja: 'タイムライン',
+    },
+    overviewAria: {
+      en: 'Traffic overview',
+      ja: '通信の全体像',
+    },
+    overviewWaterfall: {
+      en: 'Request waterfall',
+      ja: 'リクエストのウォーターフォール',
+    },
+    overviewNoStarts: {
+      en: 'No recorded start times in this scope.',
+      ja: 'この範囲に、開始時刻が記録された通信はありません。',
+    },
+    overviewBinGroup: {
+      en: 'Filter by time range. Use Shift and arrow keys to extend.',
+      ja: '時間帯で絞り込む。Shift＋矢印キーで範囲を広げます。',
+    },
+    overviewInstructions: {
+      en: 'Left edge = start. Bar length = duration. Drag the time ruler to filter.',
+      ja: '横棒の左端が開始、長さが所要時間です。時間軸をドラッグして絞り込めます。',
+    },
+    overviewSearchScope: {
+      en: 'Time ruler totals are before text search.',
+      ja: '時間軸の件数はテキスト検索前の値です。',
+    },
+    overviewNoDisplayed: {
+      en: 'No displayed requests with a recorded start time.',
+      ja: '表示中の通信に開始時刻の記録がありません。',
+    },
+    overviewRequestCount: {
+      en: '{total} shown',
+      ja: '{total}件表示',
+    },
+    overviewScrollRegion: {
+      en: 'Scrollable requests. Use arrow keys to move and Enter to inspect.',
+      ja: '通信一覧。矢印キーで移動し、Enterで詳細を表示します。',
+    },
+    overviewUnknownDuration: {
+      en: 'Duration unavailable',
+      ja: '所要時間の記録なし',
+    },
+    overviewLatency: {
+      en: 'Latency of displayed requests',
+      ja: '表示中の通信の遅延分布',
+    },
+    overviewClearTime: {
+      en: 'Clear time range',
+      ja: '時間帯の絞り込みを解除',
+    },
+    overviewRangeFilter: {
+      en: 'Active during {range}',
+      ja: '通信時間帯 {range}',
+    },
+    overviewRangeApplied: {
+      en: 'Showing requests active during {range}',
+      ja: '{range} に通信していたリクエストを表示しています。',
+    },
+    overviewTimeCleared: {
+      en: 'Time range cleared.',
+      ja: '時間帯の絞り込みを解除しました。',
+    },
+    overviewSelected: {
+      en: 'Selected range {range}',
+      ja: '選択中 {range}',
+    },
+    overviewBinLabel: {
+      en: '{range} · {count} starts · {errors} HTTP errors',
+      ja: '{range}、開始 {count} 件、HTTPエラー {errors} 件',
+    },
+    overviewPartialBin: {
+      en: 'Partly in selected range',
+      ja: '選択範囲と一部重複',
+    },
+    overviewMissingStarts: {
+      en: '{count} requests have no recorded start time.',
+      ja: '開始時刻の記録がない通信 {count} 件は集計対象外です。',
+    },
+    overviewPeak: {
+      en: 'Open HTTP error peak · {count}',
+      ja: 'HTTPエラーが集中した時間帯 · {count}件',
+    },
+    overviewSlowest: {
+      en: 'Open slowest request · {duration}',
+      ja: '最も遅い通信を開く · {duration}',
+    },
+    overviewMeasured: {
+      en: '{count} measured',
+      ja: '計測 {count}件',
+    },
+    overviewNoLatency: {
+      en: 'No recorded durations for the displayed requests.',
+      ja: '表示中の通信に計測時間がありません。',
+    },
+    overviewLatencyExcluded: {
+      en: 'Excluded from latency · {pending} pending, {unknown} without a duration',
+      ja: '遅延の集計外 · 応答待ち {pending}件、計測時間なし {unknown}件',
+    },
+    analysisAria: {
+      en: 'Request filters and actions',
+      ja: 'リクエストの絞り込みと操作',
+    },
+    analysisStatusAria: {
+      en: 'Filter by request status. Counts before text search.',
+      ja: '通信の状態で絞り込む。件数はテキスト検索前の値です。',
+    },
+    analysisStatusFacetCount: {
+      en: '{label}: {count}',
+      ja: '{label}、{count}件',
+    },
+    analysisAverageDuration: {
+      en: 'avg {average}',
+      ja: '平均 {average}',
+    },
+    analysisDurationRange: {
+      en: 'avg {average} · min {minimum} · max {maximum}',
+      ja: '平均 {average} · 最短 {minimum} · 最長 {maximum}',
+    },
+    analysisAll: {
+      en: 'All',
+      ja: 'すべて',
+    },
+    analysisPending: {
+      en: 'Pending',
+      ja: '応答待ち',
+    },
+    analysisDomains: {
+      en: 'Hosts',
+      ja: 'ホスト',
+    },
+    analysisActive: {
+      en: 'Active filters',
+      ja: '適用中の絞り込み',
+    },
+    analysisClear: {
+      en: 'Clear filters',
+      ja: '絞り込みを解除',
+    },
+    analysisRemove: {
+      en: 'Remove filter: {filter}',
+      ja: '「{filter}」の絞り込みを解除',
+    },
+    analysisOutsideView: {
+      en: 'Selected request is outside the current filters',
+      ja: '選択中の通信は現在の絞り込みの対象外です',
+    },
+    analysisSearchOnly: {
+      en: 'Search matches only',
+      ja: '検索一致のみ',
+    },
+    analysisHost: {
+      en: 'Host: {host}',
+      ja: 'ホスト: {host}',
+    },
+    analysisHostsEmpty: {
+      en: 'No hosts in this view',
+      ja: '該当するホストはありません',
+    },
+    analysisHostOnly: {
+      en: 'Show only requests to {host}',
+      ja: '{host} 宛ての通信のみ表示',
+    },
+    analysisDomainMeta: {
+      en: '{count} · {bytes}',
+      ja: '{count}件 · {bytes}',
+    },
+    analysisDomainErrors: {
+      en: '{count} {error}',
+      ja: 'HTTPエラー {count}件',
+    },
+    analysisColumnFilters: {
+      en: 'Column filters',
+      ja: '列フィルター',
+    },
+    analysisColumnFilterCount: {
+      en: '{count} active',
+      ja: '{count}件適用中',
+    },
+    analysisSingleColumnFilter: {
+      en: '{column} filter',
+      ja: '{column}のフィルター',
+    },
+    analysisColumnFilterActive: {
+      en: 'Active',
+      ja: '適用中',
+    },
+    analysisStatusSuccess: {
+      en: 'Success',
+      ja: '成功',
+    },
+    analysisStatusRedirect: {
+      en: 'Redirect',
+      ja: 'リダイレクト',
+    },
+    analysisStatusClientError: {
+      en: 'Client error',
+      ja: 'クライアントエラー',
+    },
+    analysisStatusServerError: {
+      en: 'Server error',
+      ja: 'サーバーエラー',
+    },
+    analysisStatusOther: {
+      en: 'Other',
+      ja: 'その他',
+    },
+    filterSelectAll: {
+      en: 'Select all',
+      ja: '全選択',
+    },
+    filterDeselectAll: {
+      en: 'Clear all',
+      ja: '全解除',
+    },
+    filterSelectFamily: {
+      en: 'Select all in {family}',
+      ja: '{family}をすべて選択',
+    },
+    filterDeselectFamily: {
+      en: 'Clear all in {family}',
+      ja: '{family}をすべて解除',
+    },
     undockHintTitle: {
       en: '🪟 Keep DevTools open',
       ja: '🪟 DevTools は閉じないでください',
@@ -6713,6 +7205,10 @@ const _NetworkPlus = (function () {
       en: 'Clear column filters',
       ja: '列フィルターを解除',
     },
+    emptyRequestFiltersAction: {
+      en: 'Clear request filters',
+      ja: 'リクエストの絞り込みを解除',
+    },
     emptyCaptureAction: {
       en: 'Explore sample capture',
       ja: 'サンプルキャプチャを試す',
@@ -7061,8 +7557,16 @@ const _NetworkPlus = (function () {
       ja: 'ローカルサンプル一式を削除し、以前の記録状態と列フィルターを復元',
     },
     titleWsCapture: {
-      en: "Capture WebSocket and Server-Sent-Event streams by wrapping this page's WebSocket and EventSource constructors; only connections created while capture is on are seen, and traffic is never altered",
-      ja: 'このページの WebSocket / EventSource コンストラクターをラップして WebSocket と Server-Sent-Events のストリームをキャプチャします。キャプチャ有効中に作成された接続だけが対象で、トラフィックは一切変更されません。',
+      en: 'Record WebSocket messages in the inspected tab while live recording is running',
+      ja: 'ライブ記録中に、検査中のタブのWebSocketメッセージを記録します',
+    },
+    settingsSseSection: {
+      en: 'Server-Sent Events (SSE)',
+      ja: 'Server-Sent Events（SSE）',
+    },
+    settingsSseCapture: {
+      en: 'Record SSE in this session',
+      ja: 'このセッションでSSEを記録',
     },
     emptyFilteredTitle: {
       en: 'No requests match the current filters.',
@@ -7290,6 +7794,54 @@ const _NetworkPlus = (function () {
     bodyPaneShowFullCached: {
       en: 'Show full cached body ({size})',
       ja: 'キャッシュされたボディ全体を表示（{size}）',
+    },
+    largePayloadPreview: {
+      en: 'Showing the first 16 KiB. Search also checks available text past the preview.',
+      ja: '先頭 16 KiB を表示しています。検索では、取得できる本文をプレビューの先まで調べます。',
+    },
+    largePayloadBinary: {
+      en: 'This payload exceeds the 16 KiB inspector preview budget. Raw bytes are available as a file.',
+      ja: 'このペイロードはインスペクターのプレビュー上限（16 KiB）を超えています。元のバイト列はファイルで保存できます。',
+    },
+    largePayloadLive: {
+      en: 'Get the full body from the original DevTools capture and save it directly.',
+      ja: '元の DevTools キャプチャからボディ全体を取得し、直接ファイルに保存します。',
+    },
+    largePayloadImported: {
+      en: 'Read the full body from the original HAR file and save it directly.',
+      ja: '元の HAR ファイルからボディ全体を読み込み、直接ファイルに保存します。',
+    },
+    largePayloadMirror: {
+      en: 'This body cannot be saved in the pop-out. For live captures, try the original Network+ DevTools panel.',
+      ja: 'このボディはポップアウトから保存できません。ライブキャプチャの場合は、元の DevTools の Network+ パネルをお試しください。',
+    },
+    largePayloadSaveRequest: {
+      en: 'Save full request body',
+      ja: 'リクエストボディ全体を保存',
+    },
+    largePayloadSaveResponse: {
+      en: 'Save full response body',
+      ja: 'レスポンスボディ全体を保存',
+    },
+    largePayloadSaveTitle: {
+      en: 'Save full body?',
+      ja: 'ボディ全体を保存しますか？',
+    },
+    largePayloadSaveDetail: {
+      en: 'Save the captured body to a local file without redaction.',
+      ja: '取得したボディをマスキングせずローカルファイルに保存します。',
+    },
+    largePayloadSaving: {
+      en: 'Preparing the full body…',
+      ja: 'ボディ全体の保存を準備しています…',
+    },
+    largePayloadSaved: {
+      en: 'Full body download started.',
+      ja: 'ボディ全体のダウンロードを開始しました。',
+    },
+    largePayloadSaveUnavailable: {
+      en: 'Could not save the full body from this capture.',
+      ja: 'このキャプチャからボディ全体を保存できませんでした。',
     },
     detailsEmptyTitle: {
       en: 'Select a request...',
@@ -7921,6 +8473,22 @@ const _NetworkPlus = (function () {
     paneSearchNoMatches: {
       en: 'No matches',
       ja: '一致なし',
+    },
+    payloadSearchRunning: {
+      en: 'Searching full text…',
+      ja: '全文を検索中…',
+    },
+    payloadSearchPartial: {
+      en: 'Some text could not be searched',
+      ja: '一部の本文を検索できませんでした',
+    },
+    payloadSearchExcerpts: {
+      en: 'Matches outside the preview',
+      ja: 'プレビュー外の一致箇所',
+    },
+    payloadSearchOffset: {
+      en: 'Position {offset}',
+      ja: '{offset} 文字目',
     },
     paneSearchCollapsedSuffix: {
       en: ' (+{count} collapsed)',
@@ -8586,12 +9154,188 @@ const _NetworkPlus = (function () {
     },
     // The stream-capture toggle paints its own state; both writers read these.
     wsCaptureOn: {
-      en: 'Stream capture: On',
-      ja: 'ストリームキャプチャ: オン',
+      en: 'WebSocket capture: On',
+      ja: 'WebSocket記録: オン',
     },
     wsCaptureOff: {
-      en: 'Stream capture: Off',
-      ja: 'ストリームキャプチャ: オフ',
+      en: 'WebSocket capture: Off',
+      ja: 'WebSocket記録: オフ',
+    },
+    wsCapturePromptHelp: {
+      en: 'WebSocket capture is off. Turn it on to record new messages.',
+      ja: 'WebSocket記録はオフです。新しいメッセージを記録するにはオンにしてください。',
+    },
+    wsCapturePromptBtn: {
+      en: 'Enable WebSocket capture',
+      ja: 'WebSocket記録をオンにする',
+    },
+    wsReloadCapture: {
+      en: 'Reload and record',
+      ja: '再読み込みして記録',
+    },
+    wsConnectionTabs: {
+      en: 'WebSocket connection',
+      ja: 'WebSocket 接続',
+    },
+    wsMessagesTab: {
+      en: 'Messages',
+      ja: 'メッセージ',
+    },
+    wsDetailsTab: {
+      en: 'Details',
+      ja: '詳細',
+    },
+    titleWebSocketOnly: {
+      en: 'Show only WebSocket requests',
+      ja: 'WebSocket 通信だけを表示',
+    },
+    webSocketOnly: {
+      en: 'WebSocket only',
+      ja: 'WebSocket のみ',
+    },
+    wsFilterDirection: {
+      en: 'Message direction',
+      ja: 'メッセージの送受信',
+    },
+    wsTimelineLabel: {
+      en: 'Message timeline',
+      ja: 'メッセージの時系列',
+    },
+    wsFilterAll: {
+      en: 'All',
+      ja: 'すべて',
+    },
+    wsSearchMessages: {
+      en: 'Search messages',
+      ja: '本文を検索',
+    },
+    wsSearchPayload: {
+      en: 'Search captured message text',
+      ja: '記録した本文を検索',
+    },
+    wsSearchPrevious: {
+      en: 'Previous matching message',
+      ja: '前の一致メッセージ',
+    },
+    wsSearchNext: {
+      en: 'Next matching message',
+      ja: '次の一致メッセージ',
+    },
+    wsSearchResultCount: {
+      en: 'Matches: {count}',
+      ja: '{count} 件一致',
+    },
+    wsSearchResultPosition: {
+      en: 'Match {position} of {count}',
+      ja: '{count} 件中 {position} 件目',
+    },
+    wsSearchNoMatches: {
+      en: 'No matching messages',
+      ja: '一致するメッセージはありません',
+    },
+    wsClearSearchFilters: {
+      en: 'Clear search and filters',
+      ja: '検索と絞り込みを解除',
+    },
+    wsMessageTimeHeading: {
+      en: 'Time (UTC)',
+      ja: '時刻 (UTC)',
+    },
+    wsMessageDirectionHeading: {
+      en: 'Direction',
+      ja: '送受信',
+    },
+    wsMessagePreviewHeading: {
+      en: 'Message',
+      ja: 'メッセージ',
+    },
+    wsMessageSent: {
+      en: '↑ Sent',
+      ja: '↑ 送信',
+    },
+    wsMessageReceived: {
+      en: '↓ Received',
+      ja: '↓ 受信',
+    },
+    wsMessageBinary: {
+      en: 'Binary message',
+      ja: 'バイナリメッセージ',
+    },
+    wsMessageBinarySize: {
+      en: 'Binary message · {size}',
+      ja: 'バイナリメッセージ · {size}',
+    },
+    wsMessageEmpty: {
+      en: 'Empty message',
+      ja: '空のメッセージ',
+    },
+    wsMessagesEmpty: {
+      en: 'No messages recorded for this connection yet.',
+      ja: 'この接続のメッセージはまだ記録されていません。',
+    },
+    wsMessagesArchiveEmpty: {
+      en: 'The imported file contains no messages for this connection.',
+      ja: '読み込んだファイルに、この接続のメッセージは含まれていません。',
+    },
+    wsMessagesArchiveOmitted: {
+      en: '{count} messages were omitted when this HAR was sanitized.',
+      ja: 'HAR のサニタイズ時にメッセージ {count} 件が省略されました。',
+    },
+    wsMessagesHandshakeEmpty: {
+      en: 'There are no recorded messages for this connection. Reload the inspected page to record a new connection.',
+      ja: 'この接続のメッセージは記録されていません。ページを再読み込みして、新しい接続を記録できます。',
+    },
+    wsMessagesLoading: {
+      en: 'Loading messages…',
+      ja: 'メッセージを読み込んでいます…',
+    },
+    wsMessagesUnavailable: {
+      en: 'Message history is unavailable from the DevTools session.',
+      ja: 'DevTools セッションからメッセージ履歴を取得できません。',
+    },
+    wsMessagesOmitted: {
+      en: '{count} messages omitted from this list.',
+      ja: 'この一覧では {count} 件のメッセージが省略されています。',
+    },
+    wsMessageTruncated: {
+      en: 'Only the first {limit} characters were captured.',
+      ja: '最初の {limit} 文字分を記録しました。',
+    },
+    wsMessagePreviewOnly: {
+      en: 'Preview of the first {limit} characters.',
+      ja: '最初の {limit} 文字をプレビューしています。',
+    },
+    wsShowFullJson: {
+      en: 'Show full JSON',
+      ja: 'JSON全文を表示',
+    },
+    wsFullJsonPreviewOnly: {
+      en: 'Showing the formatted preview. Save the full message to inspect it locally.',
+      ja: '整形プレビューを表示しています。全文は保存して確認できます。',
+    },
+    wsSaveFullMessage: {
+      en: 'Save full message',
+      ja: '全文を保存',
+    },
+    wsSaveFullMessageTitle: {
+      en: 'Save the full WebSocket message?',
+      ja: 'WebSocket メッセージの全文を保存しますか？',
+    },
+    wsSaveFullMessageDetail: {
+      en: 'The local file contains the complete captured message, which may include sensitive data.',
+      ja: 'ローカルファイルに、機密情報を含む可能性のある記録済みメッセージをそのまま保存します。',
+    },
+    wsSavingFullMessage: {
+      en: 'Reading the complete WebSocket message…',
+      ja: 'WebSocket メッセージの全文を取得しています…',
+    },
+    wsSavedFullMessage: {
+      en: 'Saved the full WebSocket message.',
+      ja: 'WebSocket メッセージの全文を保存しました。',
+    },
+    wsFullMessageUnavailable: {
+      en: 'The full message is no longer available. The preview is still visible.',
+      ja: '全文を取得できませんでした。プレビューは引き続き確認できます。',
     },
     statusPendingRequest: {
       en: 'Pending',
@@ -8862,12 +9606,36 @@ const _NetworkPlus = (function () {
       ja: 'ストリーム記録がメモリ上限に達したため、一部のストリームやフレームを省略しました。',
     },
     statusStreamCaptureOn: {
-      en: 'Stream capture on; WebSocket and SSE connections created from now on are recorded.',
-      ja: 'ストリームキャプチャをオンにしました。以後に作成される WebSocket と SSE の接続を記録します。',
+      en: 'WebSocket capture is on for new connections.',
+      ja: '新しいWebSocket接続の記録をオンにしました。',
+    },
+    statusStreamCaptureOnPaused: {
+      en: 'WebSocket capture is on. Resume live recording to collect messages.',
+      ja: 'WebSocket記録はオンです。メッセージを取得するにはライブ記録を再開してください。',
+    },
+    statusStreamCaptureNativeOn: {
+      en: 'Recording WebSocket messages. Use Reload and record if DevTools missed the connection.',
+      ja: 'WebSocketを記録中です。DevToolsが接続を取得できていない場合は「再読み込みして記録」を使ってください。',
+    },
+    statusStreamCaptureReload: {
+      en: 'Reloading the inspected page to record its connections.',
+      ja: '接続を記録するため、検査中のページを再読み込みします。',
+    },
+    statusStreamCaptureReloadFailed: {
+      en: 'Could not reload the inspected page.',
+      ja: '検査中のページを再読み込みできませんでした。',
     },
     statusStreamCaptureOff: {
-      en: 'Stream capture off; recorded connections stay in the table.',
-      ja: 'ストリームキャプチャをオフにしました。記録済みの接続はテーブルに残ります。',
+      en: 'WebSocket capture is off. Recorded messages stay in the table.',
+      ja: 'WebSocket記録をオフにしました。記録済みのメッセージは一覧に残ります。',
+    },
+    statusWsCapturePrefUnavailable: {
+      en: 'Could not load the WebSocket preference. Capture is off.',
+      ja: 'WebSocketの記録設定を読み込めなかったため、記録はオフです。',
+    },
+    statusWsCapturePrefNotSaved: {
+      en: 'Could not save the WebSocket preference for the next session.',
+      ja: '次回のためのWebSocket記録設定を保存できませんでした。',
     },
   };
 
@@ -9021,6 +9789,12 @@ const _NetworkPlus = (function () {
     if (refreshInspectorToggleTitles) refreshInspectorToggleTitles();
     if (refreshSearchColorLabels) refreshSearchColorLabels();
     if (refreshStreamCaptureLabel) refreshStreamCaptureLabel();
+    if (state.syncDomainSummary) state.syncDomainSummary();
+    renderAnalysisBar();
+    const statsElement = $('#statsSummary');
+    const currentStats = statsSummaryStructures.get(statsElement)?.stats;
+    if (currentStats) renderStatsSummary(statsElement, currentStats);
+    state.syncTrafficOverview?.();
     setStatus(uiTextFormat('statusLanguageApplied', { language: normalized }));
   }
 
@@ -9427,9 +10201,9 @@ const _NetworkPlus = (function () {
     }
 
     if (rule && rule.mode === 'statusSet') {
-      // If no codes are unchecked, show all
-      if (!rule.include || Object.keys(rule.include).length === 0) return true;
-      return rule.include[value] !== false;
+      const override = rule.include?.[value];
+      if (typeof override === 'boolean') return override;
+      return !Array.isArray(rule.excludedFamilies) || !rule.excludedFamilies.includes(classifyStatusClass(Number(value)));
     }
 
     if (rule && rule.mode === 'urlAdvanced') {
@@ -9536,7 +10310,8 @@ const _NetworkPlus = (function () {
       const rule = getApplicableFilterRule(state.columnFilterRules[colId]);
       if (rule) filters.push({ colId, rule, isNumeric: NUMERIC_COLUMNS.indexOf(colId) > -1 });
     }
-    state.filteredRows = state.rows.filter((r) => {
+    const scopeRows = state.rows.filter((r) => {
+      if (!matchesRequestTypeFilter(r)) return false;
       // Per-column advanced filters
       for (const filter of filters) {
         const rowValue = getRowFilterValue(r, filter.colId);
@@ -9544,9 +10319,44 @@ const _NetworkPlus = (function () {
       }
       return true;
     });
+    state.requestScopeRows = hasRequestFacets() ? scopeRows : null;
+    state.filteredRows = state.requestScopeRows ? scopeRows.filter(matchesRequestFacets) : scopeRows;
+  }
+
+  function classifyRequestFacet(row) {
+    return row._pendingRequest === true ? 'pending' : classifyStatusClass(row.status);
+  }
+
+  function hasRequestFacets() {
+    return !state.sampleCaptureActive &&
+      (state.requestStatusFacet !== 'all' || state.requestHostFacet !== '' || !!state.requestTimeFacet);
+  }
+
+  function matchesRequestHostFacet(row) {
+    return !state.requestHostFacet || row.domain === state.requestHostFacet;
+  }
+
+  function matchesRequestStatusFacet(row) {
+    return state.requestStatusFacet === 'all' || classifyRequestFacet(row) === state.requestStatusFacet;
+  }
+
+  function matchesRequestFacets(row) {
+    return matchesRequestHostFacet(row) && matchesRequestStatusFacet(row) && requestOverlapsRange(row, state.requestTimeFacet);
+  }
+
+  function repaintRequestScope() {
+    renderBody();
+    syncSearchUIAfterRender();
+    state.syncTrafficOverview?.(true);
   }
 
   function clearColumnFilters() {
+    if (!state.sampleCaptureActive) {
+      state.webSocketOnly = false;
+      state.requestStatusFacet = 'all';
+      state.requestHostFacet = '';
+      state.requestTimeFacet = null;
+    }
     state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
     renderBody();
     syncSearchUIAfterRender();
@@ -9782,6 +10592,12 @@ const _NetworkPlus = (function () {
       clientStartEpoch,
       serverDoneEpoch,
       duration: durationMs,
+      ...(req.overviewUnknownStart === true ? { _overviewUnknownStart: true } : {}),
+      ...(req.wsArchive === true ? { _wsArchive: true } : {}),
+      ...(Number.isSafeInteger(req.wsArchiveOmitted) && req.wsArchiveOmitted > 0
+        ? { _wsArchiveOmitted: req.wsArchiveOmitted } : {}),
+      ...(req.overviewUnknownDuration === true || !Number.isFinite(req.time) || req.time < 0
+        ? { _overviewUnknownDuration: true } : {}),
       startedDateTime: isoStr,
       requestHeaders: (req && req.request && req.request.headers) || [],
       responseHeaders: (req && req.response && req.response.headers) || [],
@@ -9855,8 +10671,12 @@ const _NetworkPlus = (function () {
     return {
       id: row.id,
       ...(row._pendingRequest ? { pending: true } : {}),
+      ...(row._overviewUnknownStart ? { overviewUnknownStart: true } : {}),
+      ...(row._overviewUnknownDuration ? { overviewUnknownDuration: true } : {}),
+      ...(row._wsArchive ? { wsArchive: true } : {}),
+      ...(row._wsArchiveOmitted ? { wsArchiveOmitted: row._wsArchiveOmitted } : {}),
       ...(isLiveStreamRow(row) ? { streamRevision: row._streamRevision || 0 } : {}),
-      ...(row.method === 'WS' || row._wsFrames?.length > 0 ? { webSocket: true } : {}),
+      ...((row.method === 'WS' && !row._wsArchive) || row._wsFrames?.length > 0 ? { webSocket: true } : {}),
       startedDateTime: row.startedDateTime,
       time: row.duration,
       initiator: row.initiator || null,
@@ -9889,6 +10709,10 @@ const _NetworkPlus = (function () {
     return {
       startedDateTime: typeof wire.startedDateTime === 'string' ? wire.startedDateTime : '',
       time: Number.isFinite(wire.time) ? wire.time : 0,
+      ...(wire.overviewUnknownStart === true ? { overviewUnknownStart: true } : {}),
+      ...(wire.overviewUnknownDuration === true || !Number.isFinite(wire.time) ? { overviewUnknownDuration: true } : {}),
+      ...(wire.wsArchive === true ? { wsArchive: true } : {}),
+      ...(Number.isSafeInteger(wire.wsArchiveOmitted) && wire.wsArchiveOmitted > 0 ? { wsArchiveOmitted: wire.wsArchiveOmitted } : {}),
       request: {
         method: request.method,
         url: request.url,
@@ -9902,16 +10726,16 @@ const _NetworkPlus = (function () {
   }
 
   // ---- WebSocket capture (opt-in, no extra permissions) ----
-  // chrome.devtools.network never surfaces WebSocket traffic to extensions,
-  // and the chrome.debugger alternative cannot even attach while DevTools is
-  // open on the tab. Capture therefore wraps the inspected page's WebSocket
-  // constructor through inspectedWindow.eval: the wrapper queues connection
-  // events and frame previews inside the page, and the panel drains the
-  // queue once a second. Honest limits: only sockets created while capture
-  // is on are seen, the wrapper lives in the page's JS environment (traffic
-  // itself is never altered), and a navigation wipes it until reinjection.
+  // Chromium's DevTools HAR contains native WebSocket frames. The page
+  // wrapper is used when a host has no DevTools HAR API.
   const WS_QUEUE_CAP = 5000;
   const WS_FRAME_PREVIEW_CHARS = 2048;
+  // Full text stays in the inspected document until explicitly downloaded.
+  // Count UTF-16 units conservatively as at most two bytes each.
+  const WS_FULL_TEXT_LIMIT_CHARS = 8 * 1024 * 1024;
+  const WS_FULL_TEXT_CHUNK_CHARS = 64 * 1024;
+  const WS_FULL_TEXT_READ_TIMEOUT_MS = 20000;
+  const WS_MESSAGE_HISTORY_LIMIT = 100;
   const WS_DIRECTION_TEXT_LIMIT_CHARS = 262144;
   const WS_POLL_INTERVAL_MS = 1000;
   const STREAM_CAPTURE_MEMORY_BUDGET = 32 * 1024 * 1024;
@@ -9933,6 +10757,51 @@ const _NetworkPlus = (function () {
       (status === 101 && Array.isArray(responseHeaders) && responseHeaders.some((header) =>
         header && /^upgrade$/i.test(header.name) && /^websocket$/i.test(String(header.value).trim()),
       ));
+  }
+
+  function matchesRequestTypeFilter(row) {
+    return !state.webSocketOnly || state.sampleCaptureActive || isWebSocketRow(row);
+  }
+
+  function isNativeWebSocketEntry(entry) {
+    return Array.isArray(entry?._webSocketMessages) && typeof entry.request?.url === 'string' &&
+      entry.request.url.length <= STREAM_URL_LIMIT_CHARS && /^wss?:\/\//i.test(entry.request.url) &&
+      Number.isFinite(Date.parse(entry.startedDateTime));
+  }
+
+  function getNativeWebSocketKey(entry) {
+    if (!isNativeWebSocketEntry(entry)) return '';
+    const headers = entry.request.headers;
+    const key = Array.isArray(headers) && headers.find((header) =>
+      typeof header?.name === 'string' && header.name.toLowerCase() === 'sec-websocket-key')?.value;
+    return typeof key === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(key)
+      ? 'nonce:' + key
+      : '';
+  }
+
+  function planNativeWebSocketFrames(entry, cursor, socketId, minimumEpoch) {
+    const messages = entry._webSocketMessages;
+    const events = [];
+    const first = Math.max(cursor, messages.length - WS_QUEUE_CAP);
+    for (let index = first; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (!message || (message.type !== 'send' && message.type !== 'receive') ||
+          (message.opcode !== 1 && message.opcode !== 2) || typeof message.data !== 'string') continue;
+      const at = getHarWsTime(message);
+      if (at === null || at <= minimumEpoch) continue;
+      const binary = message.opcode === 2;
+      const data = message.data;
+      const truncated = !binary && data.length > WS_FRAME_PREVIEW_CHARS;
+      const padding = binary ? data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0 : 0;
+      const preview = binary ? '[binary ' + Math.max(0, Math.floor(data.length * 3 / 4) - padding) + ' bytes]' :
+        truncated ? data.slice(0, WS_FRAME_PREVIEW_CHARS).split('').join('') : data;
+      events.push({
+        kind: message.type === 'send' ? 'ws-sent' : 'ws-received',
+        socketId, at, binary, preview, truncated,
+        ...(truncated && data.length <= WS_FULL_TEXT_LIMIT_CHARS ? { fullIndex: index, fullLength: data.length } : {}),
+      });
+    }
+    return { events, cursor: Math.max(cursor, messages.length), skipped: Math.max(0, first - cursor) };
   }
 
   function describeWebSocketExport(row) {
@@ -9963,17 +10832,49 @@ const _NetworkPlus = (function () {
         message.opcode === 1 && typeof message.data === 'string' && message.data.length <= WS_FRAME_PREVIEW_CHARS);
   }
 
-  function pageWebSocketWrapper(queueCap, previewChars, urlLimit) {
+  function pageWebSocketWrapper(queueCap, previewChars, urlLimit, fullLimit, fullChunkSize, allowFullCapture, captureKey) {
     if (window.__networkPlusWS__) {
       window.__networkPlusWS__.setEnabled(true);
+      window.__networkPlusWS__.configureFullCapture?.(captureKey, allowFullCapture);
       return 'already-installed';
     }
     const queue = [];
     let enabled = true;
+    let fullCapture = allowFullCapture && !!captureKey;
     let nextSocketId = 1;
+    let nextFrameId = 0;
+    const frameNamespace = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    const fullFrames = new Map();
+    let fullChars = 0;
+    const clearFullFrames = function () {
+      fullFrames.clear();
+      fullChars = 0;
+    };
+    const keepFullFrame = function (text) {
+      let copy;
+      try {
+        copy = structuredClone(text); // Detach a small substring from its potentially huge backing store.
+        if (typeof copy !== 'string' || copy.length !== text.length) return undefined;
+      } catch (_error) {
+        return undefined;
+      }
+      while (fullChars + text.length > fullLimit) {
+        const oldest = fullFrames.keys().next().value;
+        fullChars -= fullFrames.get(oldest).length;
+        fullFrames.delete(oldest);
+      }
+      const key = frameNamespace + '-' + (++nextFrameId).toString(36);
+      fullFrames.set(key, copy);
+      fullChars += text.length;
+      return key;
+    };
     const preview = function (data) {
       try {
-        if (typeof data === 'string') return data.slice(0, previewChars);
+        // Materialize a small independent string instead of a V8 slice
+        // that can keep its much larger backing string alive in the queue.
+        if (typeof data === 'string') {
+          return data.length <= previewChars ? data : data.slice(0, previewChars).split('').join('');
+        }
         if (data && typeof data.byteLength === 'number') return '[binary ' + data.byteLength + ' bytes]';
         if (data && typeof data.size === 'number') return '[binary ' + data.size + ' bytes]';
         return '[unsupported frame]';
@@ -10003,6 +10904,15 @@ const _NetworkPlus = (function () {
         droppedCount += 1;
       }
     };
+    const recordFrame = function (kind, socketId, data, binary) {
+      if (!enabled) return;
+      const truncated = typeof data === 'string' && data.length > previewChars;
+      const fullId = fullCapture && truncated && data.length <= fullLimit ? keepFullFrame(data) : undefined;
+      record({
+        kind, socketId, preview: preview(data), binary, truncated, fullId,
+        fullLength: fullId ? data.length : undefined,
+      });
+    };
     const Native = window.WebSocket;
     const Wrapped = function (url, protocols) {
       const socket = protocols === undefined ? new Native(url) : new Native(url, protocols);
@@ -10018,14 +10928,15 @@ const _NetworkPlus = (function () {
       const nativeSend = socket.send.bind(socket);
       socket.send = function (data) {
         const result = nativeSend(data);
-        record({ kind: 'ws-sent', socketId, preview: preview(data), binary: ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob) });
+        recordFrame('ws-sent', socketId, data,
+          ArrayBuffer.isView(data) || data instanceof ArrayBuffer || (typeof Blob === 'function' && data instanceof Blob));
         return result;
       };
       socket.addEventListener('open', function () {
         record({ kind: 'ws-open', socketId });
       });
       socket.addEventListener('message', function (event) {
-        record({ kind: 'ws-received', socketId, preview: preview(event.data), binary: typeof event.data !== 'string' });
+        recordFrame('ws-received', socketId, event.data, typeof event.data !== 'string');
       });
       socket.addEventListener('error', function () {
         record({ kind: 'ws-error', socketId });
@@ -10052,13 +10963,50 @@ const _NetworkPlus = (function () {
       },
       setEnabled: function (value) {
         enabled = value === true;
+        if (!enabled) clearFullFrames();
+      },
+      configureFullCapture: function (key, value) {
+        // A reopened DevTools panel starts a new session. It cannot read
+        // any full content retained under the previous credential.
+        if (key !== captureKey) clearFullFrames();
+        captureKey = key;
+        fullCapture = typeof key === 'string' && !!key && value === true;
+      },
+      setFullCapture: function (key, value) {
+        if (key && key === captureKey) fullCapture = value === true;
+      },
+      clearFullFrames: function (key) {
+        if (key && key === captureKey) clearFullFrames();
+      },
+      readFullFrame: function (key, id, offset) {
+        if (!key || key !== captureKey) return null;
+        const data = fullFrames.get(id);
+        if (!data || !Number.isInteger(offset) || offset < 0 || offset >= data.length) return null;
+        return data.slice(offset, offset + fullChunkSize);
       },
     };
     return 'installed';
   }
 
-  function buildWsWrapperSource() {
-    return '(' + String(pageWebSocketWrapper) + ')(' + WS_QUEUE_CAP + ',' + WS_FRAME_PREVIEW_CHARS + ',' + STREAM_URL_LIMIT_CHARS + ')';
+  function buildWsWrapperSource(allowFullCapture = true, captureKey = '') {
+    return '(' + String(pageWebSocketWrapper) + ')(' +
+      [WS_QUEUE_CAP, WS_FRAME_PREVIEW_CHARS, STREAM_URL_LIMIT_CHARS, WS_FULL_TEXT_LIMIT_CHARS,
+        WS_FULL_TEXT_CHUNK_CHARS, allowFullCapture === true, JSON.stringify(captureKey)].join(',') + ')';
+  }
+
+  function pageReadWsFullFrame(key, id, offset, expected) {
+    try {
+      const part = window.__networkPlusWS__?.readFullFrame?.(key, id, offset);
+      return typeof part === 'string' && part.length === expected ? part : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function buildWsFullFrameReadSource(key, frame, offset) {
+    const expected = Math.min(WS_FULL_TEXT_CHUNK_CHARS, frame.fullLength - offset);
+    return '(' + String(pageReadWsFullFrame) + ')(' +
+      [JSON.stringify(key), JSON.stringify(frame.fullId), offset, expected].join(',') + ')';
   }
 
   // The SSE wrapper speaks the same ws-* event dialect as the WebSocket
@@ -10196,6 +11144,9 @@ const _NetworkPlus = (function () {
         preview: typeof event.preview === 'string' && event.preview.length <= previewChars
           ? event.preview : undefined,
         binary: typeof event.binary === 'boolean' ? event.binary : undefined,
+        truncated: typeof event.truncated === 'boolean' ? event.truncated : undefined,
+        fullId: typeof event.fullId === 'string' && event.fullId.length <= 64 ? event.fullId : undefined,
+        fullLength: Number.isSafeInteger(event.fullLength) ? event.fullLength : undefined,
         reason: typeof event.reason === 'string' && event.reason.length <= 256 ? event.reason : undefined,
         code: typeof event.code === 'number' ? event.code : undefined,
         count: typeof event.count === 'number' ? event.count : undefined,
@@ -10293,7 +11244,8 @@ const _NetworkPlus = (function () {
       case 'ws-sent':
       case 'ws-received':
         return typeof event.preview === 'string' && event.preview.length <= WS_FRAME_PREVIEW_CHARS &&
-          (event.binary === undefined || typeof event.binary === 'boolean');
+          (event.binary === undefined || typeof event.binary === 'boolean') &&
+          (event.truncated === undefined || typeof event.truncated === 'boolean');
       case 'ws-closed':
         return (event.code === undefined || Number.isInteger(event.code) && event.code >= 0 && event.code <= 65535) &&
           (event.reason === undefined || typeof event.reason === 'string' && event.reason.length <= 256);
@@ -10310,6 +11262,7 @@ const _NetworkPlus = (function () {
   // and creation so the same logic is testable without a DevTools session.
   function ingestWsEvents(events, context) {
     const changedRows = new Set();
+    const responseRows = new Set();
     for (const event of Array.isArray(events) ? events : []) {
       if (!isValidStreamEvent(event, context.variant)) continue;
       if (event.kind === 'ws-open-attempt') {
@@ -10340,7 +11293,7 @@ const _NetworkPlus = (function () {
         if (line && keepTranscript) {
           row.responseContent = nextText;
           if (isLiveStreamRow(row)) {
-            publishStreamTranscript(row);
+            responseRows.add(row);
           } else {
             row.responseContentState = 'pending-admission';
             row.responseContentEncoding = '';
@@ -10368,17 +11321,40 @@ const _NetworkPlus = (function () {
           }
         }
       }
-      if (hasStructuredFrame && keepTranscript) {
+      if (hasStructuredFrame) {
         const binary = event.binary === true;
-        recordWsFrame(row, {
+        const frame = {
           type: sent ? 'send' : 'receive',
           time: event.at,
           binary,
           data: binary ? '' : event.preview,
-        });
+        };
+        if (keepTranscript) recordWsFrame(row, frame);
+        // The messages pane retains the latest history, independently of
+        // the full HAR's existing first-frames retention.
+        const evicted = row._wsMessages?.length === WS_MESSAGE_HISTORY_LIMIT ? row._wsMessages[0] : null;
+        const historyBytes = evicted ? 2 * (frame.data.length - evicted.data.length) : 128 + 2 * frame.data.length;
+        if (!context.allowMessage || context.allowMessage(row, historyBytes)) {
+          const binaryLength = binary ? /^\[binary (\d+) bytes\]$/.exec(event.preview) : null;
+          const bytes = binaryLength ? Number(binaryLength[1]) : null;
+          recordWsMessage(row, {
+            ...frame,
+            bytes: Number.isSafeInteger(bytes) ? bytes : null,
+            truncated: !binary && event.truncated === true,
+            ...(!binary && event.truncated === true && typeof event.fullId === 'string' &&
+              /^[a-z0-9-]{1,64}$/.test(event.fullId) && Number.isSafeInteger(event.fullLength) &&
+              event.fullLength > WS_FRAME_PREVIEW_CHARS && event.fullLength <= WS_FULL_TEXT_LIMIT_CHARS
+              ? { fullId: event.fullId, fullLength: event.fullLength, fullGeneration: context.fullFrameGeneration } : {}),
+            ...(row._readWsHarEntry && Number.isSafeInteger(event.fullIndex)
+              ? { fullIndex: event.fullIndex, fullLength: event.fullLength, fullGeneration: context.fullFrameGeneration } : {}),
+          });
+        } else {
+          row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + 1;
+        }
       }
       changedRows.add(row);
     }
+    for (const row of responseRows) publishStreamTranscript(row);
     return Array.from(changedRows);
   }
 
@@ -10427,6 +11403,32 @@ const _NetworkPlus = (function () {
     return chars;
   }
 
+  const WS_MESSAGES_UNAVAILABLE_REASON = 'WebSocket messages are unavailable from this DevTools session.';
+
+  function readWsMessagesSnapshot(revision, frames, omitted) {
+    if (!Number.isSafeInteger(revision) || revision < 0 ||
+        !Number.isSafeInteger(omitted) || omitted < 0 ||
+        !Array.isArray(frames) || frames.length > WS_MESSAGE_HISTORY_LIMIT) return null;
+    const messages = [];
+    const ids = new Set();
+    // Only bounded fields travel over the port. Even with six-character JSON
+    // escapes throughout every preview, 100 messages fit below 2 MiB.
+    for (const frame of frames) {
+      if (!isRecord(frame)) return null;
+      const { id, type, time, binary, bytes, data, truncated } = frame;
+      if (!Number.isSafeInteger(id) || id <= 0 || ids.has(id) ||
+          (type !== 'send' && type !== 'receive') ||
+          (time !== null && !isStreamEpoch(time)) ||
+          typeof binary !== 'boolean' ||
+          (bytes !== null && (!Number.isSafeInteger(bytes) || bytes < 0)) ||
+          typeof data !== 'string' || data.length > WS_FRAME_PREVIEW_CHARS ||
+          typeof truncated !== 'boolean') return null;
+      ids.add(id);
+      messages.push({ id, type, time, binary, bytes, data, truncated });
+    }
+    return { revision, frames: messages, omitted };
+  }
+
   function createMirrorHostSession({
     postMessage,
     getRows,
@@ -10441,6 +11443,7 @@ const _NetworkPlus = (function () {
     let pendingRowsEnabled = false;
     const getMirroredRows = () => getRows().filter((row) => pendingRowsEnabled || !row._pendingRequest);
     const importTransfers = new Map();
+    const fullSearches = new Map();
     // Row ids restart at 1 in every DevTools session, and a mirror tab keeps
     // its rows after a disconnect. Without a session identity, a reattached
     // tab would alias the old session's rows onto the new session's ids and
@@ -10465,6 +11468,8 @@ const _NetworkPlus = (function () {
         total: rows.length,
         protocolVersion: MIRROR_PROTOCOL_VERSION,
         webSocketExport: true,
+        webSocketMessages: true,
+        fullPayloadSearch: true,
         streamHarExport: true,
       });
       let chunk = [];
@@ -10522,6 +11527,73 @@ const _NetworkPlus = (function () {
       for (let offset = 0; offset === 0 || offset < frames.length; offset += MIRROR_WS_EXPORT_CHUNK_SIZE) {
         const chunk = frames.slice(offset, offset + MIRROR_WS_EXPORT_CHUNK_SIZE).map(toHarWebSocketMessage);
         postMessage({ ...result, offset, frames: chunk, complete: offset + chunk.length === frames.length });
+      }
+    };
+    const sendWsMessages = ({ requestId, viewer, rowId, session, minimumRevision }) => {
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer || viewer.length > 128 ||
+          !Number.isSafeInteger(requestId) || requestId <= 0 ||
+          !Number.isSafeInteger(rowId) || rowId <= 0 ||
+          !Number.isSafeInteger(minimumRevision) || minimumRevision < 0) return;
+      const result = { type: 'ws-messages-result', requestId, viewer, rowId, session };
+      const row = getRows().find((candidate) => candidate.id === rowId && !candidate._pendingRequest);
+      const revision = row?._streamRevision || 0;
+      if (!row || revision < minimumRevision || (row.method !== 'WS' && !Array.isArray(row._wsMessages))) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      const snapshot = readWsMessagesSnapshot(revision, row._wsMessages ?? [], row._wsMessagesOmitted ?? 0);
+      postMessage(snapshot ? { ...result, ok: true, ...snapshot } : { ...result, ok: false });
+    };
+    const fullSearchKey = ({ viewer, requestId }) => viewer + ':' + requestId;
+    const sendFullSearch = async (message) => {
+      const { requestId, viewer, rowId, session, queries, options, after, frameIds } = message;
+      if (session !== sessionToken || typeof viewer !== 'string' || !viewer || viewer.length > 128 ||
+          !Number.isSafeInteger(requestId) || requestId <= 0 || !Number.isSafeInteger(rowId) || rowId <= 0) return;
+      const result = { type: 'full-search-result', requestId, viewer, rowId, session };
+      if (!Array.isArray(queries) || queries.length === 0 || queries.length > 16 ||
+          queries.some(query => typeof query !== 'string' || !query.trim() || query.length > 2048) || fullSearches.size >= 8) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      const row = getRows().find(candidate => candidate.id === rowId && !candidate._pendingRequest);
+      if (!row || row._retentionDisposed) {
+        postMessage({ ...result, ok: false });
+        return;
+      }
+      const key = fullSearchKey(message);
+      if (fullSearches.has(key)) return;
+      const controller = new AbortController();
+      fullSearches.set(key, controller);
+      const current = () => !controller.signal.aborted && !row._retentionDisposed;
+      try {
+        let hits = null;
+        if (Array.isArray(frameIds) && queries.length === 1 && frameIds.length <= WS_MESSAGE_HISTORY_LIMIT &&
+            frameIds.every(id => Number.isSafeInteger(id) && id > 0)) {
+          const ids = new Set(frameIds);
+          const frames = (row._wsMessages || []).filter(frame => !frame.binary && frame.truncated && ids.has(frame.id));
+          const found = await findFullWsMatches(row, frames, queries[0], current, controller.signal);
+          hits = { checked: Array.from(found.checked), matches: Array.from(found.matches) };
+        } else if (frameIds === null && (after === null || Number.isSafeInteger(after) && after >= 0 && queries.length === 1)) {
+          const queryOptions = {
+            caseSensitive: options?.caseSensitive === true,
+            wholeWord: options?.wholeWord === true,
+            regex: options?.regex === true,
+          };
+          const rules = queries.map(query => compileSearchQuery(query, queryOptions).regex);
+          if (rules.every(Boolean)) {
+            const search = createPayloadSearcher(controller.signal);
+            try {
+              hits = await search.scan(await readSearchableResponse(row, current), rules, after);
+            } finally {
+              search.close();
+            }
+          }
+        }
+        if (current()) postMessage({ ...result, ok: hits !== null, hits });
+      } catch (_error) {
+        if (current()) postMessage({ ...result, ok: false });
+      } finally {
+        fullSearches.delete(key);
       }
     };
     const sendStreamHar = ({ requestId, viewer, rowId, session, minimumRevision, includeBodies }) => {
@@ -10594,6 +11666,18 @@ const _NetworkPlus = (function () {
       }
       if (message.type === 'ws-export-request') {
         sendWebSocketExport(message);
+        return;
+      }
+      if (message.type === 'ws-messages-request') {
+        sendWsMessages(message);
+        return;
+      }
+      if (message.type === 'full-search-request') {
+        sendFullSearch(message);
+        return;
+      }
+      if (message.type === 'full-search-cancel') {
+        if (message.session === sessionToken) fullSearches.get(fullSearchKey(message))?.abort();
         return;
       }
       if (message.type === 'stream-har-request') {
@@ -10748,10 +11832,14 @@ const _NetworkPlus = (function () {
         }
         postMessage({ type: 'row', session: sessionToken, row: serializeRowForMirror(row) });
       },
-      resetPeer: () => { pendingRowsEnabled = false; },
+      resetPeer: () => {
+        pendingRowsEnabled = false;
+        for (const search of fullSearches.values()) search.abort();
+      },
       // A viewer that disconnects mid-transfer would otherwise leave its
       // accumulated chunks parked in this map forever.
       dropImportTransfers: () => {
+        for (const search of fullSearches.values()) search.abort();
         for (const [key, transfer] of importTransfers) failImport(key, transfer, 'The import transfer was interrupted.');
       },
     };
@@ -10783,6 +11871,8 @@ const _NetworkPlus = (function () {
     // reconciled.
     let hostSessionToken = null;
     let webSocketExportSupported = false;
+    let webSocketMessagesSupported = false;
+    let fullPayloadSearchSupported = false;
     let streamHarExportSupported = false;
     const settleExport = (requestId, error, payload = null) => {
       const pending = pendingExportCallbacks.get(requestId);
@@ -10799,11 +11889,20 @@ const _NetworkPlus = (function () {
       const timeoutReason = {
         'body-request': 'The DevTools session did not answer the body request in time.',
         'ws-export-request': 'The DevTools session did not answer the WebSocket export request in time.',
+        'ws-messages-request': WS_MESSAGES_UNAVAILABLE_REASON,
+        'full-search-request': 'The DevTools session did not answer the full text search in time.',
         'stream-har-request': STREAM_HAR_UNAVAILABLE_REASON,
       }[type];
-      pending.timer = setTimeout(() => settleExport(
-        requestId, new Error(timeoutReason),
-      ), RESPONSE_CONTENT_TIMEOUT_MS);
+      pending.timer = setTimeout(() => {
+        if (type === 'full-search-request') {
+          try {
+            postMessage({ type: 'full-search-cancel', requestId, viewer: viewerNonce, session: pending.session });
+          } catch (_error) {
+            // The peer may already be gone.
+          }
+        }
+        settleExport(requestId, new Error(timeoutReason));
+      }, type === 'full-search-request' ? WS_FULL_TEXT_READ_TIMEOUT_MS : RESPONSE_CONTENT_TIMEOUT_MS);
       pendingExportCallbacks.set(requestId, pending);
       if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
       try {
@@ -10813,14 +11912,56 @@ const _NetworkPlus = (function () {
         pendingExportCallbacks.delete(requestId);
         throw error;
       }
+      return requestId;
     };
     const requestBody = (rowId, callback) => requestExport('body-request', rowId, callback);
+    const requestFullSearch = (rowId, session, queries, options, after, frameIds, signal) => {
+      if (!fullPayloadSearchSupported || pendingSnapshot || !session || session !== hostSessionToken || signal?.aborted) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        const abort = () => {
+          try {
+            postMessage({ type: 'full-search-cancel', requestId, viewer: viewerNonce, session });
+          } catch (_error) {
+            // Disconnect also expires host work.
+          }
+          settleExport(requestId, null, null);
+        };
+        const requestId = requestExport('full-search-request', rowId, (_error, result) => {
+          signal?.removeEventListener('abort', abort);
+          resolve(result);
+        }, { session, queries, options, after, frameIds });
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+    };
     const requestWebSocketExport = (rowId, session, includeFrames, callback) => {
       if (!webSocketExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
         callback(new Error('WebSocket frames are unavailable from this DevTools session.'), null);
         return;
       }
       requestExport('ws-export-request', rowId, callback, { session, includeFrames });
+    };
+    const requestWsMessages = (rowId, session, minimumRevision, callback) => {
+      if (!webSocketMessagesSupported || pendingSnapshot || !session || session !== hostSessionToken ||
+          !Number.isSafeInteger(rowId) || rowId <= 0 ||
+          !Number.isSafeInteger(minimumRevision) || minimumRevision < 0) {
+        callback(new Error(WS_MESSAGES_UNAVAILABLE_REASON), null);
+        return;
+      }
+      requestExport('ws-messages-request', rowId, callback, { session, minimumRevision });
+    };
+    const receiveWsMessages = (message) => {
+      const { requestId, rowId, session, viewer, revision, frames, omitted } = message;
+      const pending = pendingExportCallbacks.get(requestId);
+      if (pending?.type !== 'ws-messages-request' || rowId !== pending.rowId ||
+          session !== pending.session || session !== hostSessionToken || viewer !== viewerNonce) return;
+      const snapshot = message.ok === true && readWsMessagesSnapshot(revision, frames, omitted);
+      if (!snapshot || snapshot.revision < pending.minimumRevision) {
+        settleExport(requestId, new Error(WS_MESSAGES_UNAVAILABLE_REASON));
+        return;
+      }
+      settleExport(requestId, null, snapshot);
     };
     const requestStreamHar = (rowId, session, minimumRevision, includeBodies, callback) => {
       if (!streamHarExportSupported || pendingSnapshot || !session || session !== hostSessionToken) {
@@ -11009,11 +12150,19 @@ const _NetworkPlus = (function () {
             sessionChanged,
             session,
             webSocketExport: message.webSocketExport === true,
+            webSocketMessages: message.webSocketMessages === true,
+            fullPayloadSearch: message.fullPayloadSearch === true,
             streamHarExport: message.streamHarExport === true,
           };
           for (const [requestId, pending] of pendingExportCallbacks) {
             if (pending.type === 'ws-export-request' && (sessionChanged || !pendingSnapshot.webSocketExport)) {
               settleExport(requestId, new Error('The DevTools session changed during the WebSocket export.'));
+            }
+            if (pending.type === 'ws-messages-request' && (sessionChanged || !pendingSnapshot.webSocketMessages)) {
+              settleExport(requestId, new Error(WS_MESSAGES_UNAVAILABLE_REASON));
+            }
+            if (pending.type === 'full-search-request' && (sessionChanged || !pendingSnapshot.fullPayloadSearch)) {
+              settleExport(requestId, null, null);
             }
             if (pending.type === 'stream-har-request' && (sessionChanged || !pendingSnapshot.streamHarExport)) {
               settleExport(requestId, new Error(STREAM_HAR_UNAVAILABLE_REASON));
@@ -11038,6 +12187,8 @@ const _NetworkPlus = (function () {
             pendingSnapshot = null;
             hostSessionToken = snapshot.session;
             webSocketExportSupported = snapshot.webSocketExport && Boolean(snapshot.session);
+            webSocketMessagesSupported = snapshot.webSocketMessages && Boolean(snapshot.session);
+            fullPayloadSearchSupported = snapshot.fullPayloadSearch && Boolean(snapshot.session);
             streamHarExportSupported = snapshot.streamHarExport && Boolean(snapshot.session);
             applyWireSnapshot(snapshot.rows, { sessionChanged: snapshot.sessionChanged, session: snapshot.session });
           }
@@ -11073,8 +12224,21 @@ const _NetworkPlus = (function () {
           else settleExport(message.requestId, new Error(message.error || 'Response content is unavailable.'));
           break;
         }
+        case 'full-search-result': {
+          const pending = pendingExportCallbacks.get(message.requestId);
+          if (pending?.type === 'full-search-request' && message.viewer === viewerNonce &&
+              message.session === hostSessionToken && message.session === pending.session && message.rowId === pending.rowId) {
+            const hits = message.ok === true ? validateMirrorSearchResult(message.hits, pending) : null;
+            settleExport(message.requestId, null, hits);
+          }
+          break;
+        }
         case 'ws-export-result': {
           receiveWebSocketExport(message);
+          break;
+        }
+        case 'ws-messages-result': {
+          receiveWsMessages(message);
           break;
         }
         case 'stream-har-result': {
@@ -11100,6 +12264,8 @@ const _NetworkPlus = (function () {
     const failPendingBodyRequests = (reason) => {
       pendingSnapshot = null;
       webSocketExportSupported = false;
+      webSocketMessagesSupported = false;
+      fullPayloadSearchSupported = false;
       streamHarExportSupported = false;
       const failures = Array.from(pendingExportCallbacks.values());
       pendingExportCallbacks.clear();
@@ -11115,13 +12281,17 @@ const _NetworkPlus = (function () {
       }
     };
     return {
-      handleMessage, requestBody, requestWebSocketExport, requestStreamHar,
+      handleMessage, requestBody, requestFullSearch, requestWebSocketExport, requestWsMessages, requestStreamHar,
+      supportsFullSearch: () => fullPayloadSearchSupported,
       sendCommand, sendImportFile, sendHarStream, failPendingBodyRequests,
     };
   }
 
-  function fetchResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
-    if (row._responsePayloadPromise) return row._responsePayloadPromise;
+  function fetchResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS, maxBytes = Infinity) {
+    // An explicit Full HAR may start while bounded prefetch is pending.
+    // Measurement stays separate so its cache verdict cannot omit that export.
+    const promiseKey = maxBytes === Infinity ? '_responsePayloadPromise' : '_boundedResponsePayloadPromise';
+    if (row[promiseKey]) return row[promiseKey];
     const requestLabel = row.id == null ? 'unknown request' : 'request ' + row.id;
     if (typeof row._mirrorFetchBody === 'function') {
       // Mirror rows hold no getContent; the DevTools session serves the body
@@ -11147,6 +12317,7 @@ const _NetworkPlus = (function () {
                     payload.encoding,
                     resolveRowResponseCharset(row),
                     isHtmlLikeMime(row.type),
+                    maxBytes,
                   ),
                 );
               } catch (error) {
@@ -11168,17 +12339,35 @@ const _NetworkPlus = (function () {
             },
           );
       });
-      row._responsePayloadPromise = pending;
+      row[promiseKey] = pending;
       pending.then(
         () => {
-          if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
+          if (row[promiseKey] === pending) row[promiseKey] = null;
         },
         () => {
-          if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
+          if (row[promiseKey] === pending) row[promiseKey] = null;
         },
       );
       return pending;
     }
+    const pending = fetchRawLiveResponsePayload(row, timeoutMs).then(({ content, encoding }) => {
+      try {
+        return measureResponsePayload(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type), maxBytes);
+      } catch (error) {
+        throw new Error('Failed to process response content for ' + requestLabel + ': ' + error.message, { cause: error });
+      }
+    });
+    row[promiseKey] = pending;
+    const clear = () => {
+      if (row[promiseKey] === pending) row[promiseKey] = null;
+    };
+    pending.then(clear, clear);
+    return pending;
+  }
+
+  function fetchRawLiveResponsePayload(row, timeoutMs = RESPONSE_CONTENT_TIMEOUT_MS) {
+    if (row._liveRawResponsePromise) return row._liveRawResponsePromise;
+    const requestLabel = row.id == null ? 'unknown request' : 'request ' + row.id;
     if (!row._reqObj || typeof row._reqObj.getContent !== 'function') {
       return Promise.reject(new Error('Response content is unavailable for ' + requestLabel));
     }
@@ -11208,30 +12397,19 @@ const _NetworkPlus = (function () {
             fail('Failed to retrieve response content for ' + requestLabel + ': ' + runtimeError);
             return;
           }
-          let payload;
-          try {
-            payload = measureResponsePayload(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
-          } catch (error) {
-            fail('Failed to process response content for ' + requestLabel + ': ' + error.message);
-            return;
-          }
           settled = true;
           clearTimeout(timeoutId);
-          resolve(payload);
+          resolve({ content, encoding });
         });
       } catch (error) {
         fail('Failed to retrieve response content for ' + requestLabel + ': ' + error.message);
       }
     });
-    row._responsePayloadPromise = pending;
-    pending.then(
-      () => {
-        if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
-      },
-      () => {
-        if (row._responsePayloadPromise === pending) row._responsePayloadPromise = null;
-      },
-    );
+    row._liveRawResponsePromise = pending;
+    const clear = () => {
+      if (row._liveRawResponsePromise === pending) row._liveRawResponsePromise = null;
+    };
+    pending.then(clear, clear);
     return pending;
   }
 
@@ -11254,10 +12432,18 @@ const _NetworkPlus = (function () {
       touchResponseCacheRow(row);
       return Promise.resolve(row);
     }
+    if (row._managedRetention && row.responseContentSize > MAX_RESPONSE_BODY_BYTES) {
+      try {
+        return Promise.resolve(admitResponsePayload(row, { bytes: row.responseContentSize }));
+      } catch (error) {
+        row.responseContentError = error;
+        return Promise.reject(error);
+      }
+    }
 
     row.responseContentState = 'loading';
     const streamRevision = row._mirrorStreamRevision;
-    const pending = fetchResponsePayload(row, timeoutMs)
+    const pending = fetchResponsePayload(row, timeoutMs, row._managedRetention ? MAX_RESPONSE_BODY_BYTES : Infinity)
       .then((payload) => {
         if (streamRevision !== row._mirrorStreamRevision) return row;
         if (row._managedRetention) {
@@ -12074,7 +13260,6 @@ const _NetworkPlus = (function () {
   // Section 9: Safe DOM Rendering [S1][S2][S3] — NO innerHTML with user data
   // ============================================================
   const statsSummaryStructures = new WeakMap();
-  const statusSummaryInspectHandlers = new WeakMap();
 
   // Appends text with a <wbr> after every & ; / when the value has no
   // whitespace of its own. <wbr> adds nothing to textContent, so what the
@@ -12799,31 +13984,12 @@ const _NetworkPlus = (function () {
     accessibleSummary.className = 'sr-only status-summary-accessible';
     statsElement.appendChild(accessibleSummary);
 
-    const visualSummary = document.createElement('span');
-    visualSummary.className = 'status-summary-visual';
-
-    const statusLabel = document.createElement('span');
-    statusLabel.className = 'status-summary-label';
-    statusLabel.textContent = 'Status';
-    statusLabel.setAttribute('aria-hidden', 'true');
-    visualSummary.appendChild(statusLabel);
-
-    const chips = document.createElement('span');
-    chips.className = 'status-summary-chips';
-    visualSummary.appendChild(chips);
-
     const duration = document.createElement('span');
     duration.className = 'status-summary-duration';
     duration.setAttribute('aria-hidden', 'true');
-    visualSummary.appendChild(duration);
-    statsElement.appendChild(visualSummary);
+    statsElement.appendChild(duration);
 
-    const structure = {
-      accessibleSummary,
-      chips,
-      duration,
-      chipElements: new Map(),
-    };
+    const structure = { accessibleSummary, duration };
     statsSummaryStructures.set(statsElement, structure);
     return structure;
   }
@@ -12837,84 +14003,15 @@ const _NetworkPlus = (function () {
     statsSummaryStructures.delete(statsElement);
   }
 
-  function createStatusSummaryChip(statusClass, canInspect) {
-    const chip = document.createElement(canInspect ? 'button' : 'span');
-    chip.dataset.statusClass = statusClass;
-    if (canInspect) {
-      chip.type = 'button';
-      chip.addEventListener('click', () => {
-        const handler = statusSummaryInspectHandlers.get(chip);
-        if (typeof handler === 'function') handler(statusClass);
-      });
-    }
-    const label = document.createElement('span');
-    label.className = 'status-summary-chip-label';
-    label.textContent = statusClass;
-    const count = document.createElement('span');
-    count.className = 'status-summary-chip-count';
-    chip.appendChild(label);
-    chip.appendChild(document.createTextNode(' '));
-    chip.appendChild(count);
-    return chip;
-  }
-
-  function updateStatusSummaryChip(structure, indicator, onInspectStatusClass) {
-    const canInspect = indicator.count > 0 && typeof onInspectStatusClass === 'function';
-    const expectedTagName = canInspect ? 'BUTTON' : 'SPAN';
-    let chip = structure.chipElements.get(indicator.statusClass);
-    if (!chip || chip.tagName !== expectedTagName) {
-      const replacement = createStatusSummaryChip(indicator.statusClass, canInspect);
-      if (chip) {
-        chip.replaceWith(replacement);
-      } else {
-        structure.chips.appendChild(replacement);
-      }
-      structure.chipElements.set(indicator.statusClass, replacement);
-      chip = replacement;
-    }
-
-    chip.className =
-      'status-summary-chip status-summary-chip--' +
-      indicator.statusClass +
-      (canInspect ? ' status-summary-chip--action' : ' status-summary-chip--empty');
-    chip.querySelector('.status-summary-chip-count').textContent = String(indicator.count);
-    if (canInspect) {
-      const statusClassLabel =
-        indicator.statusClass === 'other' ? 'other-status' : indicator.statusClass;
-      const inspectLabel =
-        'Inspect first visible ' +
-        statusClassLabel +
-        ' request (' +
-        indicator.count +
-        ' matching)';
-      chip.setAttribute('aria-label', inspectLabel);
-      chip.removeAttribute('aria-hidden');
-      chip.title = inspectLabel;
-      statusSummaryInspectHandlers.set(chip, onInspectStatusClass);
-    } else {
-      chip.setAttribute('aria-hidden', 'true');
-      chip.removeAttribute('aria-label');
-      chip.removeAttribute('title');
-      statusSummaryInspectHandlers.delete(chip);
-    }
-  }
-
-  function renderStatsSummary(statsElement, stats, onInspectStatusClass) {
-    const indicators = getStatusClassIndicators(stats.statusClassCounts);
-    const statusText = formatStatusClassSummary(stats.statusClassCounts);
-    const durationText =
-      'avg ' +
-      fmtTime(stats.avgDuration) +
-      ' · min ' +
-      fmtTime(stats.minDuration) +
-      ' · max ' +
-      fmtTime(stats.maxDuration);
+  function renderStatsSummary(statsElement, stats) {
+    const average = fmtTime(stats.avgDuration);
+    const durationText = uiTextFormat('analysisDurationRange', {
+      average, minimum: fmtTime(stats.minDuration), maximum: fmtTime(stats.maxDuration),
+    });
     const structure = getOrCreateStatsSummaryStructure(statsElement);
-    structure.accessibleSummary.textContent = statusText + ' | ' + durationText;
-    for (const indicator of indicators) {
-      updateStatusSummaryChip(structure, indicator, onInspectStatusClass);
-    }
-    structure.duration.textContent = '| avg ' + fmtTime(stats.avgDuration);
+    structure.stats = stats;
+    structure.accessibleSummary.textContent = durationText;
+    structure.duration.textContent = uiTextFormat('analysisAverageDuration', { average });
     structure.duration.title = durationText;
   }
 
@@ -13180,7 +14277,7 @@ const _NetworkPlus = (function () {
     const methodClass = methodClassToken(row.method);
     if (methodClass) tr.classList.add(methodClass);
     // Status code row class
-    const statusClass = classifyStatusClass(row.status);
+    const statusClass = row._pendingRequest ? 'pending' : classifyStatusClass(row.status);
     if (statusClass !== 'other') tr.classList.add('status-' + statusClass);
 
     const visibleCols = getEffectiveVisibleColumns();
@@ -13259,7 +14356,8 @@ const _NetworkPlus = (function () {
         if (c.id === 'customHeader') v = getRowHeaderColumnValue(row);
         if (c.id === 'size') v = fmtBytes(row.size);
         else if (c.id === 'duration') {
-          v = fmtTime(row.duration);
+          v = row._overviewUnknownDuration && !isLiveStreamRow(row) && row._mirrorStreamRevision == null
+            ? '—' : fmtTime(row.duration);
           td.classList.add('duration-cell');
           // Color duration: green (<100ms), yellow (<500ms), orange (<2s), red (>2s)
           if (row.duration > 2000) td.classList.add('dur-slow');
@@ -13284,6 +14382,13 @@ const _NetworkPlus = (function () {
         // truncated Domain/Type/Path can be read on hover; the method pill
         // never truncates.
         if (c.id !== 'method' && text) td.title = text;
+        if (c.id === 'path' && row.domain && state.autoHiddenColumnIds.has('domain')) {
+          const host = document.createElement('span');
+          host.className = 'compact-request-host';
+          host.textContent = row.domain;
+          td.appendChild(host);
+          td.title = row.domain + text;
+        }
       }
 
       tr.appendChild(td);
@@ -13447,9 +14552,8 @@ const _NetworkPlus = (function () {
 
       // All / None sit inline with the checkboxes so the whole rule is one row.
       const allBtn = document.createElement('button');
-      allBtn.textContent = 'All';
+      allBtn.textContent = uiText('filterSelectAll');
       allBtn.className = 'filter-clear-btn filter-inline-action';
-      allBtn.setAttribute('aria-label', 'Select all Method filter values');
       allBtn.addEventListener('click', () => {
         HTTP_METHODS.forEach((m) => { include[m] = true; });
         state.columnFilterRules[colId] = { mode: 'methodSet', include: Object.assign({}, include) };
@@ -13459,9 +14563,8 @@ const _NetworkPlus = (function () {
         renderMethodCheckboxes();
       });
       const noneBtn = document.createElement('button');
-      noneBtn.textContent = 'None';
+      noneBtn.textContent = uiText('filterDeselectAll');
       noneBtn.className = 'filter-clear-btn filter-inline-action';
-      noneBtn.setAttribute('aria-label', 'Deselect all Method filter values');
       noneBtn.addEventListener('click', () => {
         HTTP_METHODS.forEach((m) => { include[m] = false; });
         state.columnFilterRules[colId] = { mode: 'methodSet', include: Object.assign({}, include) };
@@ -13495,42 +14598,100 @@ const _NetworkPlus = (function () {
       return wrap;
     }
 
-    // --- Status column: checkbox set by category (horizontal) ---
+    // --- Status column: checkbox set by category ---
     if (colId === 'status') {
+      wrap.classList.add('filter-status-rule');
       const STATUS_CATEGORIES = [
-        { label: '2xx Success', codes: [200, 201, 202, 204, 206] },
-        { label: '3xx Redirect', codes: [301, 302, 303, 304, 307, 308] },
-        { label: '4xx Client Error', codes: [400, 401, 403, 404, 405, 408, 409, 429] },
-        { label: '5xx Server Error', codes: [500, 502, 503, 504] },
+        { label: 'analysisStatusSuccess', family: 2, codes: [200, 201, 202, 204, 206] },
+        { label: 'analysisStatusRedirect', family: 3, codes: [301, 302, 303, 304, 307, 308] },
+        { label: 'analysisStatusClientError', family: 4, codes: [400, 401, 403, 404, 405, 408, 409, 429] },
+        { label: 'analysisStatusServerError', family: 5, codes: [500, 502, 503, 504] },
       ];
       const rule = state.columnFilterRules[colId];
       const isStatusSet = rule && rule.mode === 'statusSet';
       const include = isStatusSet ? Object.assign({}, rule.include) : {};
+      const draft = { mode: 'statusSet', include, excludedFamilies: isStatusSet && Array.isArray(rule.excludedFamilies)
+        ? rule.excludedFamilies.filter((family) => STATUS_CLASS_KEYS.includes(family)) : [] };
+      const save = () => {
+        state.columnFilterRules[colId] = { ...draft, include: { ...include } };
+        onChange();
+      };
+      const observedCodes = new Set(Object.keys(include).map(Number));
+      for (const row of state.rows) {
+        if (Number.isInteger(row.status) && row.status >= 0 && row.status < 600) observedCodes.add(row.status);
+      }
+      const otherCodes = [...observedCodes].filter((code) => code >= 0 && code < 200).sort((a, b) => a - b);
+      if (otherCodes.length || draft.excludedFamilies.includes('other')) {
+        STATUS_CATEGORIES.push({ label: 'analysisStatusOther', codes: otherCodes });
+      }
       // Default: all enabled (empty = show all)
 
       for (const cat of STATUS_CATEGORIES) {
-        // Category label and its codes share one row so the rule stays compact.
         const row = document.createElement('div');
-        row.className = 'filter-inline-row';
+        row.className = 'filter-status-row';
+        row.dataset.family = cat.family || 'other';
+        row.setAttribute('role', 'group');
+        const familyKey = cat.family ? cat.family + 'xx' : 'other';
+        const heading = document.createElement('div');
+        heading.className = 'filter-status-heading';
 
         const catLabel = document.createElement('div');
         catLabel.className = 'filter-status-category';
-        catLabel.textContent = cat.label;
-        row.appendChild(catLabel);
+        catLabel.id = 'filter-status-family-' + row.dataset.family;
+        row.setAttribute('aria-labelledby', catLabel.id);
+        const family = document.createElement('span');
+        family.className = 'filter-status-family';
+        family.textContent = cat.family ? cat.family + 'xx' : '—';
+        if (!cat.family) family.setAttribute('aria-hidden', 'true');
+        catLabel.append(family, ' ');
+        const description = document.createElement('span');
+        description.textContent = uiText(cat.label);
+        catLabel.appendChild(description);
+        heading.appendChild(catLabel);
+        row.appendChild(heading);
 
         const grid = document.createElement('div');
         grid.className = 'filter-checkbox-grid';
-        for (const code of cat.codes) {
+        const codes = new Set(cat.codes);
+        for (const code of observedCodes) {
+          if (Math.floor(code / 100) === cat.family) codes.add(code);
+        }
+        for (const code of [...codes].sort((a, b) => a - b)) {
           const codeStr = String(code);
-          const checked = include[codeStr] !== false;
-          const cb = createCheckboxItem(codeStr, checked, () => {
-            include[codeStr] = !include[codeStr];
-            state.columnFilterRules[colId] = { mode: 'statusSet', include: Object.assign({}, include) };
-            onChange();
+          const checked = evaluateFilterRule(codeStr, draft, true);
+          const cb = createCheckboxItem(codeStr, checked, (event) => {
+            const checkedByDefault = !draft.excludedFamilies.includes(familyKey);
+            if (event.currentTarget.checked === checkedByDefault) delete include[codeStr];
+            else include[codeStr] = event.currentTarget.checked;
+            save();
           });
           cb.className = 'filter-checkbox-inline';
           grid.appendChild(cb);
         }
+        const actions = document.createElement('div');
+        actions.className = 'filter-status-actions';
+        const categoryName = cat.family ? familyKey + ' ' + description.textContent : description.textContent;
+        for (const checked of [true, false]) {
+          const action = document.createElement('button');
+          action.type = 'button';
+          action.className = 'filter-clear-btn filter-status-action';
+          action.dataset.statusBulk = checked ? 'all' : 'none';
+          action.textContent = uiText(checked ? 'filterSelectAll' : 'filterDeselectAll');
+          action.setAttribute('aria-label', uiTextFormat(checked ? 'filterSelectFamily' : 'filterDeselectFamily', {
+            family: categoryName,
+          }));
+          action.addEventListener('click', () => {
+            draft.excludedFamilies = draft.excludedFamilies.filter((key) => key !== familyKey);
+            if (!checked) draft.excludedFamilies.push(familyKey);
+            for (const value of Object.keys(include)) {
+              if (classifyStatusClass(Number(value)) === familyKey) delete include[value];
+            }
+            for (const checkbox of grid.querySelectorAll('input[type="checkbox"]')) checkbox.checked = checked;
+            save();
+          });
+          actions.appendChild(action);
+        }
+        heading.appendChild(actions);
         row.appendChild(grid);
         wrap.appendChild(row);
       }
@@ -13747,21 +14908,35 @@ const _NetworkPlus = (function () {
     return countActiveColumnFilters(state.columnFilterRules);
   }
 
+  function createFilterPopupHeader(title) {
+    const header = document.createElement('div');
+    header.className = 'filter-popup-header';
+    const heading = document.createElement('h2');
+    heading.id = 'columnFilterTitle';
+    heading.textContent = title;
+    header.appendChild(heading);
+    return header;
+  }
+
   function createFilterPopupContent(onChange) {
     const root = document.createElement('div');
     root.className = 'filter-popup-body';
 
-    const header = document.createElement('div');
-    header.className = 'filter-popup-header';
-    header.textContent = `Column Filters (${getActiveFilterCount()} active)`;
+    const header = createFilterPopupHeader(uiText('analysisColumnFilters'));
+    const counter = document.createElement('span');
+    counter.className = 'filter-popup-count';
+    header.appendChild(counter);
     root.appendChild(header);
 
     const list = document.createElement('div');
     list.className = 'filter-popup-list';
 
     const refreshHeader = () => {
-      header.textContent = `Column Filters (${getActiveFilterCount()} active)`;
+      const count = getActiveFilterCount();
+      counter.textContent = uiTextFormat('analysisColumnFilterCount', { count });
+      counter.classList.toggle('is-active', count > 0);
     };
+    refreshHeader();
     const debouncedOnChange = debounce(onChange, FILTER_DEBOUNCE_MS);
     for (const col of state.columns) {
       if (isVisualOnlyColumn(col.id)) continue;
@@ -13773,11 +14948,10 @@ const _NetworkPlus = (function () {
       toggle.className = 'filter-section-toggle';
       const caret = document.createElement('span');
       caret.className = 'filter-section-caret';
-      caret.textContent = '▸';
       caret.setAttribute('aria-hidden', 'true');
       const name = document.createElement('span');
       name.className = 'filter-section-name';
-      name.textContent = col.label;
+      name.textContent = menuColumnLabel(col.id, col.label);
       const activeBadge = document.createElement('span');
       activeBadge.className = 'filter-section-state';
       toggle.appendChild(caret);
@@ -13785,10 +14959,12 @@ const _NetworkPlus = (function () {
       toggle.appendChild(activeBadge);
 
       const body = document.createElement('div');
+      body.id = 'filter-section-' + col.id;
       body.className = 'filter-section-body';
+      toggle.setAttribute('aria-controls', body.id);
 
       const refreshBadge = () => {
-        activeBadge.textContent = isRuleActive(state.columnFilterRules[col.id]) ? 'Active' : '';
+        activeBadge.textContent = isRuleActive(state.columnFilterRules[col.id]) ? uiText('analysisColumnFilterActive') : '';
       };
       refreshBadge();
 
@@ -13804,9 +14980,9 @@ const _NetworkPlus = (function () {
         toggle.setAttribute('aria-expanded', String(expanded));
         body.hidden = !expanded;
       };
-      // Every rule starts expanded and editable — collapsing is an opt-in way
-      // to shorten the list, never a hurdle in front of the controls.
-      setExpanded(true);
+      const currentRule = state.columnFilterRules[col.id];
+      const hasInvalidRegex = getFilterRegexError(currentRule) || currentRule?.conditions?.some(getFilterRegexError);
+      setExpanded(col.id === 'status' || isRuleActive(currentRule) || !!hasInvalidRegex);
       toggle.addEventListener('click', () => {
         setExpanded(body.hidden);
       });
@@ -13827,15 +15003,16 @@ const _NetworkPlus = (function () {
     const col = state.columns.find((c) => c.id === colId);
     if (!col || isVisualOnlyColumn(colId)) return root;
 
-    const header = document.createElement('div');
-    header.className = 'filter-popup-header';
-    header.textContent = col.label + ' Filter';
-    root.appendChild(header);
+    root.appendChild(createFilterPopupHeader(
+      uiTextFormat('analysisSingleColumnFilter', { column: menuColumnLabel(col.id, col.label) }),
+    ));
 
     const debouncedOnChange = debounce(onChange, FILTER_DEBOUNCE_MS);
     const control = createColumnFilterControl(colId, debouncedOnChange);
-    control.style.marginTop = '8px';
-    root.appendChild(control);
+    const body = document.createElement('div');
+    body.className = 'filter-popup-single-rule';
+    body.appendChild(control);
+    root.appendChild(body);
 
     return root;
   }
@@ -13869,6 +15046,709 @@ const _NetworkPlus = (function () {
     'res-preview': 'res-body',
     'res-tab-preview': 'res-body',
   });
+
+  let wsDetailsChoice = 'ws-tab-messages';
+  let wsReloadCaptureAvailable = false;
+  let wsMessagesView = null;
+  let wsMessagesRequest = null;
+
+  function isWebSocketRow(row) {
+    return !!row && (!!row._wsMessages || !!row._mirrorFetchWsMessages || !!row._wsArchiveOmitted ||
+      isWebSocketRequest(row.method, row.url, row.status, row.responseHeaders));
+  }
+
+  const WS_INLINE_JSON_LIMIT = 16 * 1024;
+  const WS_JSON_TOKEN_LIMIT = 2048;
+
+  function isWsJson(text) {
+    try {
+      JSON.parse(text);
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function planWsMessageJson(text, truncated = false) {
+    if (text.length > WS_INLINE_JSON_LIMIT) return null;
+    const separator = '\u001e';
+    if (!text.includes(separator)) return planWsJsonRecord(text, truncated);
+    const records = text.split(separator);
+    if (records.length > 17 || (!truncated && records.at(-1) !== '')) return null;
+    if (records.at(-1) === '') records.pop();
+    const formatted = [];
+    let length = 0;
+    let tail = '';
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      if (!record.trimStart().startsWith('{')) return null;
+      const recordTruncated = truncated && index === records.length - 1 && !text.endsWith(separator);
+      const json = planWsJsonRecord(record, recordTruncated);
+      if (!json) return null;
+      tail = json.tail;
+      length += json.formatted.length + tail.length + (index ? 2 : 0);
+      if (length > WS_INLINE_JSON_LIMIT) return null;
+      formatted.push(json.formatted);
+    }
+    return { envelope: '', formatted: formatted.join('\n\n'), tail };
+  }
+
+  function planWsJsonRecord(text, truncated) {
+    const json = splitWsJsonRecord(text);
+    if (!json || (!truncated && !isWsJson(json.payload))) return null;
+    const { payload, envelope } = json;
+
+    // JSON strings exclude unescaped U+0000–U+001F, even in a partial token.
+    // eslint-disable-next-line no-control-regex
+    const scanner = /[ \t\r\n]+|"(?:\\(?:["\\/bfnrt]|u[\da-fA-F]{4})|[^"\\\u0000-\u001f])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\d.eE+-])|true|false|null|[[\]{},:]/y;
+    // eslint-disable-next-line no-control-regex
+    const unfinishedString = /^"(?:\\(?:["\\/bfnrt]|u[\da-fA-F]{4})|[^"\\\u0000-\u001f])*(?:\\(?:u[\da-fA-F]{0,3})?)?$/;
+    const unfinishedNumber = /^(?:-|-?(?:0|[1-9]\d*)(?:\.|(?:\.\d+)?[eE][+-]?))$/;
+    const closers = [];
+    const tokens = [];
+    let tail = '';
+    let placeholder = '';
+    let offset = 0;
+    while (offset < payload.length) {
+      scanner.lastIndex = offset;
+      const match = scanner.exec(payload);
+      if (!match) {
+        if (!truncated) return null;
+        tail = payload.slice(offset);
+        if (unfinishedString.test(tail)) placeholder = '""';
+        else if (unfinishedNumber.test(tail) || ['true', 'false', 'null'].some((literal) => literal.startsWith(tail))) {
+          placeholder = 'null';
+        } else return null;
+        break;
+      }
+      offset = scanner.lastIndex;
+      const token = match[0];
+      if (/^[ \t\r\n]/.test(token)) continue;
+      if (token === '{' || token === '[') closers.push(token === '{' ? '}' : ']');
+      if (closers.length > 32 || tokens.length >= WS_JSON_TOKEN_LIMIT ||
+          ((token === '}' || token === ']') && closers.pop() !== token)) return null;
+      tokens.push(token);
+    }
+    if (truncated) {
+      // Complete the prefix only for syntax validation. The placeholders and
+      // closers are never rendered or included in a saved message.
+      const captured = payload.slice(0, offset) + placeholder;
+      const closing = closers.reverse().join('');
+      if (!['', 'null', ':null', '"":null'].some((suffix) => isWsJson(captured + suffix + closing))) return null;
+    }
+
+    // Validation may use JSON.parse; formatting preserves wire tokens such
+    // as large numeric IDs, exponent notation and repeated property names.
+    let depth = 0;
+    let formatted = '';
+    const line = () => '\n' + '  '.repeat(depth);
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === '{' || token === '[') {
+        if (++depth > 32) return null;
+        formatted += token;
+        if (tokens[i + 1] !== (token === '{' ? '}' : ']')) formatted += line();
+      } else if (token === '}' || token === ']') {
+        depth--;
+        if (tokens[i - 1] !== (token === '}' ? '{' : '[')) formatted += line();
+        formatted += token;
+      } else if (token === ',' || token === ':') {
+        formatted += token + (token === ',' ? line() : ' ');
+      } else {
+        formatted += token;
+      }
+      if (envelope.length + formatted.length + tail.length > WS_INLINE_JSON_LIMIT) return null;
+    }
+    return { envelope, formatted, tail };
+  }
+
+  function getWsMessageDisplayText(text, truncated) {
+    if (!text.includes('\\u')) return text;
+    const json = planWsMessageJson(text, truncated);
+    if (!json) return text;
+    const start = text.length - text.trimStart().length + json.envelope.length;
+    return text.slice(0, start) + decodeWsJsonDisplayEscapes(text.slice(start));
+  }
+
+  function renderWsMessageJson(target, json) {
+    target.replaceChildren();
+    target.dataset.format = 'json';
+    if (json.envelope) target.append(document.createTextNode(json.envelope + '\n'));
+    appendJsonHighlight(target, decodeWsJsonDisplayEscapes(json.formatted));
+    if (json.tail) target.append(document.createTextNode(decodeWsJsonDisplayEscapes(json.tail)));
+  }
+
+  let wsFullSavePending = false;
+  let wsFullViewPending = false;
+  async function readWsCapturedText(row, frame, isCurrent, entry) {
+    const deadline = Date.now() + WS_FULL_TEXT_READ_TIMEOUT_MS;
+    if (Number.isInteger(frame.fullIndex)) {
+      const readEntry = row._readWsHarEntry || row._readImportedHarEntry;
+      if (!entry) entry = await readEntry(() => isCurrent() && Date.now() < deadline, frame);
+      const message = entry._webSocketMessages?.[frame.fullIndex];
+      const content = message?.data;
+      if (!isCurrent() || message?.type !== frame.type || getHarWsTime(message) !== frame.time ||
+          typeof content !== 'string' || content.length !== frame.fullLength || !content.startsWith(frame.data)) {
+        throw new Error('WebSocket message could not be read completely');
+      }
+      return content;
+    }
+    const parts = [];
+    for (let offset = 0; offset < frame.fullLength; offset += WS_FULL_TEXT_CHUNK_CHARS) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || !isCurrent()) throw new Error('WebSocket message is no longer available');
+      const part = await row._readWsFullFrame(frame, offset, remaining);
+      const expected = Math.min(WS_FULL_TEXT_CHUNK_CHARS, frame.fullLength - offset);
+      if (typeof part !== 'string' || part.length !== expected ||
+          (offset === 0 && !part.startsWith(frame.data))) {
+        throw new Error('WebSocket message could not be read completely');
+      }
+      parts.push(part);
+    }
+    // Join before UTF-8 encoding so that a surrogate pair split across two
+    // bounded chunks still becomes the original character.
+    return parts.join('');
+  }
+
+  function readWsFullMessage(row, frame, isOpen = () => true) {
+    return readWsCapturedText(row, frame, () => state.selectedRow === row && !row._retentionDisposed && isOpen());
+  }
+
+  async function findFullWsMatches(row, frames, query, current, signal) {
+    const matches = new Map();
+    const checked = new Set();
+    const search = createPayloadSearcher(signal);
+    const { regex } = compileSearchQuery(query);
+    const aliases = Array.from(query).some(character => character.charCodeAt(0) > 127);
+    const readEntry = row._readWsHarEntry || row._readImportedHarEntry;
+    let entry = null;
+    let generation = null;
+    try {
+      const anchor = frames.findLast(frame => Number.isInteger(frame.fullIndex));
+      if (anchor && readEntry) {
+        try {
+          entry = await readEntry(current, anchor);
+          generation = anchor.fullGeneration;
+        } catch (_error) {
+          // A navigation or a replaced archive can expire all references.
+        }
+      }
+      for (const frame of frames) {
+        if (!current()) break;
+        if (Number.isInteger(frame.fullIndex) ? !entry || frame.fullGeneration !== generation : !frame.fullId || !row._readWsFullFrame) continue;
+        try {
+          const raw = await readWsCapturedText(row, frame, current, entry);
+          if (!current()) break;
+          const hit = (await search.scan(raw, [regex], frame.data.length, aliases))?.[0];
+          if (!current() || !hit) continue;
+          checked.add(frame.id);
+          if (hit.hits.length) matches.set(frame.id, hit.hits[0]);
+        } catch (_error) {
+          // Leave this frame counted as only partially searchable.
+        }
+      }
+      return { matches, checked };
+    } finally {
+      search.close();
+    }
+  }
+
+  function wsFrameMatchesPreview(frame, displayText, query) {
+    return !frame.binary && (frame.data.toLowerCase().includes(query) ||
+      (displayText !== frame.data && displayText.toLowerCase().includes(query)));
+  }
+
+  function syncWsFullSearch(view, frames, query, remote) {
+    const key = query && view.direction + '\n' + query;
+    if (view.fullSearch?.key !== key) {
+      view.fullSearch?.controller.abort();
+      view.fullSearch = key ? {
+        key, controller: new AbortController(), checked: new Set(), attempted: new Set(), matches: new Map(), running: false,
+      } : null;
+    }
+    const job = view.fullSearch;
+    if (!job) return;
+    const ids = new Set(frames.map(frame => frame.id));
+    for (const id of job.attempted) {
+      if (ids.has(id)) continue;
+      job.attempted.delete(id);
+      job.checked.delete(id);
+      job.matches.delete(id);
+    }
+    const candidates = frames.filter(frame => frame.truncated &&
+      (view.direction === 'all' || frame.type === view.direction) &&
+      !wsFrameMatchesPreview(frame, view.items.get(frame.id)?.displayText ?? frame.data, query));
+    view.searchPartial = candidates.some(frame => !job.checked.has(frame.id));
+    const unsearched = candidates.filter(frame => !job.attempted.has(frame.id));
+    if ((remote && !view.row._mirrorSearchWs) || job.running || !unsearched.length) return;
+    const current = () => wsMessagesView === view && view.fullSearch === job && !job.controller.signal.aborted &&
+      $('#ws-message-query').value.trim().toLowerCase() === query && !view.row._retentionDisposed;
+    job.running = true;
+    const run = async () => {
+      try {
+        if (!current()) return;
+        const result = remote
+          ? await view.row._mirrorSearchWs(query, unsearched.map(frame => frame.id), job.controller.signal)
+          : await findFullWsMatches(view.row, unsearched, query, current, job.controller.signal);
+        if (!current()) return;
+        for (const id of result?.checked || []) job.checked.add(id);
+        for (const [id, hit] of result?.matches || []) job.matches.set(id, hit);
+      } catch (_error) {
+        // Preserve all preview matches even if the full source is unavailable.
+      } finally {
+        job.running = false;
+        if (current()) {
+          for (const frame of unsearched) job.attempted.add(frame.id);
+          renderWsMessages(view.row);
+        }
+      }
+    };
+    setTimeout(run, FILTER_DEBOUNCE_MS);
+  }
+
+  function requestWsFullMessageSave(row, frame, trigger) {
+    if (wsFullSavePending || wsFullViewPending) return;
+    requestFullOutboundAction({
+      title: uiText('wsSaveFullMessageTitle'),
+      detail: uiText('wsSaveFullMessageDetail'),
+      confirmLabel: uiText('wsSaveFullMessage'),
+      trigger,
+      onConfirm: async () => {
+        wsFullSavePending = true;
+        setStatus(uiText('wsSavingFullMessage'));
+        try {
+          const content = await readWsFullMessage(row, frame);
+          if (state.selectedRow !== row || row._retentionDisposed) return;
+          const file = new Blob([content], { type: 'text/plain;charset=utf-8' });
+          triggerObjectUrlDownload(URL.createObjectURL(file), 'network-plus-websocket-' + row.id + '-' + frame.id + '.txt');
+          setStatus(uiText('wsSavedFullMessage'));
+        } catch (_error) {
+          setStatus(uiText('wsFullMessageUnavailable'), true);
+        } finally {
+          wsFullSavePending = false;
+        }
+      },
+    });
+  }
+
+  function createWsMessage(frame, row, displayText) {
+    const item = document.createElement('li');
+    item.className = 'ws-message';
+    item.dataset.direction = frame.type;
+    const disclosure = document.createElement('details');
+    disclosure.className = 'ws-message-disclosure';
+    const summary = document.createElement('summary');
+    summary.className = 'ws-message-summary';
+    const direction = document.createElement('span');
+    direction.className = 'ws-message-direction';
+    direction.textContent = uiText(frame.type === 'send' ? 'wsMessageSent' : 'wsMessageReceived');
+    const time = document.createElement('time');
+    time.className = 'ws-message-time';
+    if (isStreamEpoch(frame.time)) {
+      time.dateTime = new Date(frame.time).toISOString();
+      time.textContent = time.dateTime.slice(11, 23);
+      time.title = time.dateTime;
+    }
+
+    const body = frame.binary
+      ? frame.bytes == null ? uiText('wsMessageBinary') : uiTextFormat('wsMessageBinarySize', { size: fmtBytes(frame.bytes) })
+      : frame.data || uiText('wsMessageEmpty');
+    const preview = (displayText || body).replace(/\s+/g, ' ').trim();
+    const excerpt = preview.match(/^.{0,120}/u)[0];
+    const snippet = document.createElement('span');
+    snippet.className = 'ws-message-snippet';
+    snippet.dir = 'auto';
+    snippet.textContent = excerpt + (frame.truncated || excerpt.length < preview.length ? '…' : '');
+    summary.append(time, direction, snippet);
+    disclosure.appendChild(summary);
+    item.appendChild(disclosure);
+
+    const showPayload = () => {
+      if (!disclosure.open) return;
+      const pane = $('#ws-timeline-scroll');
+      const wasAtEnd = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
+      const json = frame.binary ? null : planWsMessageJson(frame.data, frame.truncated);
+      const pre = document.createElement('pre');
+      pre.className = 'ws-message-payload';
+      pre.dataset.format = 'text';
+      if (json) renderWsMessageJson(pre, json);
+      else pre.textContent = body;
+      disclosure.appendChild(pre);
+      if (frame.truncated) {
+        const canReadFull = typeof row._readWsFullFrame === 'function' && !!frame.fullId ||
+          (typeof row._readWsHarEntry === 'function' || typeof row._readImportedHarEntry === 'function') &&
+            Number.isInteger(frame.fullIndex);
+        const note = document.createElement('p');
+        note.className = 'ws-message-note';
+        note.setAttribute('aria-live', 'polite');
+        note.textContent = uiTextFormat(canReadFull ? 'wsMessagePreviewOnly' : 'wsMessageTruncated', {
+          limit: WS_FRAME_PREVIEW_CHARS.toLocaleString(activeLanguage),
+        });
+        disclosure.appendChild(note);
+        if (canReadFull) {
+          const actions = document.createElement('div');
+          actions.className = 'ws-message-actions';
+          if (json && frame.fullLength <= WS_INLINE_JSON_LIMIT) {
+            const show = document.createElement('button');
+            show.type = 'button';
+            show.className = 'copy-btn ws-message-show-full';
+            show.textContent = uiText('wsShowFullJson');
+            show.addEventListener('click', async () => {
+              if (wsFullViewPending || wsFullSavePending) return;
+              wsFullViewPending = true;
+              show.setAttribute('aria-disabled', 'true');
+              const previewNotice = note.textContent;
+              const isOpen = () => disclosure.isConnected && disclosure.open && !disclosure.closest('[hidden]');
+              note.textContent = uiText('wsSavingFullMessage');
+              try {
+                const content = await readWsFullMessage(row, frame, isOpen);
+                const full = planWsMessageJson(content);
+                if (!isOpen()) {
+                  note.textContent = previewNotice;
+                  return;
+                }
+                if (!full) {
+                  note.textContent = uiText('wsFullJsonPreviewOnly');
+                  return;
+                }
+                renderWsMessageJson(pre, full);
+                note.hidden = true;
+                if (document.activeElement === show) {
+                  pre.tabIndex = 0;
+                  pre.focus({ preventScroll: true });
+                }
+                show.hidden = true;
+              } catch (_error) {
+                note.textContent = isOpen() ? uiText('wsFullMessageUnavailable') : previewNotice;
+              } finally {
+                wsFullViewPending = false;
+                show.removeAttribute('aria-disabled');
+              }
+            });
+            actions.appendChild(show);
+          }
+          const save = document.createElement('button');
+          save.type = 'button';
+          save.className = 'copy-btn ws-message-save-full';
+          save.textContent = uiText('wsSaveFullMessage');
+          save.addEventListener('click', () => requestWsFullMessageSave(row, frame, save));
+          actions.appendChild(save);
+          disclosure.appendChild(actions);
+        }
+      }
+      if (wasAtEnd && !disclosure.closest('[hidden]')) {
+        // Keep an already visible reply in view when expanding its predecessor,
+        // up to the point where the expanded message's heading would disappear.
+        const header = $('#ws-timeline-header');
+        const visibleTop = pane.getBoundingClientRect().top + header.getBoundingClientRect().height;
+        const room = summary.getBoundingClientRect().top - visibleTop;
+        const remaining = pane.scrollHeight - pane.scrollTop - pane.clientHeight;
+        pane.scrollTop += Math.max(0, Math.min(room, remaining));
+      }
+      disclosure.removeEventListener('toggle', showPayload);
+    };
+    disclosure.addEventListener('toggle', showPayload);
+    return item;
+  }
+
+  function resetWsMessagesView() {
+    wsMessagesView?.fullSearch?.controller.abort();
+    wsMessagesView = null;
+    const pane = $('#ws-timeline-scroll');
+    pane.querySelector('ol').replaceChildren();
+    pane.scrollTop = 0;
+    $('#ws-message-query').value = '';
+    $('#ws-message-find-row').hidden = true;
+    $('#ws-message-search-toggle').setAttribute('aria-expanded', 'false');
+  }
+
+  function setCurrentWsMatch(view, item) {
+    if (view.currentMatch === item) return;
+    view.currentMatch?.classList.remove('is-current-match');
+    view.currentMatch?.removeAttribute('aria-current');
+    view.currentMatch = item;
+    item?.classList.add('is-current-match');
+    item?.setAttribute('aria-current', 'true');
+  }
+
+  function updateWsSearchResults(view) {
+    const count = view.matches.length;
+    const hasQuery = !!$('#ws-message-query').value.trim();
+    const currentIndex = view.matches.indexOf(view.currentMatch);
+    const results = $('#ws-message-results');
+    const text = !view.searchReady || !hasQuery ? ''
+      : view.fullSearch?.running && !count ? uiText('payloadSearchRunning')
+      : currentIndex < 0 ? uiTextFormat('wsSearchResultCount', { count })
+      : uiTextFormat('wsSearchResultPosition', { position: currentIndex + 1, count });
+    const notice = hasQuery && !view.fullSearch?.running && view.searchPartial ? uiText('payloadSearchPartial') : '';
+    const displayed = [text, notice].filter(Boolean).join(' · ');
+    if (results.textContent !== displayed) results.textContent = displayed;
+    $('#ws-message-prev').disabled = $('#ws-message-next').disabled = !view.searchReady || !hasQuery || count === 0;
+  }
+
+  function renderWsMessages(row) {
+    if (wsMessagesView?.row !== row || wsMessagesView.language !== activeLanguage) {
+      resetWsMessagesView();
+      wsMessagesView = { row, language: activeLanguage, items: new Map(), requestedRevision: -1, direction: 'all' };
+    }
+    const view = wsMessagesView;
+    const panel = $('#ws-messages-panel');
+    const pane = $('#ws-timeline-scroll');
+    const list = pane.querySelector('ol');
+    const status = $('#ws-messages-status');
+    const input = $('#ws-message-query');
+    input.placeholder = uiText('wsSearchPayload');
+    const query = input.value.trim().toLowerCase();
+    const hasFilters = !!query || view.direction !== 'all';
+    const follow = !hasFilters && !list.contains(document.activeElement) &&
+      pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16;
+    const remote = !!row._mirrorFetchWsMessages;
+    const frames = (remote ? view.snapshot?.frames : row._wsMessages) || [];
+    const omitted = (remote ? view.snapshot?.omitted : row._wsMessagesOmitted) || 0;
+    view.searchReady = !remote || !!view.snapshot;
+    const emptyMessage = row._wsArchiveOmitted
+      ? uiTextFormat('wsMessagesArchiveOmitted', { count: row._wsArchiveOmitted.toLocaleString() })
+      : uiText(row._wsArchive ? 'wsMessagesArchiveEmpty'
+        : row.method === 'WS' || remote ? 'wsMessagesEmpty'
+          : 'wsMessagesHandshakeEmpty');
+    const message = remote && view.unavailable ? uiText('wsMessagesUnavailable')
+      : remote && !view.snapshot ? uiText('wsMessagesLoading')
+      : omitted > 0 ? uiTextFormat('wsMessagesOmitted', { count: omitted.toLocaleString() })
+      : frames.length === 0 && !hasFilters ? emptyMessage : '';
+    status.hidden = !message;
+    if (status.textContent !== message) status.textContent = message;
+    $('#wsMessagesReloadBtn').hidden = !wsReloadCaptureAvailable || state.sampleCaptureActive ||
+      row._wsArchive || frames.length > 0 || hasFilters || !view.searchReady;
+    const directions = $all('[data-ws-direction]', panel);
+    for (const button of directions) {
+      button.setAttribute('aria-pressed', String(button.dataset.wsDirection === view.direction));
+    }
+    const ids = new Set(frames.map((frame) => frame.id));
+    for (const [id, { item }] of view.items) {
+      if (ids.has(id)) continue;
+      if (item.contains(document.activeElement)) panel.focus({ preventScroll: true });
+      item.remove();
+      view.items.delete(id);
+    }
+    const ordered = frames.slice().sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity) || a.id - b.id);
+    for (const frame of ordered) {
+      if (!view.items.has(frame.id)) {
+        const displayText = frame.binary ? '' : getWsMessageDisplayText(frame.data, frame.truncated);
+        view.items.set(frame.id, { item: createWsMessage(frame, row, displayText), displayText });
+      }
+    }
+    view.searchPartial = false;
+    syncWsFullSearch(view, ordered, query, remote);
+    view.matches = [];
+    let next = list.firstElementChild;
+    for (const frame of ordered) {
+      const rendered = view.items.get(frame.id);
+      const { item, displayText } = rendered;
+      const hit = view.fullSearch?.matches.get(frame.id);
+      if (rendered.fullHit !== hit) {
+        rendered.fullHit = hit;
+        rendered.excerpt?.remove();
+        rendered.excerpt = null;
+        if (hit) {
+          const excerpt = document.createElement('p');
+          excerpt.className = 'ws-message-search-excerpt';
+          const mark = document.createElement('mark');
+          mark.textContent = hit.match;
+          excerpt.append(uiTextFormat('payloadSearchOffset', { offset: (hit.offset + 1).toLocaleString(activeLanguage) }) + ' — ',
+            hit.before, mark, hit.after);
+          item.querySelector('details').appendChild(excerpt);
+          rendered.excerpt = excerpt;
+        }
+      }
+      const matches = (view.direction === 'all' || frame.type === view.direction) &&
+        (!query || hit || wsFrameMatchesPreview(frame, displayText, query));
+      if (!matches && item.contains(document.activeElement)) panel.focus({ preventScroll: true });
+      item.hidden = !matches;
+      if (matches) view.matches.push(item);
+      if (item === next) next = next.nextElementSibling;
+      else list.insertBefore(item, next);
+    }
+    if (!view.matches.includes(view.currentMatch)) setCurrentWsMatch(view, null);
+    $('#ws-timeline-header').hidden = view.matches.length === 0;
+    const empty = $('#ws-message-empty');
+    const restoreFocus = empty.contains(document.activeElement);
+    empty.hidden = !view.searchReady || !hasFilters || view.fullSearch?.running || view.matches.length > 0;
+    if (empty.hidden && restoreFocus) {
+      const target = $('#ws-message-find-row').hidden ? directions.find((button) => button.dataset.wsDirection === view.direction) : input;
+      target?.focus({ preventScroll: true });
+    }
+    updateWsSearchResults(view);
+    if (follow) pane.scrollTop = pane.scrollHeight;
+    if (remote) requestWsMessagesForView(view);
+  }
+
+  function initializeWsMessageFilters() {
+    const panel = $('#ws-messages-panel');
+    const pane = $('#ws-timeline-scroll');
+    const toggle = $('#ws-message-search-toggle');
+    const search = $('#ws-message-find-row');
+    const input = $('#ws-message-query');
+    let searchTrigger = null;
+    const openSearch = (trigger) => {
+      if (search.hidden) searchTrigger = trigger;
+      search.hidden = false;
+      toggle.setAttribute('aria-expanded', 'true');
+      input.focus();
+      input.select();
+      if (wsMessagesView) updateWsSearchResults(wsMessagesView);
+    };
+    panel._paneSearchOpen = openSearch;
+
+    const refreshFilters = () => {
+      if (!wsMessagesView) return;
+      setCurrentWsMatch(wsMessagesView, null);
+      renderWsMessages(wsMessagesView.row);
+      pane.scrollTop = 0;
+    };
+    const closeSearch = (returnFocus) => {
+      input.value = '';
+      search.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      refreshFilters();
+      const target = returnFocus && searchTrigger?.isConnected && !searchTrigger.closest('[hidden]') ? searchTrigger : toggle;
+      target.focus({ preventScroll: true });
+      if (pane.contains(target)) target.scrollIntoView({ block: 'nearest' });
+    };
+    const navigate = (direction) => {
+      const view = wsMessagesView;
+      if (!view || !input.value.trim() || !view.matches.length) return;
+      const index = getWrappedMatchIndex(view.matches.length, view.matches.indexOf(view.currentMatch), direction);
+      const item = view.matches[index];
+      setCurrentWsMatch(view, item);
+      item.querySelector('details').open = true;
+      item.querySelector('summary').scrollIntoView({ block: 'nearest' });
+      updateWsSearchResults(view);
+    };
+    toggle.addEventListener('click', () => {
+      if (search.hidden) openSearch(toggle);
+      else closeSearch(false);
+    });
+    input.addEventListener('input', refreshFilters);
+    search.addEventListener('keydown', (event) => {
+      if (event.isComposing) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (input.value) {
+          input.value = '';
+          refreshFilters();
+          input.focus({ preventScroll: true });
+        } else closeSearch(true);
+      } else if (event.target === input && event.key === 'Enter') {
+        event.preventDefault();
+        navigate(event.shiftKey ? 'prev' : 'next');
+      }
+    });
+    $('#ws-message-prev').addEventListener('click', () => navigate('prev'));
+    $('#ws-message-next').addEventListener('click', () => navigate('next'));
+    for (const button of $all('[data-ws-direction]', panel)) {
+      button.addEventListener('click', () => {
+        if (!wsMessagesView || wsMessagesView.direction === button.dataset.wsDirection) return;
+        wsMessagesView.direction = button.dataset.wsDirection;
+        refreshFilters();
+      });
+    }
+    $('#ws-message-reset').addEventListener('click', () => {
+      if (!wsMessagesView) return;
+      input.value = '';
+      wsMessagesView.direction = 'all';
+      refreshFilters();
+    });
+  }
+
+  function requestWsMessagesForView(view) {
+    const row = view.row;
+    const revision = row._mirrorStreamRevision || 0;
+    if (wsMessagesRequest || view.requestedRevision >= revision) return;
+    view.requestedRevision = revision;
+    wsMessagesRequest = view;
+    row._mirrorFetchWsMessages(revision).then((snapshot) => {
+      if (wsMessagesView !== view || snapshot.revision < (row._mirrorStreamRevision || 0)) return;
+      view.snapshot = snapshot;
+      view.requestedRevision = snapshot.revision;
+      view.unavailable = false;
+    }, () => {
+      if (wsMessagesView === view) view.unavailable = true;
+    }).finally(() => {
+      wsMessagesRequest = null;
+      if (wsMessagesView && wsMessagesView.row === state.selectedRow && !$('#details').hidden && !$('#ws-messages-panel').hidden) {
+        renderWsMessages(wsMessagesView.row);
+      }
+    });
+  }
+
+  function updateWsDetailTabs(row) {
+    const bar = $('#ws-detail-tabs');
+    const panels = $('#ws-details-panel');
+    const messages = $('#ws-messages-panel');
+    const details = $('#details');
+    const available = isWebSocketRow(row);
+    const showMessages = available && wsDetailsChoice === 'ws-tab-messages';
+    const wasShowingMessages = details.classList.contains('is-ws-messages');
+    if (wsMessagesView && wsMessagesView.row !== row) resetWsMessagesView();
+    bar.hidden = !available;
+    messages.hidden = !showMessages;
+    details.classList.toggle('is-ws-messages', showMessages);
+    if (available) {
+      panels.setAttribute('role', 'tabpanel');
+      panels.setAttribute('aria-labelledby', 'ws-tab-details');
+    } else {
+      panels.removeAttribute('role');
+      panels.removeAttribute('aria-labelledby');
+    }
+    if (showMessages) panels.setAttribute('aria-hidden', 'true');
+    else if (!panels.hidden) panels.removeAttribute('aria-hidden');
+    for (const button of $all('.tab-btn', bar)) {
+      const active = button.id === wsDetailsChoice;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    if (showMessages) renderWsMessages(row);
+    else if (wasShowingMessages) {
+      if (wsMessagesView?.fullSearch?.running) {
+        wsMessagesView.fullSearch.controller.abort();
+        wsMessagesView.fullSearch = null;
+      }
+      if (row && resyncInspectorSplit) resyncInspectorSplit();
+    }
+    return showMessages;
+  }
+
+  function syncWsCapturePrompt() {
+    const prompt = $('#wsCapturePrompt');
+    const capture = $('#wsCaptureBtn');
+    const hidden = !state.webSocketOnly || state.sampleCaptureActive ||
+      capture.hidden || capture.getAttribute('aria-pressed') === 'true';
+    if (hidden && prompt.contains(document.activeElement)) $('#webSocketOnlyBtn').focus({ preventScroll: true });
+    prompt.hidden = hidden;
+    $('#wsReloadBtn').hidden = !wsReloadCaptureAvailable || capture.hidden ||
+      state.sampleCaptureActive || capture.getAttribute('aria-pressed') !== 'true';
+  }
+
+  function initializeWsDetailTabs() {
+    const bar = $('#ws-detail-tabs');
+    const tabs = $all('[role="tab"]', bar);
+    const activate = (tab, focus) => {
+      if (!tabs.includes(tab) || bar.hidden || !state.selectedRow) return;
+      wsDetailsChoice = tab.id;
+      renderRowDetails(state.selectedRow);
+      if (focus) tab.focus();
+    };
+    bar.addEventListener('click', (event) => activate(event.target.closest('[role="tab"]'), false));
+    bar.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      const index = getNextTabIndex(tabs.indexOf(event.target), tabs.length, event.key);
+      if (index < 0) return;
+      event.preventDefault();
+      activate(tabs[index], true);
+    });
+  }
 
   // An own-property check, never a bare lookup: the map is an object literal
   // with Object.prototype behind it, so a saved value of 'toString' would
@@ -14433,6 +16313,7 @@ const _NetworkPlus = (function () {
     const wrapWidth = Number.isFinite(tableWrap.clientWidth) ? tableWrap.clientWidth : 0;
     const previousHiddenIds = state.autoHiddenColumnIds;
     const hiddenIds = planAutoHiddenColumns(state.columns, wrapWidth, {
+      compactIdentity: wrapWidth <= COMPACT_REQUEST_COLUMNS_WIDTH,
       pinnedIds: state.pinnedColumnIds,
       // The search read-out, the column the rows are ordered by and the one
       // whose width is being stepped: none may be dropped while it is doing
@@ -14736,7 +16617,7 @@ const _NetworkPlus = (function () {
     const pathCol = visibleCols.find((c) => c.id === 'path');
     const deficit = pathCol && wrapWidth > 0 ? Math.max(0, totalWidth - wrapWidth) : 0;
     const shrink = pathCol
-      ? Math.min(deficit, clampColumnWidth(pathCol.width) - minRenderedColumnWidth(pathCol))
+      ? Math.min(deficit, clampColumnWidth(pathCol.width) - minRenderedColumnWidth(pathCol, wrapWidth <= COMPACT_REQUEST_COLUMNS_WIDTH))
       : 0;
     const gridWidth = (totalWidth + surplus - shrink) + 'px';
     if (grid.style.width !== gridWidth) grid.style.width = gridWidth;
@@ -14752,8 +16633,126 @@ const _NetworkPlus = (function () {
 
   // Update search match state without triggering re-render.
   // Called from renderBody() so new rows are included in search.
+  function syncFullResponseSearch(srch) {
+    const queries = srch.keywords.map((kw) => isApplicableSearchKeyword(kw, srch.options) ? kw.query : '');
+    const key = srch.scope.resBody && queries.some(Boolean) ? JSON.stringify([queries, srch.options]) : '';
+    if (srch.fullResponses?.key !== key) {
+      srch.fullResponses?.controller.abort();
+      srch.fullResponses = key ? {
+        key, controller: new AbortController(), attempted: new WeakSet(), searched: new WeakSet(), matches: new WeakMap(),
+        running: false,
+      } : null;
+    }
+    const job = srch.fullResponses;
+    if (!job || job.running) return;
+    const rows = state.filteredRows.filter((row) => !job.attempted.has(row) &&
+      !row._pendingRequest && row.responseContentState !== 'cached' &&
+      (row._responseSearchSource || typeof row._reqObj?.getContent === 'function' || row._mirrorSearchResponse));
+    if (!rows.length) return;
+    const options = { ...srch.options };
+    const rules = queries.filter(Boolean).map(query => compileSearchQuery(query, options).regex);
+    const current = () => srch.fullResponses === job && !job.controller.signal.aborted &&
+      srch.scope.resBody && srch.keywords.every((kw, i) =>
+        (isApplicableSearchKeyword(kw, srch.options) ? kw.query : '') === queries[i]) &&
+      srch.keywords.length === queries.length && JSON.stringify(srch.options) === JSON.stringify(options);
+    job.running = true;
+    // Batch archive lookups by File. Re-reading from byte zero per request is
+    // quadratic for large captures, especially when the body cache has evicted rows.
+    const run = async () => {
+      const search = createPayloadSearcher(job.controller.signal);
+      const applyResult = (row, result) => {
+        if (!current() || row._retentionDisposed) return;
+        job.attempted.add(row);
+        if (!result) return;
+        job.searched.add(row);
+        let index = 0;
+        const matches = new Set();
+        for (let i = 0; i < queries.length; i++) {
+          if (queries[i] && result[index++]) matches.add(i);
+        }
+        if (matches.size) job.matches.set(row, matches);
+      };
+      const scan = async (row, payload) => {
+        if (!current() || row._retentionDisposed) return;
+        try {
+          const result = row._mirrorSearchResponse
+            ? await row._mirrorSearchResponse(queries.filter(Boolean), options, null, job.controller.signal)
+            : await search.scan(payload ? getSearchableResponseText(row, payload) : await readSearchableResponse(row, current), rules);
+          applyResult(row, result);
+        } catch (_error) {
+          applyResult(row, null);
+        }
+      };
+      const archives = new Map();
+      try {
+        for (const row of rows) {
+          if (!current()) return;
+          const source = row._responseSearchSource;
+          if (source) {
+            if (!archives.has(source.file)) archives.set(source.file, []);
+            archives.get(source.file).push(row);
+          } else {
+            await scan(row);
+          }
+        }
+        for (const [file, group] of archives) {
+          if (!current()) return;
+          try {
+            if (group[0]._responseSearchSource.id) {
+              const entries = await extractBoundedSazEntries(window.fflate, new Uint8Array(await file.arrayBuffer()));
+              for (const row of group) {
+                if (!current()) return;
+                const { id } = row._responseSearchSource;
+                const entry = createSazHarEntry(entries.get('raw/' + id + '_c.txt'), entries.get('raw/' + id + '_s.txt'), row.startedDateTime);
+                await scan(row, { content: entry.response.content?.text, encoding: entry.response.content?.encoding });
+              }
+            } else {
+              const wanted = new Map(group.map(row => [row._responseSearchSource.index, row]));
+              const queued = [];
+              let index = 0;
+              async function* chunks() {
+                for await (const chunk of file.stream()) {
+                  if (!current() || !wanted.size) return;
+                  yield chunk;
+                  for (const [row, content] of queued.splice(0)) {
+                    await scan(row, { content: content?.text, encoding: content?.encoding });
+                  }
+                }
+              }
+              await readHarEntries(chunks(), (entry) => {
+                const at = index++;
+                const row = wanted.get(at);
+                if (row) {
+                  wanted.delete(at);
+                  queued.push([row, entry.response.content]);
+                }
+              }, (index) => wanted.has(index) ? HAR_REREAD_RESPONSE_TEXT_CHARS : 0).catch((error) => {
+                if (current() && wanted.size) throw error;
+              });
+              for (const [row, content] of queued) {
+                await scan(row, { content: content?.text, encoding: content?.encoding });
+              }
+            }
+          } catch (_error) {
+            for (const row of group) job.attempted.add(row);
+          }
+          for (const row of group) job.attempted.add(row);
+        }
+      } finally {
+        search.close();
+        job.running = false;
+        if (current()) {
+          renderBody();
+          syncSearchUIAfterRender();
+        }
+      }
+    };
+    setTimeout(run, 0);
+  }
+
   function refreshSearchMatches() {
     const srch = state.search;
+    syncFullResponseSearch(srch);
     const activeKws = srch.keywords.filter((kw) => isApplicableSearchKeyword(kw, srch.options));
     const previousMatches = srch.matches;
     const previousIndex = srch.currentIndex;
@@ -14778,7 +16777,7 @@ const _NetworkPlus = (function () {
       }
       const kwMatches = [];
       for (const row of sorted) {
-        if (deepSearchMatch(row, kw.query, srch.scope, srch.options)) {
+        if (deepSearchMatch(row, kw.query, srch.scope, srch.options) || srch.fullResponses?.matches.get(row)?.has(ki)) {
           matchSet.add(row);
           if (!srch.rowColors.has(row)) srch.rowColors.set(row, new Set());
           if (!srch.rowKeywords.has(row)) srch.rowKeywords.set(row, new Set());
@@ -14859,6 +16858,7 @@ const _NetworkPlus = (function () {
       topbar.classList.remove('paused');
     }
     updateSampleCaptureStatus();
+    state.syncWsFullCapture?.();
     if (announceStatus !== false) setStatus(uiText(state.paused ? 'statusPaused' : 'statusRecording'));
   }
 
@@ -14974,7 +16974,9 @@ const _NetworkPlus = (function () {
       emptyState.className = 'empty-state';
       tableWrap.appendChild(emptyState);
     }
-    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage;
+    const hasQuickFilter = state.webSocketOnly || hasRequestFacets();
+    const hasTimeFilter = !state.sampleCaptureActive && !!state.requestTimeFacet;
+    const renderKey = mode + ':' + (state.paused ? 'paused' : 'recording') + ':' + activeLanguage + ':' + hasQuickFilter + ':' + hasTimeFilter;
     if (emptyState.dataset.renderKey !== renderKey) {
       emptyState.textContent = '';
       emptyState.dataset.renderKey = renderKey;
@@ -15015,9 +17017,14 @@ const _NetworkPlus = (function () {
         const action = document.createElement('button');
         action.type = 'button';
         action.className = 'empty-state-action';
-        action.textContent = uiText('emptyFilteredAction');
+        action.textContent = uiText(hasQuickFilter ? 'emptyRequestFiltersAction' : 'emptyFilteredAction');
         action.setAttribute('aria-describedby', description.id);
-        action.addEventListener('click', clearColumnFilters);
+        if (hasTimeFilter) {
+          action.textContent = uiText('overviewClearTime');
+          action.addEventListener('click', () => applyOverviewRange(null));
+        } else {
+          action.addEventListener('click', clearRequestAnalysisFilters);
+        }
         emptyState.appendChild(action);
       }
       if (mode === 'capture' && !getMirrorViewParams(window.location ? window.location.search : '').viewerMode) {
@@ -15101,6 +17108,607 @@ const _NetworkPlus = (function () {
     return getVisibleRows().length;
   }
 
+  function setSearchMatchesOnly(enabled) {
+    state.search.matchesOnly = enabled;
+    saveSearchPrefs(currentSearchPrefs());
+  }
+
+  function clearRequestAnalysisFilters() {
+    if (state.search.matchesOnly) setSearchMatchesOnly(false);
+    clearColumnFilters();
+  }
+
+  function describeAnalysisRule(rule) {
+    const describeCondition = ({ op, value }) => {
+      if (!isValuelessFilterOperator(op) && !String(value ?? '').trim()) return '';
+      const operator = [...FILTER_OPERATORS_STRING, ...FILTER_OPERATORS_NUMERIC].find((candidate) => candidate.value === op);
+      return [operator?.label || op, value].filter(Boolean).join(' ');
+    };
+    if (rule.conditions) return rule.conditions.map(describeCondition).filter(Boolean).join(' · ');
+    if (rule.mode === 'statusSet') {
+      const families = Array.isArray(rule.excludedFamilies)
+        ? rule.excludedFamilies.filter((key) => STATUS_CLASS_KEYS.includes(key)) : [];
+      const entries = Object.entries(rule.include || {});
+      const excluded = families.map((key) => key === 'other' ? uiText('analysisStatusOther') : key)
+        .concat(entries.filter(([, included]) => included === false).map(([code]) => code));
+      const restored = entries.filter(([code, included]) => included === true && families.includes(classifyStatusClass(Number(code))))
+        .map(([code]) => code);
+      return [excluded.length && '≠ ' + excluded.join(', '), restored.length && '+ ' + restored.join(', ')]
+        .filter(Boolean).join(' · ');
+    }
+    if (rule.include) {
+      const excluded = Object.keys(rule.include).filter((key) => rule.include[key] === false);
+      return excluded.length ? '≠ ' + excluded.join(', ') : '';
+    }
+    if (rule.mode === 'urlAdvanced') {
+      return [rule.includeAny, rule.includeAll, rule.excludeAny && '≠ ' + rule.excludeAny].filter(Boolean).join(' · ');
+    }
+    if (rule.mode === 'timeRange') return [rule.start || '…', rule.end || '…'].join(' – ');
+    return describeCondition(rule);
+  }
+
+  function formatOverviewEpoch(epoch) {
+    return new Date(Math.min(epoch, MAX_OVERVIEW_EPOCH)).toISOString().replace('T', ' ');
+  }
+
+  function formatOverviewRange(range) {
+    const start = formatOverviewEpoch(range.start);
+    const end = formatOverviewEpoch(range.end);
+    return start + ' – ' + (start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end);
+  }
+
+  function applyOverviewRange(range) {
+    state.requestTimeFacet = range ? { start: range.start, end: range.end } : null;
+    repaintRequestScope();
+    setStatus(range ? uiTextFormat('overviewRangeApplied', { range: formatOverviewRange(range) }) : uiText('overviewTimeCleared'));
+  }
+
+  function initializeTrafficOverview() {
+    const toggle = $('#overviewToggleBtn');
+    const panel = $('#trafficOverview');
+    const timeline = $('#overviewTimeline');
+    const waterfall = $('#overviewWaterfall');
+    const requests = $('#overviewRequests');
+    const ruler = waterfall.querySelector('.overview-ruler');
+    const requestCount = $('#overviewRequestCount');
+    const noDisplayedRequests = $('#overviewNoDisplayed');
+    const timeBounds = $('#overviewTimeBounds');
+    const instructions = $('#overviewInstructions');
+    const readout = $('#overviewTimeReadout');
+    const missingStarts = $('#overviewTimeOmissions');
+    const peakButton = $('#overviewPeakBtn');
+    const clearButton = $('#overviewClearTime');
+    const latency = $('#overviewLatency');
+    const measured = $('#overviewLatencyCount');
+    const latencyOmissions = $('#overviewLatencyOmissions');
+    const slowestButton = $('#overviewSlowestBtn');
+    let expanded = false;
+    let timer = null;
+    let activeIndex = 0;
+    let anchor = null;
+    let chart = null;
+    let distribution = null;
+    let requestRows = [];
+    let requestScale = null;
+    let requestFrame = null;
+    let drag = null;
+    let ignorePointerClick = false;
+    let drawnRange = null;
+
+    const bins = Array.from({ length: TRAFFIC_TIMELINE_BINS }, (_, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'overview-bin';
+      button.dataset.overviewBin = index;
+      button.hidden = true;
+      button.tabIndex = -1;
+      timeline.appendChild(button);
+      return button;
+    });
+    const lanes = Array.from({ length: OVERVIEW_ROW_POOL }, () => {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'overview-request';
+      button.tabIndex = -1;
+      const name = document.createElement('span');
+      name.className = 'overview-request-name';
+      const track = document.createElement('span');
+      track.className = 'overview-request-track';
+      track.setAttribute('aria-hidden', 'true');
+      const bar = document.createElement('span');
+      track.append(bar);
+      const info = document.createElement('span');
+      info.className = 'overview-request-info';
+      const status = document.createElement('span');
+      status.className = 'overview-request-status';
+      const time = document.createElement('span');
+      time.className = 'overview-request-time';
+      info.append(status, time);
+      button.append(name, track, info);
+      item.append(button);
+      requests.append(item);
+      const lane = { item, button, name, bar, status, time, row: null, index: 0 };
+      let pressedRow = null;
+      button.addEventListener('pointerdown', () => { pressedRow = lane.row; });
+      button.addEventListener('click', (event) => {
+        const { row } = lane;
+        if (!row || (event.detail && pressedRow && pressedRow !== row) || !getVisibleRows().includes(row)) return;
+        selectRow(row, null, false);
+        scrollToSelectedRow();
+      });
+      return lane;
+    });
+    const latencyBands = ['<100 ms', '100–300 ms', '300 ms–1 s', '1–3 s', '≥3 s'].map((label, index) => {
+      const band = document.createElement('div');
+      band.className = 'overview-latency-band';
+      band.dataset.latencyBand = index;
+      const title = document.createElement('span');
+      title.textContent = label;
+      const bar = document.createElement('span');
+      bar.className = 'overview-latency-track';
+      bar.setAttribute('aria-hidden', 'true');
+      const count = document.createElement('span');
+      band.append(title, bar, count);
+      latency.appendChild(band);
+      return { band, count };
+    });
+
+    const showRangeReadout = () => {
+      const range = state.requestTimeFacet;
+      readout.textContent = range ? uiTextFormat('overviewSelected', { range: formatOverviewRange(range) }) : '';
+    };
+
+    const paintSelection = (selection, scale) => {
+      const span = scale.end - scale.start;
+      const clamp = (epoch) => Math.min(100, Math.max(0, (epoch - scale.start) / span * 100));
+      const start = selection ? clamp(selection.start) : 0;
+      const end = selection ? clamp(selection.end) : 0;
+      waterfall.style.setProperty('--overview-selection-start', start + '%');
+      waterfall.style.setProperty('--overview-selection-width', (end - start) + '%');
+    };
+
+    const focusedLane = () => lanes.find((lane) => lane.button === document.activeElement);
+    const paintRequestWindow = (scrollTop, focusId = focusedLane()?.row?.id) => {
+      const { start, end } = planOverviewRequestWindow(requestRows.length, scrollTop);
+      requests.style.paddingTop = (start * OVERVIEW_ROW_HEIGHT) + 'px';
+      requests.style.paddingBottom = ((requestRows.length - end) * OVERVIEW_ROW_HEIGHT) + 'px';
+      for (let index = 0; index < lanes.length; index += 1) {
+        const lane = lanes[index];
+        const { item, button, name, bar, status, time } = lane;
+        const rowIndex = start + index;
+        const row = requestRows[rowIndex] || null;
+        lane.row = row;
+        lane.index = rowIndex;
+        item.hidden = !row;
+        if (!row) {
+          delete button.dataset.overviewRequest;
+          continue;
+        }
+        item.setAttribute('aria-posinset', String(rowIndex + 1));
+        item.setAttribute('aria-setsize', String(requestRows.length));
+        const entry = buildOverviewRequestEntry(row, requestScale);
+        const { duration, statusClass } = entry;
+        const measured = duration !== null;
+        const timing = measured ? formatTimingDuration(duration) :
+          uiText(row._pendingRequest ? 'analysisPending' : 'overviewUnknownDuration');
+        const statusCode = statusClass === 'pending' || statusClass === 'other' ? '' : String(row.status);
+        name.textContent = row.path || row.url;
+        status.textContent = statusCode;
+        status.hidden = !statusCode;
+        time.textContent = timing;
+        button.dataset.statusClass = statusClass;
+        button.dataset.overviewRequest = row.id;
+        button.title = [row.method + ' ' + row.url, statusCode, timing, formatOverviewEpoch(getOverviewStart(row))]
+          .filter(Boolean).join(' · ');
+        button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-current', String(row === state.selectedRow));
+        bar.className = 'overview-request-bar';
+        if (!duration) bar.classList.add('overview-request-bar--' + (measured ? 'zero' : row._pendingRequest ? 'pending' : 'unknown'));
+        bar.style.setProperty('--overview-start', (entry.startsAt * 100) + '%');
+        bar.style.setProperty('--overview-width', (entry.width * 100) + '%');
+      }
+      if (focusId != null) {
+        const target = lanes.find((lane) => lane.row?.id === focusId)?.button || waterfall;
+        if (target !== document.activeElement) target.focus({ preventScroll: true });
+      }
+    };
+
+    const paintRequests = (rows, range, reset) => {
+      const previousTop = waterfall.scrollTop;
+      const previousIndex = Math.floor(previousTop / OVERVIEW_ROW_HEIGHT);
+      const previousOffset = previousTop - previousIndex * OVERVIEW_ROW_HEIGHT;
+      const previousRow = reset ? null : requestRows[previousIndex];
+      requestScale = range;
+      requestRows = rows.filter((row) => getOverviewStart(row) !== null)
+        .sort((first, second) => first.clientStartEpoch - second.clientStartEpoch);
+      const newIndex = previousRow ? requestRows.indexOf(previousRow) : -1;
+      const scrollTop = reset ? 0 : newIndex >= 0 ? newIndex * OVERVIEW_ROW_HEIGHT + previousOffset : previousTop;
+      const hasRequests = requestRows.length > 0;
+      noDisplayedRequests.hidden = hasRequests;
+      requestCount.hidden = !hasRequests;
+      requestCount.textContent = uiTextFormat('overviewRequestCount', { total: requestRows.length.toLocaleString() });
+      waterfall.tabIndex = hasRequests ? 0 : -1;
+      paintRequestWindow(scrollTop);
+      waterfall.scrollTop = scrollTop;
+      if (waterfall.scrollTop !== scrollTop) paintRequestWindow(waterfall.scrollTop);
+    };
+
+    const paint = () => {
+      timer = null;
+      if (drag) return;
+      toggle.disabled = state.sampleCaptureActive;
+      panel.hidden = !expanded || toggle.disabled || state.rows.length === 0;
+      toggle.setAttribute('aria-expanded', String(!panel.hidden));
+      if (panel.hidden) {
+        requestRows = [];
+        for (const lane of lanes) lane.row = null;
+        return;
+      }
+
+      const focusedControl = document.activeElement;
+      const focusedBin = timeline.contains(focusedControl) ? focusedControl : null;
+      const focusedStart = focusedBin ? Number(focusedBin.dataset.start) : NaN;
+      const preTimeRows = state.requestTimeFacet
+        ? state.requestScopeRows.filter((row) => matchesRequestHostFacet(row) && matchesRequestStatusFacet(row))
+        : state.filteredRows;
+      chart = computeTrafficTimeline(preTimeRows);
+      const visible = getVisibleRows();
+      distribution = computeLatencyDistribution(visible);
+      const range = state.requestTimeFacet;
+      if (!range) anchor = null;
+      const resetRequests = range !== drawnRange;
+      drawnRange = range;
+
+      const hasTimes = !!chart.range;
+      const focusIndex = chart.bins.findIndex((bin) => focusedStart >= bin.start && focusedStart < bin.end);
+      activeIndex = focusIndex >= 0 ? focusIndex : Math.max(0, Math.min(activeIndex, chart.bins.length - 1));
+      waterfall.hidden = instructions.hidden = !hasTimes;
+      $('#overviewTimeEmpty').hidden = hasTimes;
+      if (!hasTimes) {
+        requestRows = [];
+        requestCount.hidden = true;
+        paintRequestWindow(0);
+      }
+      instructions.textContent = uiText('overviewInstructions') +
+        (state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options)
+          ? ' ' + uiText('overviewSearchScope') : '');
+      for (let index = 0; index < bins.length; index += 1) {
+        const button = bins[index];
+        const bin = chart.bins[index];
+        button.hidden = !bin;
+        button.tabIndex = bin && index === activeIndex ? 0 : -1;
+        if (!bin) continue;
+        button.dataset.start = bin.start;
+        button.dataset.end = bin.end;
+        const selected = !!range && bin.start >= range.start && bin.end <= range.end;
+        const partial = !!range && !selected && bin.start < range.end && range.start < bin.end;
+        button.title = uiTextFormat('overviewBinLabel', {
+          range: formatOverviewRange(bin), count: bin.count, errors: bin.errors,
+        }) + (partial ? ' · ' + uiText('overviewPartialBin') : '');
+        button.setAttribute('aria-label', button.title);
+        button.setAttribute('aria-pressed', String(selected));
+        button.classList.toggle('overview-bin--partial', partial);
+        button.style.setProperty('--overview-bin-width', (bin.end - bin.start) / (chart.range.end - chart.range.start));
+      }
+      if (hasTimes) {
+        const span = chart.range.end - chart.range.start;
+        timeBounds.firstElementChild.textContent = '0 ms';
+        timeBounds.children[1].textContent = formatTimingDuration(span / 2);
+        timeBounds.lastElementChild.textContent = formatTimingDuration(span);
+        paintSelection(range, chart.range);
+        paintRequests(visible, chart.range, resetRequests);
+      }
+      const currentBin = focusedBin && hasTimes ? bins[activeIndex] : null;
+      if (focusedBin && focusedBin !== currentBin) (currentBin || toggle).focus({ preventScroll: true });
+      if (currentBin) readout.textContent = currentBin.title;
+      else showRangeReadout();
+      missingStarts.hidden = chart.untimed === 0;
+      if (chart.untimed) missingStarts.textContent = uiTextFormat('overviewMissingStarts', { count: chart.untimed });
+      peakButton.hidden = !chart.peak;
+      if (chart.peak) {
+        peakButton.textContent = uiTextFormat('overviewPeak', { count: chart.peak.errors });
+        peakButton.title = formatOverviewRange(chart.peak);
+        peakButton.setAttribute('aria-label', peakButton.textContent + ' · ' + peakButton.title);
+      }
+      clearButton.hidden = !range;
+
+      measured.textContent = uiTextFormat('overviewMeasured', { count: distribution.measured });
+      latency.hidden = distribution.measured === 0;
+      $('#overviewLatencyEmpty').hidden = !latency.hidden;
+      for (let index = 0; index < latencyBands.length; index += 1) {
+        const { band, count } = latencyBands[index];
+        const value = distribution.bands[index];
+        count.textContent = value;
+        band.dataset.count = value;
+        band.style.setProperty('--overview-share', distribution.measured ? (value / distribution.measured * 100) + '%' : '0%');
+      }
+      latencyOmissions.hidden = distribution.pending === 0 && distribution.unmeasured === 0;
+      if (!latencyOmissions.hidden) latencyOmissions.textContent = uiTextFormat('overviewLatencyExcluded', {
+        pending: distribution.pending, unknown: distribution.unmeasured,
+      });
+      slowestButton.hidden = !distribution.slowest;
+      if (distribution.slowest) slowestButton.textContent = uiTextFormat('overviewSlowest', {
+        duration: formatTimingDuration(distribution.slowest.duration),
+      });
+      if ([clearButton, peakButton, slowestButton].includes(focusedControl) && focusedControl.hidden) {
+        (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
+      }
+      if ((requests.contains(focusedControl) || focusedControl === waterfall) &&
+          (!hasTimes || !requestRows.length)) {
+        (hasTimes ? bins[activeIndex] : toggle).focus({ preventScroll: true });
+      }
+    };
+
+    const repaint = () => {
+      if (timer !== null) clearTimeout(timer);
+      paint();
+    };
+    const selectBin = (bin, extend) => {
+      if (!extend || !anchor) anchor = { start: bin.start, end: bin.end };
+      applyOverviewRange({ start: Math.min(bin.start, anchor.start), end: Math.max(bin.end, anchor.end) });
+    };
+    waterfall.addEventListener('scroll', () => {
+      if (requestFrame !== null) return;
+      requestFrame = requestAnimationFrame(() => {
+        requestFrame = null;
+        if (!panel.hidden && !waterfall.hidden) paintRequestWindow(waterfall.scrollTop);
+      });
+    });
+    waterfall.addEventListener('keydown', (event) => {
+      if ((event.target !== waterfall && !requests.contains(event.target)) || requestRows.length === 0) return;
+      const height = Math.max(OVERVIEW_ROW_HEIGHT, waterfall.clientHeight - ruler.offsetHeight);
+      const pageSize = Math.max(1, Math.floor(height / OVERVIEW_ROW_HEIGHT));
+      const current = focusedLane();
+      const index = current?.index ?? Math.floor(waterfall.scrollTop / OVERVIEW_ROW_HEIGHT);
+      const next = {
+        ArrowUp: index - (current ? 1 : 0), ArrowDown: index + (current ? 1 : 0),
+        PageUp: index - pageSize, PageDown: index + pageSize, Home: 0, End: requestRows.length - 1,
+      }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      const destination = Math.max(0, Math.min(next, requestRows.length - 1));
+      const top = destination * OVERVIEW_ROW_HEIGHT;
+      const scrollTop = Math.min(top, Math.max(waterfall.scrollTop, top + OVERVIEW_ROW_HEIGHT - height));
+      waterfall.scrollTop = scrollTop;
+      paintRequestWindow(waterfall.scrollTop, requestRows[destination].id);
+    });
+    toggle.addEventListener('click', () => {
+      expanded = !expanded;
+      repaint();
+    });
+    panel.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (drag) {
+        drag = null;
+        ignorePointerClick = true;
+        repaint();
+        return;
+      }
+      expanded = false;
+      repaint();
+      toggle.focus();
+    });
+    timeline.addEventListener('click', (event) => {
+      if (event.detail && ignorePointerClick) return;
+      const button = event.target.closest('[data-overview-bin]');
+      if (!button || button.hidden) return;
+      const index = Number(button.dataset.overviewBin);
+      bins[activeIndex].tabIndex = -1;
+      activeIndex = index;
+      button.tabIndex = 0;
+      selectBin(chart.bins[index], event.shiftKey);
+    });
+    timeline.addEventListener('pointerdown', (event) => {
+      if (!event.isPrimary || event.button !== 0 || !chart?.range) return;
+      const { left, width } = timeline.getBoundingClientRect();
+      if (!width) return;
+      ignorePointerClick = false;
+      drag = { id: event.pointerId, origin: event.clientX, left, width, scale: chart.range, selection: null };
+    });
+    const updateDrag = (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (!drag.selection && Math.abs(event.clientX - drag.origin) < 4) return;
+      const { origin, left, width, scale } = drag;
+      const toEpoch = (x) => scale.start + Math.max(0, Math.min(1, (x - left) / width)) * (scale.end - scale.start);
+      const start = Math.min(scale.end - 1, Math.floor(toEpoch(Math.min(origin, event.clientX))));
+      const end = Math.max(start + 1, Math.ceil(toEpoch(Math.max(origin, event.clientX))));
+      drag.selection = { start, end };
+      paintSelection(drag.selection, scale);
+      readout.textContent = uiTextFormat('overviewSelected', { range: formatOverviewRange(drag.selection) });
+    };
+    window.addEventListener('pointermove', updateDrag);
+    window.addEventListener('pointerup', (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      updateDrag(event);
+      const { selection } = drag;
+      drag = null;
+      if (selection) {
+        ignorePointerClick = true;
+        anchor = selection;
+        applyOverviewRange(selection);
+      } else {
+        repaint();
+      }
+    });
+    window.addEventListener('pointercancel', (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      drag = null;
+      repaint();
+    });
+    window.addEventListener('blur', () => {
+      if (!drag) return;
+      drag = null;
+      repaint();
+    });
+    timeline.addEventListener('keydown', (event) => {
+      const button = event.target.closest('[data-overview-bin]');
+      if (!button || !chart.bins.length) return;
+      const current = Number(button.dataset.overviewBin);
+      const last = chart.bins.length - 1;
+      const destinations = { ArrowLeft: Math.max(0, current - 1), ArrowRight: Math.min(last, current + 1), Home: 0, End: last };
+      if (!Object.hasOwn(destinations, event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      activeIndex = destinations[event.key];
+      button.tabIndex = -1;
+      bins[activeIndex].tabIndex = 0;
+      bins[activeIndex].focus();
+      if (event.shiftKey) {
+        if (!anchor) anchor = chart.bins[current];
+        selectBin(chart.bins[activeIndex], true);
+      }
+    });
+    const readBin = (event) => {
+      if (drag) return;
+      const button = event.target.closest('[data-overview-bin]');
+      if (button) readout.textContent = button.title;
+    };
+    timeline.addEventListener('focusin', readBin);
+    timeline.addEventListener('pointerover', readBin);
+    timeline.addEventListener('focusout', showRangeReadout);
+    timeline.addEventListener('pointerleave', () => {
+      if (!drag) showRangeReadout();
+    });
+    clearButton.addEventListener('click', () => {
+      applyOverviewRange(null);
+      (bins[activeIndex].hidden ? toggle : bins[activeIndex]).focus({ preventScroll: true });
+    });
+    peakButton.addEventListener('click', () => {
+      repaint();
+      if (chart?.peak) selectBin(chart.peak, false);
+    });
+    slowestButton.addEventListener('click', () => {
+      repaint();
+      const row = distribution?.slowest;
+      if (!row || !getVisibleRows().includes(row)) return;
+      selectRow(row, null, true);
+      scrollToSelectedRow();
+    });
+
+    return (immediate = false) => {
+      toggle.disabled = state.sampleCaptureActive;
+      if (!expanded) return;
+      if (immediate) {
+        repaint();
+        return;
+      }
+      if (timer !== null) return;
+      timer = setTimeout(paint, 120);
+    };
+  }
+
+  function renderAnalysisBar() {
+    const bar = $('#analysisBar');
+    if (!bar) return;
+    bar.hidden = state.rows.length === 0;
+    if (bar.hidden) return;
+
+    const hasSample = state.sampleCaptureActive;
+    const hasSearchRestriction = state.search.matchesOnly && hasActiveSearchKeywords(state.search.keywords, state.search.options);
+    const counts = { all: 0, '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, other: 0, pending: 0 };
+    for (const row of state.requestScopeRows || state.filteredRows) {
+      if (!hasSample && (!matchesRequestHostFacet(row) || !requestOverlapsRange(row, state.requestTimeFacet))) continue;
+      counts.all += 1;
+      counts[classifyRequestFacet(row)] += 1;
+    }
+    for (const button of bar.querySelectorAll('[data-status-facet]')) {
+      const facet = button.dataset.statusFacet;
+      button.disabled = hasSample;
+      button.setAttribute('aria-pressed', String(facet === (hasSample ? 'all' : state.requestStatusFacet)));
+      const count = button.querySelector('.analysis-count');
+      if (count.textContent !== String(counts[facet])) count.textContent = counts[facet];
+      const label = uiTextFormat('analysisStatusFacetCount', { label: button.firstElementChild.textContent, count: counts[facet] });
+      if (button.getAttribute('aria-label') !== label) button.setAttribute('aria-label', label);
+    }
+
+    const compare = $('#analysisCompareBtn');
+    const isVisible = (row) => state.filteredRows.includes(row) && (!hasSearchRestriction || state.search.rowColors.has(row));
+    compare.hidden = state.selectedRows.size !== 2 || ![...state.selectedRows].every((row) =>
+      isVisible(row),
+    );
+    const outsideView = $('#analysisOutsideView');
+    outsideView.hidden = !state.selectedRow || !!state.comparedRows || isVisible(state.selectedRow);
+
+    const filters = [];
+    if (!hasSample && state.requestTimeFacet) {
+      filters.push(['time', uiTextFormat('overviewRangeFilter', { range: formatOverviewRange(state.requestTimeFacet) }), () => {
+        applyOverviewRange(null);
+      }]);
+    }
+    if (!hasSample && state.requestHostFacet) {
+      filters.push(['host', uiTextFormat('analysisHost', { host: state.requestHostFacet }), () => {
+        state.requestHostFacet = '';
+        repaintRequestScope();
+      }]);
+    }
+    if (!hasSample && state.webSocketOnly) {
+      filters.push(['websocket', 'WebSocket', () => {
+        state.webSocketOnly = false;
+        repaintRequestScope();
+      }]);
+    }
+    if (hasSearchRestriction) {
+      filters.push(['search', uiText('analysisSearchOnly'), () => {
+        setSearchMatchesOnly(false);
+        repaintRequestScope();
+      }]);
+    }
+    for (const column of state.columns) {
+      const rule = getApplicableFilterRule(state.columnFilterRules[column.id]);
+      if (isVisualOnlyColumn(column.id) || !isRuleActive(rule)) continue;
+      const name = menuColumnLabel(column.id, column.label);
+      const condition = describeAnalysisRule(rule);
+      const label = condition ? name + ' · ' + shortenMenuValue(condition) : name;
+      filters.push([column.id, label, () => {
+        state.columnFilterRules[column.id] = DEFAULT_COLUMN_FILTER_RULES()[column.id];
+        repaintRequestScope();
+      }]);
+    }
+
+    const chips = $('#analysisChips');
+    const focused = chips.contains(document.activeElement);
+    const previousKey = focused ? document.activeElement.dataset.filterKey : '';
+    chips.hidden = !filters.length && (hasSample || state.requestStatusFacet === 'all');
+    const signature = JSON.stringify([activeLanguage, chips.hidden, ...filters.map(([key, label]) => [key, label])]);
+    if (chips.dataset.signature === signature) return;
+    chips.dataset.signature = signature;
+    chips.setAttribute('aria-label', uiText('analysisActive'));
+    const controls = new Map();
+    chips.replaceChildren();
+    for (const [key, label, remove] of filters) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.filterKey = key;
+      button.setAttribute('aria-label', uiTextFormat('analysisRemove', { filter: label }));
+      const text = document.createElement('span');
+      text.textContent = label;
+      const cross = document.createElement('span');
+      cross.textContent = '×';
+      cross.setAttribute('aria-hidden', 'true');
+      button.append(text, cross);
+      button.addEventListener('click', remove);
+      chips.appendChild(button);
+      controls.set(key, button);
+    }
+    if (!chips.hidden) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.dataset.filterKey = 'clear';
+      clear.className = 'analysis-clear';
+      clear.textContent = uiText('analysisClear');
+      clear.addEventListener('click', clearRequestAnalysisFilters);
+      chips.appendChild(clear);
+      controls.set('clear', clear);
+    }
+    if (focused) {
+      const fallback = previousKey === 'time' ? $('#overviewToggleBtn') : $('#filterBtn');
+      (controls.get(previousKey) || fallback).focus({ preventScroll: true });
+    }
+  }
+
   function updateTableSummary(visibleRowCount, visibleBytes) {
     if (Number.isFinite(visibleBytes)) state.visibleBytes = visibleBytes;
     const activeFilterCount = countActiveColumnFilters(state.columnFilterRules);
@@ -15119,6 +17727,10 @@ const _NetworkPlus = (function () {
       counter.title = summary.accessibleText;
     }
     queueRequestCountAnnouncement(summary.accessibleText);
+    const webSocketOnlyButton = $('#webSocketOnlyBtn');
+    webSocketOnlyButton.disabled = state.sampleCaptureActive;
+    webSocketOnlyButton.setAttribute('aria-pressed', String(state.webSocketOnly && !state.sampleCaptureActive));
+    syncWsCapturePrompt();
     const filterButton = $('#filterBtn');
     if (filterButton) {
       filterButton.textContent =
@@ -15146,34 +17758,13 @@ const _NetworkPlus = (function () {
         selectedSizeEl.textContent = '';
       }
     }
-    const srch = state.search;
-    const activeKeywords = srch.keywords.filter((keyword) => isApplicableSearchKeyword(keyword, srch.options));
-    const countEl = $('#searchCount');
-    if (countEl) {
-      if (srch.matches.length === 0 && activeKeywords.length > 0) {
-        countEl.textContent = 'No matches';
-        countEl.style.color = 'var(--status-5xx-text)';
-      } else if (srch.matches.length > 0 && activeKeywords.length > 0) {
-        countEl.textContent = srch.matches.length + ' matches';
-        countEl.style.color = '';
-      } else {
-        countEl.textContent = '';
-        countEl.style.color = '';
-      }
-      const unsearchedBodies = srch.scope.resBody && activeKeywords.length > 0
-        ? countUnsearchedResponseBodies(state.filteredRows)
-        : 0;
-      if (unsearchedBodies > 0) {
-        countEl.textContent += ' · ' + unsearchedBodies + ' bodies not searched';
-      }
-      queueSearchCountAnnouncement(countEl.textContent);
-    }
+    updateListSearchStatus();
     const statsEl = $('#statsSummary');
     if (statsEl) {
       const visibleRows = getVisibleRows();
       if (visibleRows.length > 0) {
         const stats = computeStats(visibleRows);
-        renderStatsSummary(statsEl, stats, inspectFirstStatusClassRequest);
+        renderStatsSummary(statsEl, stats);
       } else {
         clearStatsSummary(statsEl);
       }
@@ -15181,6 +17772,32 @@ const _NetworkPlus = (function () {
     // Every render and streaming path funnels through here, so the domain
     // summary panel refreshes without touching the incremental fast path.
     if (state.syncDomainSummary) state.syncDomainSummary();
+    renderAnalysisBar();
+    state.syncTrafficOverview?.();
+  }
+
+  function updateListSearchStatus() {
+    const srch = state.search;
+    const active = srch.keywords.some((keyword) => isApplicableSearchKeyword(keyword, srch.options));
+    const running = active && srch.fullResponses?.running;
+    const noMatches = active && !srch.matches.length;
+    const countText = !active ? '' : noMatches ? (running ? '…' : 'No matches') : srch.matches.length + ' matches';
+    const count = $('#searchCount');
+    if (count) {
+      count.textContent = countText;
+      count.style.color = noMatches && !running ? 'var(--status-5xx-text)' : '';
+    }
+    // Keep progress and incomplete-search notes out of the fixed-width count.
+    const noticeParts = [];
+    if (srch.matchesOnly && active) noticeParts.push('Showing matches only');
+    if (running) noticeParts.push(uiText('payloadSearchRunning'));
+    const unsearchedBodies = active && srch.scope.resBody
+      ? countUnsearchedResponseBodies(state.filteredRows, srch.fullResponses)
+      : 0;
+    if (unsearchedBodies > 0) noticeParts.push(unsearchedBodies + ' bodies not searched');
+    const notice = $('#searchPanelNotice');
+    if (notice) notice.textContent = noticeParts.join(' · ');
+    queueSearchCountAnnouncement([running && noMatches ? '' : countText, ...noticeParts].filter(Boolean).join(' · '));
   }
 
   function appendIncrementalRows(liveRows) {
@@ -15215,7 +17832,17 @@ const _NetworkPlus = (function () {
     for (let element = tbody.firstElementChild; element; element = element.nextElementSibling) {
       if (element.dataset && element.dataset.rowId != null) renderedRowIds.push(element.dataset.rowId);
     }
-    const rowsToAppend = getIncrementalAppendBatch(liveRows, renderedRowIds);
+    const scopeBatch = getIncrementalAppendBatch(liveRows, renderedRowIds).filter(matchesRequestTypeFilter);
+    let rowsToAppend = scopeBatch;
+    if (state.requestScopeRows) {
+      const scopeSet = new Set(state.requestScopeRows);
+      for (const row of scopeBatch) {
+        if (scopeSet.has(row)) continue;
+        state.requestScopeRows.push(row);
+        scopeSet.add(row);
+      }
+      rowsToAppend = scopeBatch.filter(matchesRequestFacets);
+    }
     refreshSearchMatches();
     if (rowsToAppend.length === 0) {
       updateEmptyState(state.filteredRows.length);
@@ -15358,13 +17985,6 @@ const _NetworkPlus = (function () {
     if (selectedTr) selectedTr.scrollIntoView({ block: 'nearest' });
   }
 
-  function inspectFirstStatusClassRequest(statusClass) {
-    const targetRow = findFirstStatusClassRow(getVisibleSortedRows(), statusClass);
-    if (!targetRow) return;
-    selectRow(targetRow, null, true);
-    scrollToSelectedRow();
-  }
-
   function render() {
     recomputeAutoHiddenColumns();
     renderHeader();
@@ -15450,6 +18070,7 @@ const _NetworkPlus = (function () {
 
   function closeDetailsPanel() {
     setDetailsPanelCollapsed(true);
+    if (wsMessagesView) resetWsMessagesView();
     const tbody = $('#tbody');
     const selectedRow = state.selectedRow
       ? tbody && tbody.querySelector('tr[data-row-id="' + state.selectedRow.id + '"]')
@@ -15466,6 +18087,7 @@ const _NetworkPlus = (function () {
   // Before any selection the pane shows one line of guidance instead of two
   // empty tab strips; the inspector halves return with the next selection.
   function setInspectorEmptyState(empty) {
+    if (empty) updateWsDetailTabs(null);
     const inspectorPanels = $('.inspector-panels');
     const emptyState = $('#inspectorEmptyState');
     if (inspectorPanels) {
@@ -15509,6 +18131,8 @@ const _NetworkPlus = (function () {
   // button, the summary strip. The comparison writers set their own title
   // text and call this so no stale request identity survives next to it.
   function resetDetailsHeader() {
+    const outsideView = $('#analysisOutsideView');
+    if (outsideView) outsideView.hidden = true;
     detailsTitlePath = '';
     const title = $('#detailsTitle');
     if (title && typeof title.removeAttribute === 'function') title.removeAttribute('title');
@@ -15708,7 +18332,7 @@ const _NetworkPlus = (function () {
       strip.appendChild(item);
     };
     if (row._pendingRequest) {
-      addItem(uiText('statusPendingRequest'), 'details-summary-status details-summary-status--other');
+      addItem(uiText('statusPendingRequest'), 'details-summary-status details-summary-status--pending');
     } else if (isLiveStreamRow(row) || row._mirrorStreamRevision != null) {
       addItem(row.statusText, 'details-summary-status details-summary-status--other');
     } else if (plan.status) {
@@ -16242,6 +18866,7 @@ const _NetworkPlus = (function () {
   // prose that was not captured from the network.
   function attachPaneSearch(pane, fullText, options) {
     if (!pane) return;
+    pane._cancelFullPaneSearch?.();
     const paneId = pane.id;
     const paneLabel = paneSearchLabel(paneId);
     const hiddenSource = !!(options && options.hiddenSource);
@@ -16333,6 +18958,14 @@ const _NetworkPlus = (function () {
     let truncated = false;
 
     let collapsedHits = 0;
+    let fullSearch = null;
+    let fullStatus = '';
+    let fullResults = null;
+    const cancelFullSearch = () => {
+      fullSearch?.abort();
+      fullSearch = null;
+    };
+    pane._cancelFullPaneSearch = cancelFullSearch;
 
     const updateCount = () => {
       const query = input.value.trim();
@@ -16347,6 +18980,9 @@ const _NetworkPlus = (function () {
               : '';
       if (collapsedHits > 0) {
         count.textContent += uiTextFormat('paneSearchCollapsedSuffix', { count: collapsedHits });
+      }
+      if (fullStatus && query && !errorMessage.textContent) {
+        count.textContent = [marks.length ? count.textContent : '', fullStatus].filter(Boolean).join(' · ');
       }
       expandBtn.hidden = collapsedHits === 0 || treeOwnsExpansion;
       const disabled = marks.length === 0;
@@ -16376,6 +19012,10 @@ const _NetworkPlus = (function () {
     };
 
     const runHighlight = () => {
+      cancelFullSearch();
+      fullResults?.remove();
+      fullResults = null;
+      fullStatus = '';
       searchState.query = input.value;
       clearPaneSearchHits(pane);
       marks = [];
@@ -16424,6 +19064,56 @@ const _NetworkPlus = (function () {
       } else {
         updateCount();
       }
+      if (query.trim() && !compiledError && (options?.loadFullText || options?.searchFullText)) {
+        const controller = new AbortController();
+        const current = () => !controller.signal.aborted && bar.isConnected && input.value === query;
+        fullSearch = controller;
+        fullStatus = uiText('payloadSearchRunning');
+        updateCount();
+        const search = createPayloadSearcher(controller.signal);
+        const finishFullSearch = async () => {
+          try {
+            const { regex } = compileSearchQuery(query, searchOptions);
+            const after = options.previewLength || 0;
+            const result = (options.searchFullText
+              ? await options.searchFullText([query], searchOptions, after, controller.signal)
+              : await search.scan(await options.loadFullText(current), [regex], after))?.[0];
+            if (!current()) return;
+            fullStatus = result ? '' : uiText('payloadSearchPartial');
+            if (result?.hits.length) {
+              fullResults = document.createElement('ol');
+              fullResults.className = 'pane-search-full-results';
+              fullResults.setAttribute('aria-label', uiText('payloadSearchExcerpts'));
+              for (const hit of result.hits) {
+                const entry = document.createElement('li');
+                const offset = document.createElement('span');
+                offset.className = 'pane-search-offset';
+                offset.textContent = uiTextFormat('payloadSearchOffset', { offset: (hit.offset + 1).toLocaleString(activeLanguage) });
+                const code = document.createElement('code');
+                const mark = document.createElement('mark');
+                mark.className = 'pane-search-hit';
+                mark.textContent = hit.match;
+                code.append(hit.before, mark, hit.after);
+                entry.append(offset, code);
+                fullResults.appendChild(entry);
+                marks.push(mark);
+              }
+              bar.after(fullResults);
+              truncated = truncated || result.more;
+              if (currentIndex < 0) setCurrent(0, false);
+            }
+            updateCount();
+          } catch (_error) {
+            if (current()) {
+              fullStatus = uiText('payloadSearchPartial');
+              updateCount();
+            }
+          } finally {
+            search.close();
+          }
+        };
+        finishFullSearch();
+      }
     };
     pane._paneSearchRefresh = () => {
       if (searchState.open) runHighlight();
@@ -16436,7 +19126,10 @@ const _NetworkPlus = (function () {
     };
 
     const debouncedHighlight = debounce(runHighlight, FILTER_DEBOUNCE_MS);
-    input.addEventListener('input', debouncedHighlight);
+    input.addEventListener('input', () => {
+      cancelFullSearch();
+      debouncedHighlight();
+    });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -16575,7 +19268,7 @@ const _NetworkPlus = (function () {
     container.insertBefore(wrapper, container.firstChild);
   }
 
-  function buildRawRequestText(row) {
+  function buildRawRequestText(row, body = row.requestPostData?.text) {
     const method = row.method || 'GET';
     const url = row.url || '/';
     let path;
@@ -16595,9 +19288,7 @@ const _NetworkPlus = (function () {
       }
     }
     raw += '\r\n';
-    if (row.requestPostData && row.requestPostData.text) {
-      raw += row.requestPostData.text;
-    }
+    if (body) raw += body;
     return raw;
   }
 
@@ -17009,7 +19700,7 @@ const _NetworkPlus = (function () {
    * method, path and protocol), header names colored, a hairline divider
    * before the body, and a JSON body highlighted in place.
    */
-  function renderRawHighlighted(rawText) {
+  function renderRawHighlighted(rawText, highlightBody = true) {
     const pre = document.createElement('pre');
     pre.className = 'code-block code-raw';
     const lines = rawText.split('\n');
@@ -17057,7 +19748,7 @@ const _NetworkPlus = (function () {
           const divider = document.createElement('span');
           divider.className = 'raw-body-divider';
           pre.appendChild(divider);
-          if (formatJsonSafe(body) !== null) {
+          if (highlightBody && formatJsonSafe(body) !== null) {
             appendJsonHighlight(pre, body);
           } else {
             pre.appendChild(document.createTextNode(body));
@@ -17094,10 +19785,12 @@ const _NetworkPlus = (function () {
 
   function setResponsePaneMessage(message) {
     const body = $('#res-body');
+    body._cancelFullPaneSearch?.();
     body.textContent = '';
     body.appendChild(createResponsePreviewHeading());
     renderPaneEmptyMessage(body, message);
     const raw = $('#res-raw');
+    raw._cancelFullPaneSearch?.();
     raw.textContent = '';
     renderPaneEmptyMessage(raw, message);
   }
@@ -17235,6 +19928,171 @@ const _NetworkPlus = (function () {
     if (pressed) pressed.focus();
   }
 
+  async function buildPayloadDownloadBlob(content, encoding, isCurrent) {
+    const binary = encoding === 'base64';
+    const parts = [];
+    let offset = 0;
+    let carry = '';
+    let reachedPadding = false;
+    while (offset < content.length) {
+      if (!isCurrent()) return null;
+      let end = Math.min(offset + PAYLOAD_DOWNLOAD_CHUNK_CHARS, content.length);
+      const last = content.charCodeAt(end - 1);
+      if (!binary && end < content.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+      const part = content.slice(offset, end);
+      if (binary) {
+        const encoded = carry + part.replace(/[\t\n\f\r ]/g, '');
+        if (reachedPadding && encoded) throw new Error('Unexpected data after base64 padding');
+        const length = end === content.length ? encoded.length : encoded.length - encoded.length % 4;
+        if (length) {
+          const complete = encoded.slice(0, length);
+          parts.push(base64ToBytes(complete));
+          reachedPadding = complete.endsWith('=');
+        }
+        carry = encoded.slice(length);
+      } else {
+        parts.push(part);
+      }
+      offset = end;
+      if (offset < content.length) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return new Blob(parts, { type: binary ? 'application/octet-stream' : 'text/plain;charset=utf-8' });
+  }
+
+  async function readFullResponseDownload(row, isCurrent) {
+    if (typeof row.responseContent === 'string') {
+      return { content: row.responseContent, encoding: row.responseContentEncoding };
+    }
+    if (row._originalHarHasBody && row._readImportedHarEntry) {
+      const entry = await row._readImportedHarEntry(isCurrent);
+      return { content: entry.response.content?.text, encoding: entry.response.content?.encoding };
+    }
+    if (row._responseSearchSource?.id) {
+      const { file, id } = row._responseSearchSource;
+      const entries = await extractBoundedSazEntries(window.fflate, new Uint8Array(await file.arrayBuffer()));
+      if (!isCurrent()) return {};
+      const entry = createSazHarEntry(entries.get('raw/' + id + '_c.txt'), entries.get('raw/' + id + '_s.txt'), row.startedDateTime);
+      return { content: entry.response.content?.text, encoding: entry.response.content?.encoding };
+    }
+    return fetchRawLiveResponsePayload(row);
+  }
+
+  function getSearchableResponseText(row, { content, encoding }) {
+    if (typeof content !== 'string' || content.length > PAYLOAD_SEARCH_MAX_CHARS) return null;
+    const text = decodeResponseContent(content, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
+    return encoding === 'base64' && content && (!text || isUndecodableBodyText(text)) ? null : text;
+  }
+
+  async function readSearchableResponse(row, isCurrent) {
+    if (typeof row.responseContentText === 'string' && row.responseContentState === 'cached') return row.responseContentText;
+    const payload = await readFullResponseDownload(row, isCurrent);
+    return isCurrent() ? getSearchableResponseText(row, payload) : null;
+  }
+
+  function appendLargePayloadNotice(pane, row, messageKey, side) {
+    const notice = document.createElement('div');
+    notice.className = 'large-payload-notice';
+    const message = document.createElement('p');
+    message.textContent = uiText(messageKey);
+    notice.appendChild(message);
+    if (side) {
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'link-btn';
+      const label = uiText(side === 'request' ? 'largePayloadSaveRequest' : 'largePayloadSaveResponse');
+      save.textContent = label;
+      const isCurrent = () => state.selectedRow === row && !row._retentionDisposed;
+      save.addEventListener('click', () => requestFullOutboundAction({
+        title: uiText('largePayloadSaveTitle'),
+        detail: uiText('largePayloadSaveDetail'),
+        confirmLabel: label,
+        trigger: save,
+        onConfirm: async () => {
+          if (!isCurrent()) return;
+          save.disabled = true;
+          setStatus(uiText('largePayloadSaving'));
+          try {
+            const payload = side === 'request'
+              ? { content: row.requestPostData?.text, encoding: row.requestPostData?.encoding }
+              : await readFullResponseDownload(row, isCurrent);
+            if (!isCurrent()) return;
+            if (typeof payload.content !== 'string') throw new Error('The captured body is unavailable');
+            const blob = await buildPayloadDownloadBlob(payload.content, payload.encoding, isCurrent);
+            if (!blob || !isCurrent()) return;
+            const id = Number.isSafeInteger(row.id) && row.id >= 0 ? '-' + row.id : '';
+            const extension = payload.encoding === 'base64' ? '.bin' : '.txt';
+            triggerObjectUrlDownload(URL.createObjectURL(blob), 'network-plus-' + side + '-body' + id + extension);
+            setStatus(uiText('largePayloadSaved'));
+          } catch (_error) {
+            if (isCurrent()) setStatus(uiText('largePayloadSaveUnavailable'), true);
+          } finally {
+            save.disabled = false;
+          }
+        },
+      }));
+      notice.appendChild(save);
+    }
+    pane.appendChild(notice);
+  }
+
+  function renderUnavailableResponseContent(row, error) {
+    const display = describeResponseContentState(row, error);
+    setResponsePaneMessage(formatBodyPaneMessage(display));
+    const canSaveLive = display.label === 'omitted' && typeof row._reqObj?.getContent === 'function';
+    const canSaveImported = (display.label === 'omitted' || display.label === 'evicted') &&
+      row._originalHarHasBody && typeof row._readImportedHarEntry === 'function';
+    const canSave = canSaveLive || canSaveImported;
+    const mirrorLimit = typeof row._mirrorFetchBody === 'function' &&
+      (display.label === 'omitted' || /per-body cache limit/.test(display.reason));
+    const canSearch = typeof row._reqObj?.getContent === 'function' || canSaveImported || row._responseSearchSource?.id;
+    const canSearchViaMirror = !row._pendingRequest && row._mirrorSearchResponse;
+    if (canSearch || mirrorLimit || canSearchViaMirror) {
+      for (const pane of [$('#res-body'), $('#res-raw')]) {
+        const message = canSaveImported ? 'largePayloadImported' : canSaveLive ? 'largePayloadLive' : 'largePayloadMirror';
+        if (canSave || mirrorLimit) appendLargePayloadNotice(pane, row, message, canSave ? 'response' : '');
+        if (canSearch) {
+          attachPaneSearch(pane, '', { emptyContent: true, loadFullText: (isCurrent) => readSearchableResponse(row, isCurrent) });
+        } else if (canSearchViaMirror) {
+          attachPaneSearch(pane, '', { emptyContent: true, searchFullText: canSearchViaMirror });
+        }
+      }
+    }
+    applyResponseTabSignals({ 'res-body': canSave || mirrorLimit ? 1 : 0, 'res-raw': canSave || mirrorLimit ? 1 : 0 });
+    return display;
+  }
+
+  function renderLargeResponseContent(row, text, encoding) {
+    const body = $('#res-body');
+    const raw = $('#res-raw');
+    const binary = encoding === 'base64' && (!text || isUndecodableBodyText(text));
+    const preview = binary ? '' : inspectorPayloadPrefix(text);
+    body.replaceChildren(createResponsePreviewHeading());
+    raw.textContent = '';
+    const message = binary ? 'largePayloadBinary' : 'largePayloadPreview';
+    appendLargePayloadNotice(body, row, message, 'response');
+    appendLargePayloadNotice(raw, row, message, 'response');
+    if (preview) {
+      const pre = document.createElement('pre');
+      pre.className = 'code-block';
+      pre.textContent = preview;
+      body.appendChild(pre);
+    }
+    raw.appendChild(renderRawHighlighted(buildRawResponseText(row, preview), false));
+    for (const [pane, action, labelKey, statusKey] of [
+      [body, 'responseBody', 'paneNameResponseBody', 'statusCopiedSanitizedResponseBody'],
+      [raw, 'rawResponse', 'paneNameRawResponse', 'statusCopiedSanitizedRawResponse'],
+    ]) {
+      addCopyActions(pane, [
+        { label: uiText('menuCopySanitized'), onClick: () => copySanitizedAction(action, row, row.responseContent, uiText(statusKey)) },
+        { label: uiText('paneCopyFull'), onClick: (button) => requestFullClipboardAction(action, row, row.responseContent, button, labelKey) },
+      ]);
+    }
+    const fullSearch = binary ? null : { loadFullText: () => text, previewLength: preview.length };
+    attachPaneSearch(body, preview, { ...fullSearch, emptyContent: !preview });
+    attachPaneSearch(raw, preview, fullSearch);
+    applyResponseTabSignals({ 'res-body': 1, 'res-raw': 1 });
+  }
+
   // The Body pane's plain text block: a hex dump when the bytes are not text,
   // otherwise the decoded body, cut at TRUNCATE_LIMIT behind a control that
   // opens the rest. Shared by the text renderer and by HTML's Source view.
@@ -17324,20 +20182,23 @@ const _NetworkPlus = (function () {
 
   function renderCachedResponseContent(row) {
     if (row.responseContentState !== 'cached') {
-      const display = describeResponseContentState(row);
-      setResponsePaneMessage(formatBodyPaneMessage(display));
-      // A pane holding only the reason a body is missing is an empty pane,
-      // and its tab says so the same way the request half's Body tab does.
-      applyResponseTabSignals({ 'res-body': 0, 'res-raw': 0 });
+      renderUnavailableResponseContent(row);
       return;
     }
     const resBodyPane = $('#res-body');
     const resRawPane = $('#res-raw');
     const rawContent = typeof row.responseContent === 'string' ? row.responseContent : '';
     const encoding = row.responseContentEncoding === 'base64' ? 'base64' : '';
+    const largeRawContent = exceedsInspectorPayloadBudget(rawContent);
     let text = row.responseContentText != null
       ? row.responseContentText
-      : decodeResponseContent(rawContent, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
+      : largeRawContent && encoding === 'base64'
+        ? ''
+        : decodeResponseContent(rawContent, encoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type));
+    if (largeRawContent || exceedsInspectorPayloadBudget(text)) {
+      renderLargeResponseContent(row, text, encoding);
+      return;
+    }
     if (encoding === 'base64' && rawContent && !text) text = '(could not decode base64 response)';
 
     // Only a base64 body carries the real bytes, so only there can an honest
@@ -17532,6 +20393,7 @@ const _NetworkPlus = (function () {
     titleParts.push(row.url || '');
     renderDetailsTitle(row, titleParts);
     const summaryPlan = renderDetailsSummary(row);
+    if (updateWsDetailTabs(row)) return;
     renderInspectorTimingOverview(row);
 
     // === REQUEST TABS ===
@@ -17584,18 +20446,20 @@ const _NetworkPlus = (function () {
     // Request > Body
     const reqBodyPane = $('#req-body');
     reqBodyPane.textContent = '';
-    const requestBodyText = row.requestPostData && row.requestPostData.text;
+    const requestBodyText = row.requestPostData?.text || '';
+    const largeRequestBody = exceedsInspectorPayloadBudget(requestBodyText);
+    const requestBodyPreview = largeRequestBody ? inspectorPayloadPrefix(requestBodyText) : requestBodyText;
     if (requestBodyText) {
-      const text = requestBodyText;
-      const treeEl = renderJsonTree(text);
+      const treeEl = largeRequestBody ? null : renderJsonTree(requestBodyPreview);
       if (treeEl) {
         reqBodyPane.appendChild(treeEl);
       } else {
         const pre = document.createElement('pre');
         pre.className = 'code-block';
-        pre.textContent = text;
+        pre.textContent = requestBodyPreview;
         reqBodyPane.appendChild(pre);
       }
+      if (largeRequestBody) appendLargePayloadNotice(reqBodyPane, row, 'largePayloadPreview', 'request');
 
       addCopyActions(reqBodyPane, [
         {
@@ -17610,7 +20474,9 @@ const _NetworkPlus = (function () {
     } else {
       renderPaneEmptyMessage(reqBodyPane, uiText('emptyRequestBody'));
     }
-    attachPaneSearch(reqBodyPane, requestBodyText || '', { emptyContent: !requestBodyText });
+    const requestFullSearch = largeRequestBody
+      ? { loadFullText: () => requestBodyText, previewLength: requestBodyPreview.length } : null;
+    attachPaneSearch(reqBodyPane, requestBodyPreview, { ...requestFullSearch, emptyContent: !requestBodyText });
     const hasRequestBody = !!requestBodyText;
 
     // Request > Query
@@ -17690,7 +20556,7 @@ const _NetworkPlus = (function () {
     // Request > Raw
     const reqRawPane = $('#req-raw');
     reqRawPane.textContent = '';
-    const rawReqPre = renderRawHighlighted(buildRawRequestText(row));
+    const rawReqPre = renderRawHighlighted(buildRawRequestText(row, requestBodyPreview), !largeRequestBody);
     addCopyActions(reqRawPane, [
       {
         label: uiText('menuCopySanitized'),
@@ -17702,7 +20568,8 @@ const _NetworkPlus = (function () {
       },
     ]);
     reqRawPane.appendChild(rawReqPre);
-    attachPaneSearch(reqRawPane);
+    if (largeRequestBody) appendLargePayloadNotice(reqRawPane, row, 'largePayloadPreview', 'request');
+    attachPaneSearch(reqRawPane, requestBodyPreview, requestFullSearch);
 
     // === RESPONSE TABS ===
 
@@ -17751,9 +20618,7 @@ const _NetworkPlus = (function () {
       })
       .catch((error) => {
         if (!shouldRenderSelectedRow(state.selectedRow, row) || streamRevision !== row._mirrorStreamRevision) return;
-        const display = describeResponseContentState(row, error);
-        setResponsePaneMessage(formatBodyPaneMessage(display));
-        applyResponseTabSignals({ 'res-body': 0, 'res-raw': 0 });
+        const display = renderUnavailableResponseContent(row, error);
         if (display.label === 'error') {
           setStatus(
             uiTextFormat('statusResponseBodyRetryFailed', { id: row.id }),
@@ -17928,8 +20793,10 @@ const _NetworkPlus = (function () {
    * Uses only data already in the row objects — never triggers a new body fetch.
    */
   function renderComparisonPanel(rowA, rowB) {
+    setDetailsTitleText(uiText('detailsComparingTwo'));
     const panel = $('#comparePanel');
     if (!panel) return;
+    updateWsDetailTabs(null);
     panel.textContent = '';
 
     // Labelled region relationship: the h2 heading labels the panel element.
@@ -17958,7 +20825,7 @@ const _NetworkPlus = (function () {
       state.comparedRows = null;
       state.comparisonInvokingRowId = null;
       hideComparisonPanel();
-      focusRowOrGridFallback(invokingRowId);
+      restoreRequestComparisonFocus(invokingRowId);
     });
     headerRow.appendChild(closeBtn);
     panel.appendChild(headerRow);
@@ -18090,6 +20957,21 @@ const _NetworkPlus = (function () {
     panel.appendChild(bodySection);
   }
 
+  function openRequestComparison(rows, invokingRowId) {
+    if (rows.length !== 2 || state.selectedRows.size !== 2 ||
+        !rows.every((row) => state.selectedRows.has(row) && state.activeRows.has(row))) return;
+    state.comparedRows = rows;
+    state.comparisonInvokingRowId = invokingRowId;
+    renderComparisonPanel(rows[0], rows[1]);
+    showComparisonPanel();
+  }
+
+  function restoreRequestComparisonFocus(invokingRowId) {
+    const button = $('#analysisCompareBtn');
+    if (invokingRowId === null && button && !button.hidden) button.focus({ preventScroll: true });
+    else focusRowOrGridFallback(invokingRowId);
+  }
+
   function showComparisonPanel() {
     showDetailsPanel();
     // The comparison keeps its own header; no single request's tooltip, copy
@@ -18151,7 +21033,8 @@ const _NetworkPlus = (function () {
     const entries = [];
     for (const r of rows) {
       if (streamEntries?.has(r)) {
-        entries.push(streamEntries.get(r));
+        const stream = streamEntries.get(r);
+        entries.push({ ...stream, _networkPlus: { ...stream._networkPlus, overviewUnknownDuration: true } });
         continue;
       }
       const started = r.startedDateTime || new Date().toISOString();
@@ -18208,6 +21091,8 @@ const _NetworkPlus = (function () {
       if (webSocket?.count > 0) {
         if (webSocket.frames) entry._webSocketMessages = webSocket.frames;
         else entry._networkPlus = { webSocketFramesOmitted: webSocket.count };
+      } else if (r._wsArchiveOmitted) {
+        entry._networkPlus = { webSocketFramesOmitted: r._wsArchiveOmitted };
       }
       if (webSocket?.droppedFrames > 0 || webSocket?.binaryFramesWithoutPayload > 0 || webSocket?.unavailable) {
         entry._networkPlus = {
@@ -18217,6 +21102,14 @@ const _NetworkPlus = (function () {
             binaryFramesWithoutPayload: webSocket.binaryFramesWithoutPayload,
             textPreviewLimit: WS_FRAME_PREVIEW_CHARS,
           },
+        };
+      }
+      const overviewUnknownStart = r._overviewUnknownStart || !r.startedDateTime;
+      if (overviewUnknownStart || r._overviewUnknownDuration || r._pendingRequest) {
+        entry._networkPlus = {
+          ...entry._networkPlus,
+          ...(overviewUnknownStart ? { overviewUnknownStart: true } : {}),
+          ...(r._overviewUnknownDuration || r._pendingRequest ? { overviewUnknownDuration: true } : {}),
         };
       }
       entries.push(entry);
@@ -18292,7 +21185,7 @@ const _NetworkPlus = (function () {
       responseContentReason: STREAM_HAR_UNAVAILABLE_REASON,
     };
     const entry = buildHarLogFromRows([snapshot]).log.entries[0];
-    entry._networkPlus = { streamHarExport: { snapshotUnavailable: true } };
+    entry._networkPlus = { ...entry._networkPlus, streamHarExport: { snapshotUnavailable: true } };
     if (row.method === 'WS') entry._networkPlus.webSocketExport = { mirrorFramesUnavailable: true };
     return entry;
   }
@@ -18484,6 +21377,8 @@ const _NetworkPlus = (function () {
     let pendingScrollToBottom = false;
     let pendingCaptureCutoff = 0;
     let pollPendingRequests = () => {};
+    let readNativeWebSocketSnapshot = () => {};
+    let finishNativeWebSocket = () => false;
     let pendingResponseSearchFrame = false;
     const resetPendingLiveRows = () => {
       pendingLiveRows.length = 0;
@@ -18680,6 +21575,10 @@ const _NetworkPlus = (function () {
         state.automaticResponsePrefetchScheduler.resumeRows(restorePlan.rows);
       }
       state.columnFilterRules = restorePlan.columnFilterRules;
+      state.webSocketOnly = restorePlan.webSocketOnly;
+      state.requestStatusFacet = restorePlan.requestStatusFacet;
+      state.requestHostFacet = restorePlan.requestHostFacet;
+      state.requestTimeFacet = restorePlan.requestTimeFacet;
       state.sort = restorePlan.sort;
       state.paused = restorePlan.paused;
       state.autoScroll = restorePlan.autoScroll;
@@ -18750,6 +21649,7 @@ const _NetworkPlus = (function () {
     // [U4] Clear — reset visible working state and retain one bounded Undo snapshot.
     clearButton.addEventListener('click', () => {
       pendingCaptureCutoff = Date.now();
+      state.clearWsFullFrames?.();
       commitPendingLiveRows();
       disposeClearUndoSnapshot('clear');
       const snapshot = createClearUndoSnapshot(searchPanelVisible);
@@ -18757,6 +21657,10 @@ const _NetworkPlus = (function () {
       resetPendingLiveRows();
       detachStoredRowsForClearUndo();
       state.columnFilterRules = DEFAULT_COLUMN_FILTER_RULES();
+      state.webSocketOnly = false;
+      state.requestStatusFacet = 'all';
+      state.requestHostFacet = '';
+      state.requestTimeFacet = null;
       state.selectedRow = null;
       state.focusedRow = null;
       state.pendingRowFocusId = null;
@@ -18866,12 +21770,13 @@ const _NetworkPlus = (function () {
     filterPopup.style.position = 'fixed';
     filterPopup.style.display = 'none';
     filterPopup.setAttribute('role', 'dialog');
-    filterPopup.setAttribute('aria-label', 'Column filters');
+    filterPopup.setAttribute('aria-labelledby', 'columnFilterTitle');
     installPopupKeyboardSupport(filterPopup);
     document.body.appendChild(filterPopup);
 
     const openFilterPopup = (x, y, focusColId, trigger) => {
       filterPopup.textContent = '';
+      filterPopup.classList.toggle('filter-popup-compact', !!focusColId && focusColId !== 'status');
       if (focusColId) {
         filterPopup.appendChild(createSingleColumnFilterContent(focusColId, renderBody));
       } else {
@@ -19119,13 +22024,8 @@ const _NetworkPlus = (function () {
       };
       updateDomainToggle();
       domainToggle.addEventListener('click', () => {
-        state.domainSummaryVisible = !state.domainSummaryVisible;
-        saveDomainSummaryPref(state.domainSummaryVisible);
+        toggleDomainSummary();
         updateDomainToggle();
-        if (state.syncDomainSummary) state.syncDomainSummary();
-        setStatus(
-          uiText(state.domainSummaryVisible ? 'columnsDomainSummaryShownStatus' : 'columnsDomainSummaryHiddenStatus'),
-        );
       });
       domainSection.appendChild(domainToggle);
       columnsContextMenu.appendChild(domainSection);
@@ -19225,6 +22125,23 @@ const _NetworkPlus = (function () {
 
     const columnsBtn = $('#columnsBtn');
     const filterBtn = $('#filterBtn');
+    let enableWsCapture = () => $('#wsCaptureBtn').click();
+    let reloadWsCapture = () => {};
+    let setWsCapturePreference;
+    let setSseCapture = () => false;
+    $('#wsCapturePromptBtn').addEventListener('click', () => {
+      if (!$('#wsCapturePrompt').hidden) enableWsCapture();
+    });
+    for (const id of ['wsReloadBtn', 'wsMessagesReloadBtn']) {
+      $('#' + id).addEventListener('click', (event) => {
+        if (!event.currentTarget.hidden) reloadWsCapture();
+      });
+    }
+    $('#webSocketOnlyBtn').addEventListener('click', () => {
+      state.webSocketOnly = !state.webSocketOnly;
+      renderBody();
+      syncSearchUIAfterRender();
+    });
     columnsBtn.addEventListener('click', (event) => {
       if (columnsContextMenu.classList.contains('show')) {
         closeAccessiblePopup(columnsContextMenu, true);
@@ -19383,6 +22300,8 @@ const _NetworkPlus = (function () {
     // Tab switching for inspector panels
     initializeInspectorTabBar('req-tab-bar');
     initializeInspectorTabBar('res-tab-bar');
+    initializeWsDetailTabs();
+    initializeWsMessageFilters();
     // Nothing is selected at start: guidance line instead of empty tab strips.
     setInspectorEmptyState(!state.selectedRow);
 
@@ -19435,12 +22354,36 @@ const _NetworkPlus = (function () {
     domainSummaryPanel.hidden = true;
     const contentElement = $('#content');
     contentElement.insertAdjacentElement('beforebegin', domainSummaryPanel);
+    const analysisDomainsButton = $('#analysisDomainsBtn');
+    const toggleDomainSummary = () => {
+      state.domainSummaryVisible = !state.domainSummaryVisible;
+      saveDomainSummaryPref(state.domainSummaryVisible);
+      renderDomainSummary();
+      setStatus(uiText(state.domainSummaryVisible ? 'columnsDomainSummaryShownStatus' : 'columnsDomainSummaryHiddenStatus'));
+    };
+    analysisDomainsButton.addEventListener('click', toggleDomainSummary);
+    for (const button of document.querySelectorAll('[data-status-facet]')) {
+      button.addEventListener('click', () => {
+        const facet = button.dataset.statusFacet;
+        state.requestStatusFacet = state.requestStatusFacet === facet ? 'all' : facet;
+        repaintRequestScope();
+      });
+    }
+    $('#analysisCompareBtn').addEventListener('click', () => {
+      openRequestComparison([...state.selectedRows], null);
+    });
 
     // Shared with the row context menu: both feed the same multiText rules
     // the Filters popup edits, so applied filters show, count, and clear
     // there. "Only" replaces any previous inclusion so two quick picks never
     // intersect down to zero rows; exclusions accumulate.
     const applyColumnQuickFilterTo = (colId, value, op) => {
+      if (colId === 'domain' && op === 'contains' && !state.sampleCaptureActive) {
+        state.requestHostFacet = value;
+        repaintRequestScope();
+        return;
+      }
+      const conditionOp = colId === 'domain' ? (op === 'contains' ? 'equals' : 'notequals') : op;
       const rule = state.columnFilterRules[colId];
       let conditions =
         rule && rule.mode === 'multiText' && Array.isArray(rule.conditions)
@@ -19448,9 +22391,9 @@ const _NetworkPlus = (function () {
           : [];
       // Two "only" rules on one column can never both hold, so an isolate
       // replaces the previous isolate; excludes accumulate.
-      if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== 'contains');
-      if (!conditions.some((cond) => cond.op === op && cond.value === value)) {
-        conditions.push({ op, value });
+      if (op === 'contains') conditions = conditions.filter((cond) => cond.op !== conditionOp);
+      if (!conditions.some((cond) => cond.op === conditionOp && cond.value === value)) {
+        conditions.push({ op: conditionOp, value });
       }
       state.columnFilterRules[colId] = { mode: 'multiText', conditions };
       renderBody();
@@ -19466,57 +22409,26 @@ const _NetworkPlus = (function () {
 
     const applyDomainQuickFilterTo = (domain, op) => applyColumnQuickFilterTo('domain', domain, op);
 
-    const clearDomainQuickFilter = (domain) => {
-      const rule = state.columnFilterRules.domain;
-      const conditions =
-        rule && rule.mode === 'multiText' && Array.isArray(rule.conditions)
-          ? rule.conditions.filter(
-              (cond) => cond && !(cond.op === 'contains' && cond.value === domain),
-            )
-          : [];
-      state.columnFilterRules.domain = { mode: 'multiText', conditions };
-      renderBody();
-      syncSearchUIAfterRender();
-      setStatus(uiTextFormat('statusDomainFilterCleared', { domain }));
-    };
-
-    const getActiveDomainOnlyValues = () => {
-      const rule = state.columnFilterRules.domain;
-      const values = new Set();
-      if (rule && rule.mode === 'multiText' && Array.isArray(rule.conditions)) {
-        for (const cond of rule.conditions) {
-          if (cond && cond.op === 'contains' && String(cond.value || '').trim() !== '') {
-            values.add(cond.value);
-          }
-        }
-      }
-      return values;
-    };
-
     let domainSummarySignature = '';
     const renderDomainSummary = () => {
-      domainSummaryPanel.hidden = !state.domainSummaryVisible;
-      if (!state.domainSummaryVisible) {
+      domainSummaryPanel.hidden = !state.domainSummaryVisible || state.rows.length === 0;
+      analysisDomainsButton.disabled = state.sampleCaptureActive;
+      analysisDomainsButton.setAttribute('aria-expanded', String(!domainSummaryPanel.hidden));
+      domainSummaryPanel.setAttribute('aria-label', uiText('analysisDomains'));
+      if (domainSummaryPanel.hidden) {
         domainSummarySignature = '';
         return;
       }
-      const summary = computeDomainSummary(state.filteredRows);
-      const activeDomains = getActiveDomainOnlyValues();
+      const scopeRows = state.requestScopeRows || state.filteredRows;
+      const hasScope = !state.sampleCaptureActive && (state.requestStatusFacet !== 'all' || state.requestTimeFacet);
+      const summary = computeDomainSummary(hasScope
+        ? scopeRows.filter((row) => matchesRequestStatusFacet(row) && requestOverlapsRange(row, state.requestTimeFacet)) : scopeRows);
+      const activeHost = state.sampleCaptureActive ? '' : state.requestHostFacet;
       // The signature includes the pressed state: clicking a domain that
       // already spans every filtered row changes no aggregate but must still
       // repaint its active marker. When nothing changed, the rebuild is
       // skipped so streaming appends never churn focus or scroll here.
-      const signature = summary
-        .map((entry) =>
-          [
-            entry.domain,
-            entry.count,
-            entry.totalBytes,
-            entry.errorCount,
-            activeDomains.has(entry.domain) ? 1 : 0,
-          ].join(':'),
-        )
-        .join('|');
+      const signature = JSON.stringify([activeLanguage, activeHost, state.sampleCaptureActive, summary]);
       if (signature === domainSummarySignature) return;
       domainSummarySignature = signature;
       const previousScrollTop = domainSummaryPanel.scrollTop;
@@ -19528,16 +22440,16 @@ const _NetworkPlus = (function () {
       if (summary.length === 0) {
         const empty = document.createElement('span');
         empty.className = 'domain-summary-empty';
-        empty.textContent = 'No captured domains yet';
+        empty.textContent = uiText('analysisHostsEmpty');
         domainSummaryPanel.appendChild(empty);
+        if (focusedDomain) analysisDomainsButton.focus({ preventScroll: true });
         return;
       }
       for (const entry of summary) {
-        const meta =
-          entry.count +
-          (entry.count === 1 ? ' request' : ' requests') +
-          ' · ' +
-          (fmtBytes(entry.totalBytes) || '0 B');
+        const meta = uiTextFormat('analysisDomainMeta', {
+          count: activeLanguage === 'ja' ? entry.count : formatRequestCount(entry.count),
+          bytes: fmtBytes(entry.totalBytes) || '0 B',
+        });
         const appendEntryContent = (target) => {
           const nameSpan = document.createElement('span');
           nameSpan.className = 'domain-summary-name';
@@ -19550,8 +22462,9 @@ const _NetworkPlus = (function () {
           if (entry.errorCount > 0) {
             const errorChip = document.createElement('span');
             errorChip.className = 'domain-summary-errors';
-            errorChip.textContent =
-              entry.errorCount + (entry.errorCount === 1 ? ' error' : ' errors');
+            errorChip.textContent = uiTextFormat('analysisDomainErrors', {
+              count: entry.errorCount, error: entry.errorCount === 1 ? 'error' : 'errors',
+            });
             target.appendChild(errorChip);
           }
         };
@@ -19564,34 +22477,34 @@ const _NetworkPlus = (function () {
           domainSummaryPanel.appendChild(info);
           continue;
         }
-        const active = activeDomains.has(entry.domain);
+        const active = activeHost === entry.domain;
         const entryButton = document.createElement('button');
         entryButton.type = 'button';
         entryButton.className = 'domain-summary-row' + (active ? ' active' : '');
         entryButton.setAttribute('data-domain', entry.domain);
         entryButton.setAttribute('aria-pressed', String(active));
-        entryButton.title = active
-          ? 'Clear the ' + entry.domain + ' filter'
-          : 'Show only requests from ' + entry.domain;
+        entryButton.disabled = state.sampleCaptureActive;
+        entryButton.title = uiTextFormat(active ? 'analysisRemove' : 'analysisHostOnly', {
+          filter: entry.domain, host: entry.domain,
+        });
         appendEntryContent(entryButton);
         entryButton.addEventListener('click', () => {
-          if (getActiveDomainOnlyValues().has(entry.domain)) clearDomainQuickFilter(entry.domain);
-          else applyDomainQuickFilterTo(entry.domain, 'contains');
+          state.requestHostFacet = active ? '' : entry.domain;
+          repaintRequestScope();
         });
         domainSummaryPanel.appendChild(entryButton);
       }
       domainSummaryPanel.scrollTop = previousScrollTop;
       if (focusedDomain) {
-        for (const candidate of domainSummaryPanel.querySelectorAll('button[data-domain]')) {
-          if (candidate.getAttribute('data-domain') === focusedDomain) {
-            candidate.focus();
-            break;
-          }
-        }
+        const candidate = [...domainSummaryPanel.querySelectorAll('button[data-domain]')].find((button) =>
+          button.dataset.domain === focusedDomain,
+        );
+        (candidate || analysisDomainsButton).focus({ preventScroll: true });
       }
     };
     state.syncDomainSummary = renderDomainSummary;
     renderDomainSummary();
+    state.syncTrafficOverview = initializeTrafficOverview();
 
     // [U6] Roving row focus, selection, copy, and context actions
     const tableWrap = $('#tableWrap');
@@ -19836,13 +22749,9 @@ const _NetworkPlus = (function () {
           compareLabel.setAttribute('role', 'presentation');
           compareLabel.textContent = uiText('menuCompare');
           contextMenu.appendChild(compareLabel);
-          const [rowX, rowY] = [...state.selectedRows];
+          const selectedPair = [...state.selectedRows];
           contextMenu.appendChild(createRowMenuButton(uiText('menuCompareTwo'), () => {
-            state.comparedRows = [rowX, rowY];
-            state.comparisonInvokingRowId = contextMenuInvokerRowId;
-            setDetailsTitleText(uiText('detailsComparingTwo'));
-            renderComparisonPanel(rowX, rowY);
-            showComparisonPanel();
+            openRequestComparison(selectedPair, contextMenuInvokerRowId);
           }));
         }
         // Both destroy rows, so both arm the same bounded Undo the toolbar
@@ -20551,7 +23460,6 @@ const _NetworkPlus = (function () {
     // ---- Unified Search Feature (multi-keyword, multi-row with per-keyword colors) ----
     const searchPanel = $('#searchPanel');
     const searchRows = $('#searchRows');
-    const searchCount = $('#searchCount');
     const searchToggleBtn = $('#searchToggleBtn');
     const searchAddBtn = $('#searchAddBtn');
     const searchScopeBtn = $('#searchScopeBtn');
@@ -20912,34 +23820,11 @@ const _NetworkPlus = (function () {
 
     function updateSearchUI() {
       const srch = state.search;
-      const activeKws = srch.keywords.filter((kw) => isApplicableSearchKeyword(kw, srch.options));
-      if (srch.matches.length === 0 && activeKws.length > 0) {
-        searchCount.textContent = 'No matches';
-        searchCount.style.color = 'var(--status-5xx-text)';
-      } else if (srch.matches.length > 0) {
-        searchCount.textContent = srch.matches.length + ' matches';
-        searchCount.style.color = '';
-      } else {
-        searchCount.textContent = '';
-        searchCount.style.color = '';
-      }
       searchMatchesOnlyToggle.checked = srch.matchesOnly === true;
       for (const optionButton of searchOptionButtons) {
         optionButton.el.setAttribute('aria-pressed', String(srch.options[optionButton.key] === true));
       }
-      // Body-search progress and mode notes live inside the search panel where
-      // they have reserved space; putting them in the top bar resized the count
-      // span continuously during capture and made the buttons jitter.
-      const unsearchedBodies = srch.scope.resBody && activeKws.length > 0
-        ? countUnsearchedResponseBodies(state.filteredRows)
-        : 0;
-      const noticeParts = [];
-      if (srch.matchesOnly && activeKws.length > 0) noticeParts.push('Showing matches only');
-      if (unsearchedBodies > 0) noticeParts.push(unsearchedBodies + ' bodies not searched');
-      const notice = $('#searchPanelNotice');
-      if (notice) notice.textContent = noticeParts.join(' · ');
-      const announcement = [searchCount.textContent, ...noticeParts].filter(Boolean).join(' · ');
-      queueSearchCountAnnouncement(announcement);
+      updateListSearchStatus();
       // Update per-keyword counts in search rows
       renderSearchRows();
     }
@@ -20984,8 +23869,8 @@ const _NetworkPlus = (function () {
 
     searchToggleBtn.addEventListener('click', () => toggleSearchPanel());
 
-    // Ctrl+F opens request search unless focus is inside a Body/Raw pane or
-    // on its selected tab; those focus the pane's own search field.
+    // Ctrl+F opens request search unless focus is in an inspector search
+    // pane or on its selected tab.
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         if (document.querySelector('dialog[open]')) {
@@ -20994,7 +23879,7 @@ const _NetworkPlus = (function () {
           return;
         }
         const focused = document.activeElement;
-        const focusedPane = focused && focused.closest ? focused.closest('.tab-pane') : null;
+        const focusedPane = focused && focused.closest ? focused.closest('.tab-pane, .ws-messages-panel') : null;
         const selectedTab =
           focused && focused.matches && focused.matches('.tab-btn[aria-selected="true"]')
             ? focused
@@ -21028,7 +23913,7 @@ const _NetworkPlus = (function () {
         importBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
       };
 
-      const stageHarImport = async (file) => {
+      const stageHarImport = async (file, retainSource) => {
         const rowLimit = state.retention.unlimited ? Infinity : state.retention.requestLimit;
         const rows = [];
         const bodies = new Map();
@@ -21050,6 +23935,18 @@ const _NetworkPlus = (function () {
           const entry = normalizeHarEntry(rawEntry);
           const row = buildRowFromRequest(entry, 0);
           row._reqObj = null;
+          // Only retain the actual File selected in this window. A streamed
+          // mirror import cannot be reopened, and a chunk-built File would
+          // otherwise pin an extra copy of the entire archive in memory.
+          if (retainSource) {
+            row._originalHarHasBody = typeof entry.response.content.text === 'string' ||
+              entry.response.content._networkPlus?.reason === HAR_OVERSIZED_BODY_REASON;
+            if (row._originalHarHasBody || Array.isArray(rawEntry._webSocketMessages)) {
+              const entryIndex = index;
+              row._readImportedHarEntry = (isCurrent) => readImportedHarEntry(file, entryIndex, isCurrent);
+              if (row._originalHarHasBody) row._responseSearchSource = { file, index: entryIndex };
+            }
+          }
           const availability = classifyImportedResponseContent(entry);
           if (availability.state === 'empty') {
             row.responseContent = '';
@@ -21061,6 +23958,9 @@ const _NetworkPlus = (function () {
             if (parserOmitted) omittedBodies += 1;
           }
           applyHarWebSocketMessages(row, rawEntry._webSocketMessages);
+          const omitted = rawEntry._networkPlus?.webSocketFramesOmitted;
+          if (Number.isSafeInteger(omitted) && omitted > 0) row._wsArchiveOmitted = omitted;
+          if (isWebSocketRow(row)) row._wsArchive = true;
           if (index >= rowLimit) {
             const displaced = rows[index % rowLimit];
             stagedMetadataBytes -= metadataCosts.get(displaced);
@@ -21081,6 +23981,7 @@ const _NetworkPlus = (function () {
           if (typeof row.responseContent !== 'string') return;
           const payload = measureResponsePayload(
             row.responseContent, row.responseContentEncoding, resolveRowResponseCharset(row), isHtmlLikeMime(row.type),
+            MAX_RESPONSE_BODY_BYTES,
           );
           if (payload.bytes > MAX_RESPONSE_BODY_BYTES) {
             dropBody(row, 'omitted',
@@ -21140,7 +24041,10 @@ const _NetworkPlus = (function () {
             extractedEntries.get(`raw/${id}_s.txt`),
             startedDateTime,
           );
-          rows.push(buildRowFromRequest(entry, 0));
+          const row = buildRowFromRequest({ ...entry, overviewUnknownStart: true, overviewUnknownDuration: true }, 0);
+          row._responseSearchSource = { file, id };
+          if (isWebSocketRow(row)) row._wsArchive = true;
+          rows.push(row);
         }
         return {
           format: 'SAZ',
@@ -21161,6 +24065,7 @@ const _NetworkPlus = (function () {
         updateRecordState();
         resetPendingLiveRows();
         clearStoredRows();
+        state.requestTimeFacet = null;
         state.selectedRow = null;
         state.focusedRow = null;
         state.selectedRows.clear();
@@ -21187,7 +24092,7 @@ const _NetworkPlus = (function () {
 
       // Shared by the local file picker and the mirror tab's transferred
       // imports; resolves with '' on success or the user-facing reason.
-      importCapturedFile = async (file) => {
+      importCapturedFile = async (file, retainHarSource = false) => {
         if (importInProgress) return 'Another import is already in progress.';
         const sourceValidation = validateImportSource(file.name, file.size);
         setImportBusy(true);
@@ -21196,7 +24101,7 @@ const _NetworkPlus = (function () {
           setStatus(uiTextFormat('statusImportInProgress', { format: sourceValidation.format.toUpperCase() }));
           const stagedImport =
             sourceValidation.format === 'har'
-              ? await stageHarImport(file)
+              ? await stageHarImport(file, retainHarSource)
               : await stageSazImport(file);
           const retainedCount = commitStagedImport(stagedImport);
           setStatus(uiTextFormat('statusImportSummary', {
@@ -21222,7 +24127,7 @@ const _NetworkPlus = (function () {
           importFile.value = '';
           return;
         }
-        await importCapturedFile(file);
+        await importCapturedFile(file, true);
         importFile.value = '';
       });
     }
@@ -21410,6 +24315,8 @@ const _NetworkPlus = (function () {
         const observed = new Map();
         for (const entry of log.entries) {
           if (!entry || !entry.request || !entry.response || !entry.startedDateTime) continue;
+          // WebSocket handshakes and frames have their own row identity.
+          if (isWebSocketRequest(entry.request.method, entry.request.url, entry.response.status, entry.response.headers)) continue;
           const key = requestKey(entry);
           if (finishedKeys.has(key) || recentCompletions.has(key)) continue;
           if (observed.has(key)) observed.set(key, null);
@@ -21456,7 +24363,10 @@ const _NetworkPlus = (function () {
               pollInFlight = false;
               finishedDuringPoll = null;
               if (chrome.runtime && chrome.runtime.lastError) return;
-              if (cutoff === pendingCaptureCutoff) samplePendingRequests(log, recentCompletions);
+              if (cutoff === pendingCaptureCutoff) {
+                samplePendingRequests(log, recentCompletions);
+                readNativeWebSocketSnapshot(log?.entries);
+              }
             });
           } catch (_error) {
             pollInFlight = false;
@@ -21464,7 +24374,7 @@ const _NetworkPlus = (function () {
           }
         };
         const pollVisibleHost = () => {
-          if (!document.hidden) pollPendingRequests();
+          if (!document.hidden || mirrorStreamCaptureState().native) pollPendingRequests();
         };
         const timer = setInterval(pollVisibleHost, 1000);
         document.addEventListener('visibilitychange', pollVisibleHost);
@@ -21476,6 +24386,7 @@ const _NetworkPlus = (function () {
         rememberFinished(key);
         const provisional = pendingByKey.get(key);
         pendingByKey.delete(key);
+        if (finishNativeWebSocket(request)) return;
         // Finish rows that were already captured before Pause or Clear.
         // Only newly encountered requests are suppressed while paused.
         if (provisional && isCurrentPending(provisional)) {
@@ -21566,7 +24477,7 @@ const _NetworkPlus = (function () {
           state.comparedRows = null;
           state.comparisonInvokingRowId = null;
           hideComparisonPanel();
-          focusRowOrGridFallback(invokingRowId);
+          restoreRequestComparisonFocus(invokingRowId);
         }
       });
     }
@@ -21624,6 +24535,10 @@ const _NetworkPlus = (function () {
           new Promise((resolve, reject) => {
             viewerSession.requestBody(row.id, (error, payload) => (error ? reject(error) : resolve(payload)));
           });
+        if (viewerSession.supportsFullSearch()) {
+          row._mirrorSearchResponse = (queries, options, after, signal) =>
+            viewerSession.requestFullSearch(row.id, session, queries, options, after, null, signal);
+        }
         // Older hosts had no revision on live rows. They still distinguished
         // a capture with no observed HTTP status from a normalized HAR import.
         if (row._mirrorStreamRevision != null ||
@@ -21644,6 +24559,18 @@ const _NetworkPlus = (function () {
               (error, payload) => (error ? reject(error) : resolve(payload)),
             );
           });
+        }
+        if (wireRow.webSocket === true || (row.method === 'WS' && !row._wsArchive)) {
+          row._mirrorFetchWsMessages = (minimumRevision) => new Promise((resolve, reject) => {
+            viewerSession.requestWsMessages(
+              row.id, session, minimumRevision,
+              (error, payload) => (error ? reject(error) : resolve(payload)),
+            );
+          });
+          if (viewerSession.supportsFullSearch()) {
+            row._mirrorSearchWs = (query, ids, signal) =>
+              viewerSession.requestFullSearch(row.id, session, [query], {}, null, ids, signal);
+          }
         }
         return row;
       };
@@ -21683,6 +24610,7 @@ const _NetworkPlus = (function () {
         releaseResponseContent(row, 'not-loaded', false);
         row._responseContentPromise = null;
         row._responsePayloadPromise = null;
+        row._boundedResponsePayloadPromise = null;
         row.responseContentReason = '';
         row.responseContentError = null;
         for (const key of ['statusText', 'duration', 'size', 'requestPostData', 'requestBodySize', 'responseBodySize',
@@ -21724,6 +24652,7 @@ const _NetworkPlus = (function () {
       const applyWireSnapshot = (wireRows, options) => {
         commitPendingLiveRows();
         state.liveRowsAwaitingRender.splice(0, state.liveRowsAwaitingRender.length);
+        if (options?.sessionChanged) state.requestTimeFacet = null;
         if (options && options.sessionChanged && state.rows.length > 0) {
           // A new DevTools session restarts row ids at 1. Matching its rows
           // by id against the old session's would alias stale evidence onto
@@ -21768,6 +24697,11 @@ const _NetworkPlus = (function () {
         for (const row of pendingLiveRows) knownRowIds.add(row.id);
         render();
         refreshMirrorDetails(changedRows);
+        if (wsMessagesView && wsMessagesView.row === state.selectedRow) {
+          // Reconnecting to the same host may preserve the selected row and revision.
+          if (wsMessagesView.unavailable) wsMessagesView.requestedRevision = -1;
+          if (!$('#details').hidden && !$('#ws-messages-panel').hidden) renderWsMessages(wsMessagesView.row);
+        }
         if (state.autoScroll) scrollGridToNewest();
         updateRetentionStatus();
       };
@@ -21797,6 +24731,7 @@ const _NetworkPlus = (function () {
         },
       });
       const wsCaptureBtnViewer = $('#wsCaptureBtn');
+      const sseCaptureToggle = $('#sseCaptureToggle');
       // The host reports devtoolsMinimized:false when its DevTools is docked
       // and therefore stayed visible next to this tab. That duplication is
       // the one moment the undock explainer earns its interruption — once
@@ -21853,6 +24788,10 @@ const _NetworkPlus = (function () {
           const streamEnabled = control.streamCapture.enabled === true;
           wsCaptureBtnViewer.textContent = uiText(streamEnabled ? 'wsCaptureOn' : 'wsCaptureOff');
           wsCaptureBtnViewer.setAttribute('aria-pressed', streamEnabled ? 'true' : 'false');
+          wsReloadCaptureAvailable = control.streamCapture.reloadSupported === true;
+          $('#sseCaptureSettings').hidden = control.streamCapture.sseSupported !== true;
+          sseCaptureToggle.checked = control.streamCapture.sseEnabled === true;
+          syncWsCapturePrompt();
         }
         if (control.devtoolsMinimized === false) maybeShowUndockHint();
       };
@@ -21867,6 +24806,11 @@ const _NetworkPlus = (function () {
           if (typeof onDone === 'function') onDone(error);
         }
       };
+      enableWsCapture = () => sendViewerCommand('stream-toggle', { enabled: true }, 'Stream capture');
+      reloadWsCapture = () => sendViewerCommand('stream-reload', {}, uiText('wsReloadCapture'));
+      sseCaptureToggle.addEventListener('change', () => {
+        sendViewerCommand('sse-toggle', { enabled: sseCaptureToggle.checked }, uiText('settingsSseCapture'));
+      });
       const viewerImportInput = document.createElement('input');
       viewerImportInput.type = 'file';
       viewerImportInput.accept = '.har,.saz';
@@ -21938,6 +24882,10 @@ const _NetworkPlus = (function () {
         setStatus(uiTextFormat('statusSendingImportToDevtools', { file: file.name }));
         const reportImportResult = (error) => {
           setViewerImportBusy(false);
+          if (!error && state.requestTimeFacet) {
+            state.requestTimeFacet = null;
+            repaintRequestScope();
+          }
           setStatus(error ? formatImportFailure(error.message) : uiText('statusImportFinished'));
         };
         if (getImportFormat(file.name) === 'har' && file.size > MAX_SAZ_SOURCE_BYTES) {
@@ -22000,9 +24948,17 @@ const _NetworkPlus = (function () {
           if (activeMirrorPort !== port) return;
           activeMirrorPort = null;
           resendInspectedOrigin = '';
+          wsCaptureBtnViewer.hidden = true;
+          $('#sseCaptureSettings').hidden = true;
+          wsReloadCaptureAvailable = false;
+          syncWsCapturePrompt();
           viewerSession.failPendingBodyRequests(
             'The DevTools session disconnected before the response content arrived.',
           );
+          if (wsMessagesView?.row._mirrorFetchWsMessages) {
+            wsMessagesView.unavailable = true;
+            if (!$('#details').hidden && !$('#ws-messages-panel').hidden) renderWsMessages(wsMessagesView.row);
+          }
           updateMirrorStatus();
         });
         try {
@@ -22079,17 +25035,18 @@ const _NetworkPlus = (function () {
             // travels to the mirror tab with its real reason.
             return Promise.reject(new Error(row.responseContentReason));
           }
-          return fetchResponsePayload(row).then((payload) => {
+          const rejectOversized = (bytes) => new Error(
+            'Body is ' + fmtBytes(bytes) + '; the per-body cache limit is ' + fmtBytes(MAX_RESPONSE_BODY_BYTES) + '.',
+          );
+          if (row.responseContentSize > MAX_RESPONSE_BODY_BYTES) {
+            return Promise.reject(rejectOversized(row.responseContentSize));
+          }
+          return fetchResponsePayload(row, RESPONSE_CONTENT_TIMEOUT_MS, MAX_RESPONSE_BODY_BYTES).then((payload) => {
             // The local panel refuses bodies over the per-body limit at cache
             // admission; the mirror path must not serve what the host itself
             // would refuse — and one oversize port message throws, is
             // swallowed, and leaves the viewer with a bare 10-second timeout.
-            const payloadChars = typeof payload.content === 'string' ? payload.content.length : 0;
-            if (payloadChars > MAX_RESPONSE_BODY_BYTES) {
-              throw new Error(
-                'Body is ' + fmtBytes(payloadChars) + '; the per-body cache limit is ' + fmtBytes(MAX_RESPONSE_BODY_BYTES) + '.',
-              );
-            }
+            if (payload.bytes > MAX_RESPONSE_BODY_BYTES) throw rejectOversized(payload.bytes);
             return { content: payload.content, encoding: payload.encoding };
           });
         },
@@ -22142,12 +25099,21 @@ const _NetworkPlus = (function () {
               return;
             }
             if (name === 'stream-toggle') {
-              if (mirrorStreamCaptureState().supported !== true) {
+              const capture = mirrorStreamCaptureState();
+              if (capture.supported !== true) {
                 done('Stream capture is not available in this DevTools session.');
                 return;
               }
-              $('#wsCaptureBtn').click();
-              done('');
+              if (args?.enabled === true && capture.enabled) done('');
+              else setWsCapturePreference(!capture.enabled, done);
+              return;
+            }
+            if (name === 'stream-reload') {
+              done(reloadWsCapture() ? '' : uiText('statusStreamCaptureReloadFailed'));
+              return;
+            }
+            if (name === 'sse-toggle') {
+              done(setSseCapture(args?.enabled === true) ? '' : 'SSE capture is not available in this session.');
               return;
             }
             if (name === 'resend') {
@@ -22335,7 +25301,7 @@ const _NetworkPlus = (function () {
       startMirrorReconnect();
     }
 
-    // --- Stream capture wiring (WebSocket + SSE; opt-in; DevTools sessions only) ---
+    // --- Stream capture wiring (live DevTools sessions only) ---
     const wsCaptureBtn = $('#wsCaptureBtn');
     const inspectedEval =
       typeof chrome !== 'undefined' &&
@@ -22345,8 +25311,47 @@ const _NetworkPlus = (function () {
         ? chrome.devtools.inspectedWindow.eval.bind(chrome.devtools.inspectedWindow)
         : null;
     if (wsCaptureBtn && inspectedEval && !mirrorViewerActive && !offlineView) {
-      wsCaptureBtn.hidden = false;
-      const streamCapture = { enabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
+      const nativeNetwork = chrome.devtools.network;
+      const nativeWebSockets = typeof nativeNetwork?.getHAR === 'function';
+      const inspectedPage = chrome.devtools.inspectedWindow;
+      const wsReloadSupported = typeof inspectedPage.reload === 'function';
+      const nativeSocketRows = new Map();
+      const retiredNativeSockets = new Map();
+      const streamCapture = { enabled: false, sseEnabled: false, timer: null, socketRows: new Map(), sseRows: new Map() };
+      const sseCaptureToggle = $('#sseCaptureToggle');
+      $('#sseCaptureSettings').hidden = false;
+      const fullFrameCaptureKey = crypto.randomUUID();
+      let streamDocumentGeneration = 0;
+      let sseGeneration = 0;
+      let wsPreferenceReady = false;
+      let nativeCaptureCutoff = pendingCaptureCutoff;
+      let nativeCapturePaused = state.paused || state.sampleCaptureActive;
+      let initialNativeCaptureCutoff = nativeCapturePaused ? null : Date.now();
+      let checkNativeNavigation = false;
+      const allowWsFullCapture = () => !state.paused && !state.sampleCaptureActive;
+      state.syncWsFullCapture = () => {
+        const paused = !allowWsFullCapture();
+        if (nativeCapturePaused !== paused) {
+          nativeCaptureCutoff = Date.now();
+          initialNativeCaptureCutoff = null;
+        }
+        nativeCapturePaused = paused;
+        if (!streamCapture.enabled) return;
+        if (nativeWebSockets) {
+          if (!paused) pollPendingRequests();
+          return;
+        }
+        inspectedEval('window.__networkPlusWS__?.setFullCapture?.(' +
+          JSON.stringify(fullFrameCaptureKey) + ',' + allowWsFullCapture() + ')', () => {});
+      };
+      state.clearWsFullFrames = () => {
+        streamDocumentGeneration += 1;
+        sseGeneration += 1;
+        nativeCaptureCutoff = Date.now();
+        initialNativeCaptureCutoff = null;
+        if (!streamCapture.enabled || nativeWebSockets) return;
+        inspectedEval('window.__networkPlusWS__?.clearFullFrames?.(' + JSON.stringify(fullFrameCaptureKey) + ')', () => {});
+      };
       const streamMemoryByRow = new WeakMap();
       let streamMemoryUsed = 0;
       const reserveStreamMemory = (row, bytes) => {
@@ -22361,6 +25366,11 @@ const _NetworkPlus = (function () {
         for (const row of evictedSet) {
           streamMemoryUsed -= streamMemoryByRow.get(row) || 0;
           streamMemoryByRow.delete(row);
+          if (row._nativeWsKey && nativeSocketRows.get(row._nativeWsKey) === row) {
+            nativeSocketRows.delete(row._nativeWsKey);
+            retiredNativeSockets.set(row._nativeWsKey, nativeCaptureCutoff);
+            if (retiredNativeSockets.size > 512) retiredNativeSockets.delete(retiredNativeSockets.keys().next().value);
+          }
         }
         for (const rows of [streamCapture.socketRows, streamCapture.sseRows]) {
           for (const [socketId, row] of rows) {
@@ -22371,12 +25381,31 @@ const _NetworkPlus = (function () {
       const updateStreamCaptureButton = () => {
         wsCaptureBtn.textContent = uiText(streamCapture.enabled ? 'wsCaptureOn' : 'wsCaptureOff');
         wsCaptureBtn.setAttribute('aria-pressed', streamCapture.enabled ? 'true' : 'false');
+        syncWsCapturePrompt();
       };
       refreshStreamCaptureLabel = updateStreamCaptureButton;
-      const injectStreamWrappers = () => {
-        inspectedEval(buildWsWrapperSource(), () => {});
-        inspectedEval(buildSseWrapperSource(), () => {});
-      };
+      const injectWsWrapper = () => inspectedEval(buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey), () => {});
+      const readFullFrame = (row, frame, offset, timeout) => new Promise((resolve, reject) => {
+        const available = () => streamCapture.enabled && frame.fullGeneration === streamDocumentGeneration &&
+          isActiveRetainedRow(row, state.retainedRows, state.activeRows);
+        if (!available()) {
+          reject(new Error('WebSocket message expired'));
+          return;
+        }
+        const timer = setTimeout(() => reject(new Error('Timed out reading a WebSocket message')),
+          Math.min(timeout, RESPONSE_CONTENT_TIMEOUT_MS));
+        try {
+          inspectedEval(buildWsFullFrameReadSource(fullFrameCaptureKey, frame, offset),
+            (part, errorInfo) => {
+              clearTimeout(timer);
+              if (errorInfo || !available()) reject(new Error('WebSocket message expired'));
+              else resolve(part);
+            });
+        } catch (error) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
       const createStreamRow = (event, variant) => {
         const isSse = variant === 'sse';
         const row = buildRowFromRequest({
@@ -22403,6 +25432,8 @@ const _NetworkPlus = (function () {
         row.status = '';
         row.initiator = isSse ? { text: 'EventSource', typeLabel: 'SSE' } : { text: 'WebSocket', typeLabel: 'WS' };
         row._wsSocketId = event.socketId;
+        row._overviewUnknownDuration = true;
+        if (!isSse) row._readWsFullFrame = (frame, offset, timeout) => readFullFrame(row, frame, offset, timeout);
         (isSse ? streamCapture.sseRows : streamCapture.socketRows).set(event.socketId, row);
         pendingLiveRows.push(row);
         return row;
@@ -22424,6 +25455,144 @@ const _NetworkPlus = (function () {
         renderBody();
         if (selectedChanged) refreshSelectedStreamDetails();
       };
+      const streamFrameBudget = (onLimit) => ({
+        allowMessage: (row, bytes) => {
+          const retained = reserveStreamMemory(row, bytes);
+          if (!retained) onLimit();
+          return retained;
+        },
+        allowTranscript: (row, event, addedLength, hasFrame) => {
+          const frameBytes = hasFrame && (row._wsFrames?.length || 0) < HAR_WS_MESSAGE_IMPORT_LIMIT
+            ? 96 + 2 * (event.binary ? 0 : event.preview.length) : 0;
+          const retained = reserveStreamMemory(row, 2 * addedLength + frameBytes);
+          if (!retained) onLimit();
+          return retained;
+        },
+      });
+      const readNativeEntry = (key, isCurrent, frame) => new Promise((resolve, reject) => {
+        const available = () => isCurrent() && streamCapture.enabled && frame.fullGeneration === streamDocumentGeneration;
+        if (!available()) {
+          reject(new Error('WebSocket message expired'));
+          return;
+        }
+        const timer = setTimeout(() => reject(new Error('Timed out reading a WebSocket message')), RESPONSE_CONTENT_TIMEOUT_MS);
+        try {
+          nativeNetwork.getHAR((log) => {
+            clearTimeout(timer);
+            const entries = available() && log?.entries;
+            const matches = Array.isArray(entries) ? entries.filter((entry) => getNativeWebSocketKey(entry) === key) : [];
+            if (matches.length === 1) resolve(matches[0]);
+            else reject(new Error('WebSocket message expired'));
+          });
+        } catch (error) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      const updateNativeWebSocket = (entry, key, finished, changed, queued, onLimit) => {
+        if (retiredNativeSockets.get(key) === nativeCaptureCutoff) return;
+        let row = nativeSocketRows.get(key);
+        if (row && !state.activeRows.has(row) && !queued.has(row)) row = null;
+        const recording = streamCapture.enabled && allowWsFullCapture();
+        const startedAt = Date.parse(entry.startedDateTime);
+        const cutoff = recording && initialNativeCaptureCutoff !== null && startedAt >= initialNativeCaptureCutoff
+          ? initialNativeCaptureCutoff : nativeCaptureCutoff;
+        let frames = null;
+        if (recording) {
+          frames = planNativeWebSocketFrames(entry, row?._nativeWsCursor || 0, row?.id || state.nextId, cutoff);
+        }
+        const code = entry.response?.status || 0;
+        if (!row) {
+          if (!allowWsFullCapture() || (!frames?.events.length &&
+              (startedAt <= cutoff || (!finished && !code)))) return;
+          const bytes = 1024 + 2 * entry.request.url.length;
+          if (streamMemoryUsed + bytes > STREAM_CAPTURE_MEMORY_BUDGET) {
+            onLimit();
+            return;
+          }
+          disposeClearUndoSnapshot('live');
+          row = buildRowFromRequest(entry);
+          row._reqObj = null;
+          row._nativeWsKey = key;
+          row._wsSocketId = row.id;
+          row._overviewUnknownDuration = true;
+          if (key.startsWith('nonce:')) row._readWsHarEntry = (isCurrent, frame) => readNativeEntry(key, isCurrent, frame);
+          row.method = 'WS';
+          row.type = 'websocket';
+          row.size = row.requestBodySize = row.responseBodySize = row.responseContentSize = 0;
+          row.requestPostData = { mimeType: 'text/plain', text: '' };
+          publishStreamTranscript(row);
+          reserveStreamMemory(row, bytes);
+          nativeSocketRows.set(key, row);
+          pendingLiveRows.push(row);
+          queued.add(row);
+          changed.add(row);
+        }
+        if (frames) {
+          row._nativeWsCursor = frames.cursor;
+          if (frames.skipped) row._wsMessagesOmitted = (row._wsMessagesOmitted || 0) + frames.skipped;
+          const affected = ingestWsEvents(frames.events, {
+            ...streamFrameBudget(onLimit),
+            variant: 'ws',
+            fullFrameGeneration: streamDocumentGeneration,
+            getRow: () => row,
+          });
+          if (affected.length || frames.skipped) changed.add(row);
+        }
+        if (finished) row._nativeWsFinished = true;
+        const failed = (code || row.status) >= 400 || entry.response?._error || entry._error;
+        const status = row._nativeWsFinished ? (failed ? 'Error' : 'Closed') : code ? 'Open' : 'Connecting';
+        if (row.statusText !== status || (code && row.status !== code)) {
+          row.statusText = status;
+          if (code) row.status = code;
+          changed.add(row);
+        }
+        if (finished && Number.isFinite(entry.time) && entry.time >= 0 && row.duration !== entry.time) {
+          row.duration = entry.time;
+          changed.add(row);
+        }
+      };
+      const processNativeWebSockets = (entries, finished, changed = new Set()) => {
+        const queued = new Set(pendingLiveRows);
+        const previousQueueSize = queued.size;
+        let limited = false;
+        for (const [key, entry] of entries) {
+          if (entry) updateNativeWebSocket(entry, key, finished, changed, queued, () => { limited = true; });
+        }
+        publishStreamRows(changed);
+        if (queued.size > previousQueueSize) scheduleLiveRows(false);
+        if (limited) setStatus(uiText('statusStreamMemoryBudget'));
+      };
+      if (nativeWebSockets) {
+        readNativeWebSocketSnapshot = (entries) => {
+          if ((!streamCapture.enabled && !checkNativeNavigation) || !Array.isArray(entries)) return;
+          const sockets = new Map();
+          for (const entry of entries) {
+            const key = getNativeWebSocketKey(entry);
+            if (key) sockets.set(key, sockets.has(key) ? null : entry);
+          }
+          const changed = new Set();
+          if (checkNativeNavigation) {
+            checkNativeNavigation = false;
+            for (const [key, row] of nativeSocketRows) {
+              if (!row._nativeWsFinished && !sockets.has(key) && state.activeRows.has(row)) {
+                row._nativeWsFinished = true;
+                row.statusText = 'Navigated';
+                changed.add(row);
+              }
+            }
+          }
+          processNativeWebSockets(streamCapture.enabled && allowWsFullCapture() ? sockets : [], false, changed);
+        };
+        finishNativeWebSocket = (entry) => {
+          if (!isNativeWebSocketEntry(entry)) return false;
+          // HTTP/2 WebSockets can omit the nonce. Their finish event still
+          // owns all its frames, but there is no safe cross-snapshot identity.
+          const key = getNativeWebSocketKey(entry) || 'finished:' + state.nextId;
+          processNativeWebSockets([[key, entry]], true);
+          return true;
+        };
+      }
       const ingestDrainedStream = (result, variant) => {
         if (!Array.isArray(result) || result.length === 0) return;
         const rowsByVariant = variant === 'sse' ? streamCapture.sseRows : streamCapture.socketRows;
@@ -22476,14 +25645,9 @@ const _NetworkPlus = (function () {
         const createdRows = new Set();
         let memoryLimited = false;
         const changedRows = ingestWsEvents(result, {
+          ...streamFrameBudget(() => { memoryLimited = true; }),
           variant,
-          allowTranscript: (row, event, addedLength, hasFrame) => {
-            const frameBytes = hasFrame && (row._wsFrames?.length || 0) < HAR_WS_MESSAGE_IMPORT_LIMIT
-              ? 96 + 2 * (event.binary ? 0 : event.preview.length) : 0;
-            const retained = reserveStreamMemory(row, 2 * addedLength + frameBytes);
-            if (!retained) memoryLimited = true;
-            return retained;
-          },
+          fullFrameGeneration: streamDocumentGeneration,
           createRow: (event) => {
             if (rowsByVariant.has(event.socketId)) return;
             const bytes = 1024 + 2 * (event.url.length + (event.protocols?.length || 0));
@@ -22525,14 +25689,13 @@ const _NetworkPlus = (function () {
       // Swallowing every eval failure left the toggle claiming capture was on
       // while nothing could reach the page; a short streak surfaces it once.
       let streamEvalFailureTicks = 0;
-      let streamDocumentGeneration = 0;
       const wsDrain = buildStreamDrainSource('__networkPlusWS__');
       const sseDrain = buildStreamDrainSource('__networkPlusSSE__');
       const drainStreamQueues = () => {
         const generation = streamDocumentGeneration;
-        const isCurrent = () => streamCapture.enabled && generation === streamDocumentGeneration;
-        inspectedEval(wsDrain, (result, errorInfo) => {
-          if (!isCurrent()) return;
+        const eventGeneration = sseGeneration;
+        if (!nativeWebSockets && streamCapture.enabled) inspectedEval(wsDrain, (result, errorInfo) => {
+          if (!streamCapture.enabled || generation !== streamDocumentGeneration) return;
           if (errorInfo) {
             streamEvalFailureTicks += 1;
             if (streamEvalFailureTicks === 3) {
@@ -22545,31 +25708,112 @@ const _NetworkPlus = (function () {
           streamEvalFailureTicks = 0;
           ingestDrainedStream(readDrainedStream(result), 'ws');
         });
-        inspectedEval(sseDrain, (result, errorInfo) => {
-          if (isCurrent() && !errorInfo) ingestDrainedStream(readDrainedStream(result), 'sse');
+        if (streamCapture.sseEnabled) inspectedEval(sseDrain, (result, errorInfo) => {
+          if (streamCapture.sseEnabled && eventGeneration === sseGeneration && !errorInfo) {
+            ingestDrainedStream(readDrainedStream(result), 'sse');
+          }
         });
       };
-      wsCaptureBtn.addEventListener('click', () => {
-        streamCapture.enabled = !streamCapture.enabled;
+      const syncStreamTimer = () => {
+        if (streamCapture.sseEnabled || (!nativeWebSockets && streamCapture.enabled)) {
+          if (streamCapture.timer === null) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
+        } else if (streamCapture.timer !== null) {
+          clearInterval(streamCapture.timer);
+          streamCapture.timer = null;
+        }
+      };
+      setSseCapture = (enabled) => {
+        if (streamCapture.sseEnabled === enabled) return true;
+        streamCapture.sseEnabled = enabled;
+        sseGeneration += 1;
+        sseCaptureToggle.checked = enabled;
+        if (enabled) inspectedEval(buildSseWrapperSource(), () => {});
+        else inspectedEval('window.__networkPlusSSE__?.setEnabled(false)', () => {});
+        syncStreamTimer();
+        return true;
+      };
+      sseCaptureToggle.addEventListener('change', () => setSseCapture(sseCaptureToggle.checked));
+      const setWsCapture = (enabled, announce) => {
+        if (streamCapture.enabled === enabled) return;
+        streamCapture.enabled = enabled;
+        nativeCaptureCutoff = Date.now();
         streamDocumentGeneration += 1;
         streamEvalFailureTicks = 0;
         if (streamCapture.enabled) {
-          injectStreamWrappers();
-          if (!streamCapture.timer) streamCapture.timer = setInterval(drainStreamQueues, WS_POLL_INTERVAL_MS);
-          setStatus(uiText('statusStreamCaptureOn'));
+          if (nativeWebSockets) pollPendingRequests();
+          else injectWsWrapper();
+          if (announce) setStatus(uiText(state.paused ? 'statusStreamCaptureOnPaused' :
+            nativeWebSockets ? 'statusStreamCaptureNativeOn' : 'statusStreamCaptureOn'));
         } else {
-          if (streamCapture.timer) {
-            clearInterval(streamCapture.timer);
-            streamCapture.timer = null;
-          }
-          inspectedEval('window.__networkPlusWS__ && window.__networkPlusWS__.setEnabled(false)', () => {});
-          inspectedEval('window.__networkPlusSSE__ && window.__networkPlusSSE__.setEnabled(false)', () => {});
-          setStatus(uiText('statusStreamCaptureOff'));
+          initialNativeCaptureCutoff = null;
+          if (!nativeWebSockets) inspectedEval('window.__networkPlusWS__ && window.__networkPlusWS__.setEnabled(false)', () => {});
+          if (announce) setStatus(uiText('statusStreamCaptureOff'));
         }
+        syncStreamTimer();
         updateStreamCaptureButton();
-      });
+      };
+      setWsCapturePreference = (enabled, onSaved) => {
+        setWsCapture(enabled, true);
+        const failed = () => {
+          const message = uiText('statusWsCapturePrefNotSaved');
+          setStatus(message, true);
+          onSaved?.(message);
+        };
+        try {
+          chrome.storage.local.set({ [WS_CAPTURE_KEY]: enabled ? 'on' : 'off' }, () => {
+            if (chrome.runtime?.lastError) failed();
+            else onSaved?.('');
+          });
+        } catch (_error) {
+          failed();
+        }
+      };
+      wsCaptureBtn.addEventListener('click', () => setWsCapturePreference(!streamCapture.enabled));
+      reloadWsCapture = () => {
+        if (!wsReloadCaptureAvailable || state.sampleCaptureActive) return false;
+        try {
+          if (!streamCapture.enabled) wsCaptureBtn.click();
+          if (state.paused) $('#pauseBtn').click();
+          if (nativeWebSockets) inspectedPage.reload();
+          else inspectedPage.reload({ injectedScript: buildWsWrapperSource(allowWsFullCapture(), fullFrameCaptureKey) });
+          setStatus(uiText('statusStreamCaptureReload'));
+          return true;
+        } catch (_error) {
+          setStatus(uiText('statusStreamCaptureReloadFailed'), true);
+          return false;
+        }
+      };
       updateStreamCaptureButton();
-      mirrorStreamCaptureState = () => ({ supported: true, enabled: streamCapture.enabled === true });
+      mirrorStreamCaptureState = () => ({
+        supported: wsPreferenceReady, enabled: streamCapture.enabled, native: nativeWebSockets && streamCapture.enabled,
+        sseSupported: true, sseEnabled: streamCapture.sseEnabled,
+        reloadSupported: wsReloadCaptureAvailable,
+      });
+      const applyWsCapturePreference = (preference) => {
+        const enabled = preference === 'on' || (preference === undefined && nativeWebSockets);
+        if (!enabled && !wsPreferenceReady) initialNativeCaptureCutoff = null;
+        wsPreferenceReady = true;
+        wsCaptureBtn.hidden = false;
+        wsReloadCaptureAvailable = wsReloadSupported;
+        setWsCapture(enabled, false);
+        updateStreamCaptureButton();
+      };
+      chrome.storage?.onChanged?.addListener?.((changes, area) => {
+        if (area === 'local' && changes[WS_CAPTURE_KEY]) applyWsCapturePreference(changes[WS_CAPTURE_KEY].newValue);
+      });
+      const loadFailed = () => {
+        if (wsPreferenceReady) return;
+        applyWsCapturePreference(null);
+        setStatus(uiText('statusWsCapturePrefUnavailable'), true);
+      };
+      try {
+        chrome.storage.local.get([WS_CAPTURE_KEY], (items) => {
+          if (chrome.runtime?.lastError) loadFailed();
+          else if (!wsPreferenceReady) applyWsCapturePreference(items?.[WS_CAPTURE_KEY]);
+        });
+      } catch (_error) {
+        loadFailed();
+      }
       if (
         chrome.devtools.network &&
         chrome.devtools.network.onNavigated &&
@@ -22577,7 +25821,13 @@ const _NetworkPlus = (function () {
       ) {
         chrome.devtools.network.onNavigated.addListener(() => {
           // The old document took the wrappers and their connections with it.
-          streamDocumentGeneration += 1;
+          if (nativeWebSockets) {
+            checkNativeNavigation = true;
+            if (initialNativeCaptureCutoff !== null) {
+              initialNativeCaptureCutoff = streamCapture.enabled ? null : Date.now();
+            }
+          } else streamDocumentGeneration += 1;
+          sseGeneration += 1;
           streamEvalFailureTicks = 0;
           const navigatedRows = [];
           for (const rowsByVariant of [streamCapture.socketRows, streamCapture.sseRows]) {
@@ -22589,7 +25839,8 @@ const _NetworkPlus = (function () {
             rowsByVariant.clear();
           }
           publishStreamRows(navigatedRows);
-          if (streamCapture.enabled) injectStreamWrappers();
+          if (streamCapture.enabled && !nativeWebSockets) injectWsWrapper();
+          if (streamCapture.sseEnabled) inspectedEval(buildSseWrapperSource(), () => {});
         });
       }
     }
@@ -22968,13 +26219,16 @@ const _NetworkPlus = (function () {
     retainRowsByIdentity,
     createTableRow,
     classifyStatusClass,
-    getStatusClassIndicators,
-    formatStatusClassSummary,
-    findFirstStatusClassRow,
+    classifyRequestFacet,
     renderStatsSummary,
     updateTableSummary,
     planRequestCountSummary,
     computeStats,
+    computeTrafficTimeline,
+    planOverviewRequestWindow,
+    buildOverviewRequestEntry,
+    computeLatencyDistribution,
+    requestOverlapsRange,
     computeDomainSummary,
     DOMAIN_SUMMARY_KEY,
     loadDomainSummaryPref,
@@ -23052,10 +26306,15 @@ const _NetworkPlus = (function () {
     WS_FRAME_PREVIEW_CHARS,
     WS_DIRECTION_TEXT_LIMIT_CHARS,
     WS_POLL_INTERVAL_MS,
+    getNativeWebSocketKey,
+    planNativeWebSocketFrames,
     buildWsWrapperSource,
+    buildWsFullFrameReadSource,
     buildSseWrapperSource,
     buildStreamDrainSource,
     formatWsFrameLine,
+    planWsMessageJson,
+    getWsMessageDisplayText,
     appendBoundedWsText,
     ingestWsEvents,
     escapeMarkdownTableCell,
