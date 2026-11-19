@@ -122,41 +122,16 @@ PR のマージ直前に、必須 checks が現在の PR head SHA に対して�
 手順は skill `.claude/skills/store-release/SKILL.md`(`/store-release`)に集約してある。リリース・再申請・store-submit の失敗診断はまずそれを開く。
 最重要の 1 点だけここに再掲: **store-submit は release イベントでは発火しない**(release.yml が GITHUB_TOKEN でリリースを作るため)。毎回 workflow_dispatch で起動する。
 
-### ストア申請の資格情報（`dual-subtitles` と共通）
+### ストア申請の資格情報
 
-Edge / Chrome の申請資格情報は、拡張ごとではなく**アカウント単位**で共有される。同じ値を
-`himiyosh/dual-subtitles`（ローカル worktree: `<local-operator-directory>`）でも使っている。
-Edge 側は 2026-08-20 に、dual-subtitles の Client ID + API キーで Network+ 製品への
-アップロードが成功したことで実証済み（それまでの 401 連発は保存値の貼り間違いが原因で、
-資格情報の分離を意味しなかった）。値の同一性を疑うときは値を貼り直すのではなく、
-`store:submit -- --diagnose` の指紋と手元の `.env.*` の指紋を突き合わせて確定させること。
-そちらのリポジトリ直下の `.env.edge` / `.env.cws` が値の所在で、どちらも `.env*` で gitignore されている。
-値そのものをこのリポジトリに書いてはならない。GitHub の `store-submission` environment secrets が唯一の保管先。
+ストア申請ワークフローは GitHub の `store-submission` environment secrets を使用する。
+手元の `.env` や `.env.*`、ブラウザープロファイル、資格情報の共有先は各担当のローカルで管理する。
+公開用の `.env.example` に置けるのは変数名とダミー値だけ。
+変数名と設定方法は [ストア申請手順](.claude/skills/store-release/SKILL.md) と
+[トラブルシューティング](.claude/skills/store-release/references/troubleshooting.md) を参照する。
+不一致の調査には値を出力せず、`store:submit -- --diagnose` の指紋を使う。
 
-| このリポジトリの secret | dual-subtitles 側 | 拡張ごとに違うか |
-| --- | --- | --- |
-| `EDGE_CLIENT_ID` | `.env.edge` の同名 | 共通 |
-| `EDGE_API_KEY` | `.env.edge` の同名 | 共通 |
-| `EDGE_PRODUCT_ID` | `.env.edge` の同名 | **拡張ごと** — Network+ は `4fcf1d3e-d1fe-4d4a-a741-97d8d8fa4241` |
-| `CHROME_CLIENT_ID` | `.env.cws` の `CWS_CLIENT_ID` | 共通 |
-| `CHROME_CLIENT_SECRET` | `.env.cws` の `CWS_CLIENT_SECRET` | 共通 |
-| `CHROME_REFRESH_TOKEN` | `.env.cws` の `CWS_REFRESH_TOKEN` | 共通（スコープはアカウント単位） |
-| `CHROME_ITEM_ID` | `.env.cws` の `CWS_ITEM_ID` | **拡張ごと** — Network+ は `mhidipnhdnonbjkfklcohmnnmfggjlpo` |
-
-この 2 つは識別子であって資格情報ではない。API キーなしでは何もできず、Chrome の方は公開 listing の
-URL にそのまま現れる。ポータルを開き直さずに済むよう、ここに控えておく。取得元は Partner Center の
-`.../microsoftedge/<GUID>/packages/...` の GUID 部分と、`chromewebstore.google.com/detail/<name>/<id>` の末尾。
-
-**Edge は公開 listing の ID が `EDGE_PRODUCT_ID` と別物**である点に注意。Chrome は Items API に渡す
-item ID がそのまま公開 URL に現れるが、Edge の `4fcf1d3e-…` は Partner Center の製品 GUID であって
-ストアフロントの ID ではなく、URL に置くと 404 になる。公開 listing は
-`https://microsoftedge.microsoft.com/addons/detail/network-for-devtools/dhmafmhaagefmichhmmkknapalhmlmal`。
-README の両方がこの GUID を使っていて 2026-08-27 まで 404 を返していた。
-以後は `npm run version:check` が両 README のストアリンクを検証する。
-
-Chrome の OAuth クライアントと refresh token は共通なので、Cloud プロジェクトの作成も同意フローも
-やり直さない。`scripts/chrome-refresh-token.js` は、その refresh token を失ったときだけ使う。
-
-Edge の API キーは**作成から約 72 日で失効する**。使う前に dual-subtitles 側の
-`./scripts/publish-edge.sh check` で生死を確認すること。失効していれば Partner Center の Publish API
-ページで再作成し、両プロジェクトの保管先を揃えて更新する。
+Chrome の公開ストア ID は `mhidipnhdnonbjkfklcohmnnmfggjlpo`。
+Edge の公開ストア ID は `dhmafmhaagefmichhmmkknapalhmlmal`。
+Edge Update API の `EDGE_PRODUCT_ID` は公開ストア ID と異なるため、Partner Center で確認する。
+README の両ストアリンクは `npm run version:check` で検証する。
