@@ -13,10 +13,10 @@ value find out immediately whether the values actually match.
   without contacting any store. `absent` means the secret is not set at all —
   a different fix from "set wrongly".
 - **Local side** (macOS zsh-safe; do not use `${!var}` indirection, zsh lacks
-  it): from the repo that holds the `.env` file, e.g. dual-subtitles:
+  it): from the local directory that holds the ignored `.env.cws` file:
 
   ```bash
-  cd <local-operator-directory> && source ./.env.cws && \
+  source ./.env.cws && \
     printf '%s' "$CWS_CLIENT_SECRET" | shasum -a 256 | cut -c1-8 && printf '%s' "$CWS_CLIENT_SECRET" | wc -c
   ```
 
@@ -48,14 +48,14 @@ produced `invalid_client` until the right value was re-set.
 | Chrome `invalid_client: The provided client secret is invalid.` | Client found, secret mismatched | Fingerprint-compare `CHROME_CLIENT_SECRET`; re-set the one secret |
 | Chrome `invalid_grant` | Refresh token dead or for another client | Re-mint with `scripts/chrome-refresh-token.js` (loopback consent) |
 | Chrome `The item cannot be updated now because it is in pending review, ready to publish, or deleted status.` | A portal-side submission is already in review (often media-only) | User cancels the pending review in the dev console — the live listing is unaffected — then re-dispatch so package + media go through one review |
-| Edge `401` (empty body) | One of the three Edge values wrong, or the API key expired (~72 days) | Diagnose fingerprints; check key liveness via dual-subtitles `./scripts/publish-edge.sh check`; recreate the key in Partner Center if dead and update **both** projects' stores |
+| Edge `401` (empty body) | One of the three Edge values is wrong or the API key has expired | Compare fingerprints and check the key in Partner Center; replace it in the authorized secret store if it has expired |
 
 ## Setting a single secret without the wizard
 
 Pipe from the sourced `.env` straight into `gh`, one line, no clipboard:
 
 ```bash
-cd <local-operator-directory> && source ./.env.cws && printf '%s' "$CWS_CLIENT_SECRET" | gh secret set CHROME_CLIENT_SECRET --env store-submission --repo himiyosh/network-plus-extension
+source ./.env.cws && printf '%s' "$CWS_CLIENT_SECRET" | gh secret set CHROME_CLIENT_SECRET --env store-submission --repo himiyosh/network-plus-extension
 ```
 
 Swap the variable and secret name as needed. Multi-line commands with `\`

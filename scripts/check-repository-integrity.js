@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('node:child_process');
 
 const LOCKFILE_VERSION = 3;
 const REGISTRY_HOST = 'registry.npmjs.org';
@@ -67,11 +68,28 @@ const validatePackageLock = (lockfile, packageJson) => {
   return errors;
 };
 
+const findTrackedIgnoredFiles = (root) =>
+  execFileSync('git', ['ls-files', '--cached', '--ignored', '--exclude-from=.gitignore', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+  })
+    .split('\0')
+    .filter(Boolean);
+
 const main = () => {
   const root = process.cwd();
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const lockfile = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
   const errors = validatePackageLock(lockfile, packageJson);
+  const isCheckout = fs.existsSync(path.join(root, '.git'));
+  if (isCheckout) {
+    const ignoredFiles = findTrackedIgnoredFiles(root);
+    if (ignoredFiles.length > 0) {
+      errors.push(
+        `Git tracks ${ignoredFiles.length} file(s) covered by .gitignore. Inspect with git ls-files -ci --exclude-from=.gitignore.`,
+      );
+    }
+  }
 
   if (errors.length > 0) {
     for (const error of errors) {
@@ -82,10 +100,11 @@ const main = () => {
   }
 
   console.log('OK: package-lock.json provenance is valid');
+  if (isCheckout) console.log('OK: git does not track files covered by .gitignore');
 };
 
 if (require.main === module) {
   main();
 }
 
-module.exports = { validatePackageLock };
+module.exports = { findTrackedIgnoredFiles, validatePackageLock };
