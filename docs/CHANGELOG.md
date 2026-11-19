@@ -4,7 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
-- No changes have been recorded since v1.20.0.
+- 📝 **README tour** — Refresh the banner and animated demo, and surface install links and first steps in English and Japanese.
 
 ## v1.20.0 - 2026-11-19
 

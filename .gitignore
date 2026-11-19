@@ -11,13 +11,32 @@ Thumbs.db
 
 # Playwright MCP
 .playwright-mcp/
+playwright-report/
+test-results/
+.claude/worktrees/
 
 # Shared rules (local reference only)
 docs/unified-project-rules.md
 
 # Environment / config
 .env
+.env.*
+!.env.example
 *.local.json
+/es-metadata.yml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Captures, release archives and local evidence
+*.[hH][aA][rR]
+*.[hH][aA][rR].[gG][zZ]
+*.[sS][aA][zZ]
+*.crx
+*.zip
+/artifacts/
+/outputs/
 
 # Logs / temp
 /logs/
