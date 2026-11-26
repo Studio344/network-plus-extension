@@ -103,7 +103,10 @@ describe('release publishing workflow', () => {
 
   test('pins every action to the same commit as the quality workflow', () => {
     const quality = readRepoFile(path.join('.github', 'workflows', 'quality-gates.yml'));
-    for (const pinned of workflow.match(/uses: [^\s]+/g) || []) {
+    // A local reusable workflow is versioned with this file, so it has no pin.
+    const external = (workflow.match(/uses: [^\s]+/g) || []).filter((used) => !used.startsWith('uses: ./'));
+    expect(external.length).toBeGreaterThan(0);
+    for (const pinned of external) {
       expect(pinned).toMatch(/@[0-9a-f]{40}$/);
       expect(quality).toContain(pinned);
     }
@@ -118,6 +121,32 @@ describe('release publishing workflow', () => {
     expect(workflow).toContain('does not match the digest recorded in the submission dossiers');
     // The publish step must run after the digest guard, never before it.
     expect(workflow.indexOf('archive digest verified')).toBeLessThan(workflow.indexOf('gh release create'));
+  });
+
+  test('takes only a release this run published to the stores', () => {
+    // GITHUB_TOKEN releases raise no release event, so this call is the
+    // automatic path. A rerun for an existing version must never resubmit.
+    const submit = workflow.slice(workflow.indexOf('\n  submit:'));
+    expect(submit).toContain('needs: publish');
+    expect(submit).toContain("if: needs.publish.outputs.published == 'false'");
+    expect(submit).toContain('uses: ./.github/workflows/store-submit.yml');
+    expect(submit).toContain('store: both');
+    expect(submit).toContain('ref: ${{ needs.publish.outputs.tag }}');
+    expect(submit).toContain('secrets: inherit');
+    expect(submit).toMatch(/permissions:\s*\n\s*contents: read/);
+    expect(workflow).toContain('published: ${{ steps.existing.outputs.published }}');
+    expect(workflow).toContain('tag: ${{ steps.release.outputs.tag }}');
+  });
+
+  test('sends a release that changes store images as a draft only', () => {
+    // Images have no store API, so package and media must share one review
+    // that the operator submits after swapping the images by hand.
+    expect(workflow).toContain('upload_only: ${{ needs.publish.outputs.media_changed == \'true\' }}');
+    expect(workflow).toContain('git diff --quiet "$previous" "$GITHUB_SHA" -- docs/store-assets');
+    // Only a clean comparison counts as unchanged; anything else is a draft.
+    expect(workflow).toMatch(/if \[ -n "\$previous" \] && git diff --quiet[^\n]*\n[^\n]*\n\s*echo "media_changed=false"/);
+    expect(workflow.indexOf('media_changed=true')).toBeGreaterThan(workflow.indexOf('media_changed=false'));
+    expect(workflow.indexOf('id: media')).toBeLessThan(workflow.indexOf('gh release create'));
   });
 
   test('exposes the digest constant the workflow reads', () => {

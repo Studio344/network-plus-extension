@@ -24,8 +24,13 @@ cut, and everything downstream verifies against it.
 Two facts shape the whole flow. First, `store-submit.yml` **never fires on the
 release event**: the release is created by `release.yml` using the workflow
 `GITHUB_TOKEN`, and GitHub suppresses workflow triggers from events created
-with that token (recursion prevention). Every submission is started by hand
-with `workflow_dispatch` on the verified release tag. Second, **listing text and images have no
+with that token (recursion prevention). So `release.yml` calls it with
+`workflow_call` and `store=both` on the new tag, only in a run that created
+the release. When `docs/store-assets/` changed since the previous release, or
+the comparison fails, that call is `upload_only` and leaves drafts for the
+media sequence below. Retries, Chrome `status_only`, `diagnose`, and the final
+media-changed submission are started by hand with `workflow_dispatch` on the
+verified release tag. Second, **listing text and images have no
 API on either store** — the Chrome Items API and the Edge Update API both take
 packages and nothing else. Package submission is therefore automated in CI;
 the images are swapped by `npm run store:pages`, which drives the two consoles
@@ -116,7 +121,11 @@ state before changing the item. Use the Chrome `status_only` workflow input for 
 IDs. Check the Partner Center draft if a previous Edge result is uncertain.
 Keep the installed listing's visibility and markets.
 
-Dispatch the existing `store-submit.yml` with `ref=vX.Y.Z` and explicit
+The merge's `release.yml` run already called `store-submit.yml` once for both
+stores (its `Submit to stores` job). Read that run first: submitted when media
+was unchanged, uploaded as drafts when it changed. Dispatch by hand only to
+retry, to finish the media sequence, or when the automatic job did not run.
+For a manual run, dispatch `store-submit.yml` with `ref=vX.Y.Z` and explicit
 `store=edge` or `store=chrome`, one run per store. The tag pins both the
 submission code and the archive source. Confirm each run's head matches the
 tag and log shows the expected archive bytes and SHA-256. With GitHub CLI,
@@ -124,13 +133,15 @@ tag and log shows the expected archive bytes and SHA-256. With GitHub CLI,
 example. The Actions interface or the [dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
 accepts the same ref and inputs.
 
-**Media unchanged** — use the normal review submission for each store. Record
-each run, acknowledgement and available operation/version status independently.
+**Media unchanged** — the automatic call already made the normal review
+submission for each store. Record each store's acknowledgement and available
+operation/version status independently.
 
 **Media changed** — sequence it so one review carries everything:
 
-1. Dispatch once per affected store with `upload_only=true`. The package lands
-   in a draft.
+1. The automatic call already uploaded to both stores with `upload_only`, so
+   each package is in a draft. Dispatch once per affected store with
+   `upload_only=true` only if that job did not run or failed.
 2. Swap the images with `npm run store:pages` on the operator's machine — it
    cannot run in CI, because it needs an interactive sign-in and a profile
    that survives between runs:

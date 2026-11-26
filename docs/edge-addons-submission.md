@@ -139,7 +139,7 @@ The sections above describe a first submission. When a Partner Center product al
 
 ## Automated submission
 
-`npm run store:submit -- --store edge` uploads the packaged archive to the existing Partner Center product and publishes the draft submission through the Update API v1.1. The `Submit to Stores` workflow does not run on a GitHub release event; after explicit release and store-submission authorization, dispatch it manually on the verified release tag for this store.
+`npm run store:submit -- --store edge` uploads the packaged archive to the existing Partner Center product and publishes the draft submission through the Update API v1.1. The `Submit to Stores` workflow does not run on a GitHub release event. `Publish Release` calls it for both stores right after it creates a new release, as a draft only when `docs/store-assets/` changed since the previous release. To retry or finish a draft, dispatch it manually on the verified release tag for this store.
 
 Before uploading anything, the script rebuilds the archive and compares its SHA-256 against the digest recorded in this dossier. A mismatch aborts the run, so the store can only receive bytes that passed review here.
 

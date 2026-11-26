@@ -194,7 +194,8 @@ with Playwright `fill()`, save the draft, and require an exact read-back.
 
 - `store-submit.yml` never fires from the release event (the release is
   created with `GITHUB_TOKEN`, whose events do not trigger workflows).
-  Dispatch it manually every time.
+  `release.yml` calls it instead, only in a run that created the release, as
+  a draft when store images changed. Dispatch it by hand to retry or finish.
 - The wizard (`store:setup`) strips matched surrounding quotes and flags a
   value that repeats an earlier answer (stale clipboard), but it cannot know
   a pasted value is the wrong *kind* — check shapes when a store refuses.

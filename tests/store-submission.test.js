@@ -539,17 +539,27 @@ describe('command line', () => {
 describe('store submission workflow', () => {
   const workflow = readRepoFile(SUBMIT_WORKFLOW);
 
-  test('declares the release trigger, says why it never fires, and runs on demand', () => {
+  test('declares the release trigger, says why it does not fire, and runs when called or on demand', () => {
     // The release trigger stays declared for manually created releases, but
-    // the normal path is a manual dispatch: release.yml creates releases with
-    // the workflow GITHUB_TOKEN, and GitHub suppresses that token's events to
-    // prevent workflow recursion. The comment carrying that fact lives inside
-    // the trigger block and is pinned here so a cleanup pass cannot silently
-    // delete the knowledge and leave the next operator waiting for a run that
-    // will never start.
+    // release.yml creates releases with the workflow GITHUB_TOKEN, and GitHub
+    // suppresses that token's events to prevent workflow recursion. So the
+    // normal path is workflow_call from release.yml, and a manual dispatch
+    // stays for retries and diagnosis. The comment carrying that fact lives
+    // inside the trigger block and is pinned here so a cleanup pass cannot
+    // silently delete the knowledge and leave the next operator waiting for a
+    // run that will never start.
     expect(workflow).toMatch(/on:\s*\n(?:\s*#[^\n]*\n)*\s*release:\s*\n\s*types:\s*\n\s*- published/);
-    expect(workflow).toContain("GitHub suppresses events");
+    expect(workflow).toContain('GitHub suppresses events');
     expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toMatch(/workflow_call:\s*\n\s*inputs:\s*\n\s*store:/);
+    expect(workflow).toMatch(/ref:\s*\n\s*description: Release tag[^\n]*\n\s*type: string\s*\n\s*required: true/);
+  });
+
+  test('queues called and dispatched runs behind each other', () => {
+    // In a called workflow github.workflow names the caller, so only a fixed,
+    // job-level group serializes a release.yml call with a manual dispatch.
+    expect(workflow).toMatch(/concurrency:\s*\n\s*group: store-submission\s*\n\s*cancel-in-progress: false/);
+    expect(workflow).not.toContain('group: ${{ github.workflow }}');
   });
 
   test('keeps the token read-only, since it publishes to stores and not to the repository', () => {
@@ -587,8 +597,8 @@ describe('store submission workflow', () => {
     expect(workflow).toContain('$UPLOAD_ONLY $STATUS_ONLY $DIAGNOSE');
     expect(workflow).toContain("if: ${{ !inputs.status_only && !inputs.diagnose }}");
     expect(workflow).toContain('run-name: Store');
-    expect(workflow).toContain('ref: ${{ github.event.release.tag_name || github.ref }}');
-    expect(workflow.indexOf('ref: ${{ github.event.release.tag_name || github.ref }}')).toBeLessThan(workflow.indexOf('npm ci'));
+    expect(workflow).toContain('ref: ${{ inputs.ref || github.event.release.tag_name || github.ref }}');
+    expect(workflow.indexOf('ref: ${{ inputs.ref || github.event.release.tag_name || github.ref }}')).toBeLessThan(workflow.indexOf('npm ci'));
     expect(workflow).not.toContain('git checkout --detach');
   });
 

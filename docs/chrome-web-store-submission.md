@@ -168,7 +168,7 @@ The sections above describe a first submission. When a Chrome Web Store item alr
 
 ## Automated submission
 
-`npm run store:submit -- --store chrome` uploads the packaged archive as a new package on the existing item and submits it for review through the Chrome Web Store API. The `Submit to Stores` workflow does not run on a GitHub release event; after explicit release and store-submission authorization, dispatch it manually on the verified release tag for this store.
+`npm run store:submit -- --store chrome` uploads the packaged archive as a new package on the existing item and submits it for review through the Chrome Web Store API. The `Submit to Stores` workflow does not run on a GitHub release event. `Publish Release` calls it for both stores right after it creates a new release, as a draft only when `docs/store-assets/` changed since the previous release. To retry or finish a draft, dispatch it manually on the verified release tag for this store.
 
 Before uploading anything, the script rebuilds the archive and compares its SHA-256 against the digest recorded in this dossier. A mismatch aborts the run, so the store can only receive bytes that passed review here.
 
