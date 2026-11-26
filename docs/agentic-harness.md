@@ -7,21 +7,20 @@
 `agentic-core.instructions.md` は相対 symlink で同じ実体を参照する。
 `AGENTS.md -> CLAUDE.md` を維持し、既存のプロジェクト指示・リリース制約を優先する。
 
-基礎の固定版は bundle 0.10.0 の PR #31 draft。元 manifest の41件のチェックサムを照合し、18件の
-asset を手動統合した。`.agentic-rules.lock.json` の commit と manifest SHA-256 はこの基礎版を識別し、
+固定版は bundle 0.10.1 の正式リリース（タグ `v0.10.1`、commit `19c7bd01f8a4d96d45926e57d09baf841339f412`）。
+manifest の41件のチェックサムを照合し、18件の asset を手動統合した。18件すべてが同タグの内容と
+バイト単位で一致する。`.agentic-rules.lock.json` の ref・commit・manifest SHA-256 はこの固定版を識別し、
 各 asset の SHA-256 は実際の保存先のバイト列を記録する。
-[基礎の固定版](https://github.com/himiyosh/agentic-rules/tree/a0248b7a876de1ddaa21fea5569b08ed7d94fe0f)
+[固定版のリリース](https://github.com/himiyosh/agentic-rules/releases/tag/v0.10.1)
 
-片付けルールは、agentic-rules のマージコミット `f9c2a817bdaeffc80bab6bb0a90e0b2ba09a5168` を
-基礎版に追加で適用した。常時適用 core の全体と、engineering の §3.5 が同コミットの内容に一致する。
-lock の該当2件は適用後のバイト列を示し、残り16件は基礎版と一致する。
-[片付けルールの適用元](https://github.com/himiyosh/agentic-rules/commit/f9c2a817bdaeffc80bab6bb0a90e0b2ba09a5168)
+0.10.0（PR #31 draft の固定版 `a0248b7`）に追加で当てていた片付けルール（`f9c2a81`）は
+v0.10.1 に含まれるため、個別の適用は不要になった。
 
 配布版からの意図した差分:
 
 - `AGENTS.template.md` で上書きせず、既存CLAUDE.mdへ参照と手順を追加した。
 - `improvement_orchestrator.toml` は置かない。主セッションだけが統括し、同時子担当は最大3。
-- 共有 knowledge の保存先を既存の `.claude` に統一した。片付けルールを適用した2件の出典は前段に記録する。
+- 共有 knowledge の保存先を既存の `.claude` に統一した。
 - Codexの9役TOML、hooks.json、Pythonハンドラーは固定元と同一。
 - Claudeの9役Markdownは同名のCodex TOML内 `developer_instructions` を読む薄いadapter。
   Claudeの名前はハイフン、Codexはアンダースコア。同じ役割契約を複製しない。
