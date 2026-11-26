@@ -7,14 +7,30 @@ run-name: Store ${{ inputs.store || 'both' }} / ${{ github.ref_name }} / status-
 # bytes that were reviewed.
 
 on:
-  # The release trigger never actually fires today: releases are created by
-  # release.yml with the workflow GITHUB_TOKEN, and GitHub suppresses events
-  # from that token to prevent workflow recursion. It stays declared so a
-  # manually created release still submits; the normal path is a manual
-  # dispatch after each release (see .claude/skills/store-release).
+  # The release trigger does not fire for releases that release.yml creates:
+  # it uses the workflow GITHUB_TOKEN, and GitHub suppresses events from that
+  # token to prevent workflow recursion. It stays declared so a manually
+  # created release still submits. The normal path is workflow_call: release.yml
+  # calls this workflow right after it publishes a new release. A manual
+  # dispatch remains for retries, status reads, and diagnosis (see
+  # .claude/skills/store-release).
   release:
     types:
       - published
+  workflow_call:
+    inputs:
+      store:
+        description: Which store to submit to (both, edge, or chrome)
+        type: string
+        default: both
+      ref:
+        description: Release tag to check out, rebuild, and submit
+        type: string
+        required: true
+      upload_only:
+        description: Upload the package but do not submit it for review
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       store:
@@ -45,10 +61,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
 jobs:
   submit:
     name: Submit to stores
@@ -59,12 +71,18 @@ jobs:
     # reviewer before it runs by adding protection rules to it in repository
     # settings. Without rules the job runs unattended, which is the default.
     environment: store-submission
+    # Job-level and named after the environment, so a call from release.yml and
+    # a manual dispatch queue behind each other. In a called workflow,
+    # github.workflow names the caller, so a workflow-level group would not.
+    concurrency:
+      group: store-submission
+      cancel-in-progress: false
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name || github.ref }}
+          ref: ${{ inputs.ref || github.event.release.tag_name || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 

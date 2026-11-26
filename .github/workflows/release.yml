@@ -23,6 +23,10 @@ jobs:
       # Creating the release and uploading its archive is the only write this
       # workflow performs; every other job in the repository stays read-only.
       contents: write
+    outputs:
+      published: ${{ steps.existing.outputs.published }}
+      tag: ${{ steps.release.outputs.tag }}
+      media_changed: ${{ steps.media.outputs.media_changed }}
 
     steps:
       - name: Checkout repository
@@ -107,6 +111,24 @@ jobs:
           fi
           echo "archive digest verified: $actual"
 
+      # Store images have no API, so a release that changes them must reach the
+      # stores as a draft: the operator swaps the images, then submits package
+      # and media in one review. Anything unclear counts as changed.
+      - name: Check whether the store images changed since the last release
+        id: media
+        if: steps.existing.outputs.published == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          if [ -n "$previous" ] && git diff --quiet "$previous" "$GITHUB_SHA" -- docs/store-assets; then
+            echo "store images unchanged since $previous"
+            echo "media_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "store images changed since ${previous:-the first release}, or could not be compared; stores get a draft only"
+            echo "media_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build release notes
         if: steps.existing.outputs.published == 'false'
         run: node scripts/build-release-notes.js > release-notes.md
@@ -125,3 +147,21 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Network+ $TAG_NAME" \
             --notes-file release-notes.md
+
+  # Releases created above with GITHUB_TOKEN do not raise a release event, so
+  # this call is what takes a new release to the stores. It runs only when this
+  # run published the release, never for a version that already existed. To
+  # require a person's approval first, add a required reviewer to the
+  # store-submission environment; the called job waits for it.
+  submit:
+    name: Submit to stores
+    needs: publish
+    if: needs.publish.outputs.published == 'false'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/store-submit.yml
+    with:
+      store: both
+      ref: ${{ needs.publish.outputs.tag }}
+      upload_only: ${{ needs.publish.outputs.media_changed == 'true' }}
+    secrets: inherit

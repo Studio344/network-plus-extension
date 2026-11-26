@@ -120,7 +120,7 @@ PR のマージ直前に、必須 checks が現在の PR head SHA に対して�
 ### リリースとストア再申請
 
 手順は skill `.claude/skills/store-release/SKILL.md`(`/store-release`)に集約してある。リリース・再申請・store-submit の失敗診断はまずそれを開く。
-最重要の 1 点だけここに再掲: **store-submit は release イベントでは発火しない**(release.yml が GITHUB_TOKEN でリリースを作るため)。毎回 workflow_dispatch で起動する。
+最重要の 1 点だけここに再掲: **store-submit は release イベントでは発火しない**(release.yml が GITHUB_TOKEN でリリースを作るため)。そのため release.yml が新しいリリースを作った回だけ、`workflow_call` で両ストアへの申請を呼ぶ。ストア画像が前回リリースから変わった回は下書き止まり(upload-only)で、画像差し替え後の審査提出と、再試行・status-only・diagnose は workflow_dispatch で起動する。
 
 ### ストア申請の資格情報
 
