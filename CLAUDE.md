@@ -43,9 +43,9 @@ profile によっては配布されないファイルがある。存在しない
 
 このプロジェクトだけに効く絶対制約をここに書く。上の共通ルールと重複する一般論は書かない。
 
-- 導入元 ref: `a0248b7a876de1ddaa21fea5569b08ed7d94fe0f`（bundle `0.10.0`、上流 PR #31 draft の固定版。正式リリースではない）
+- 導入元 ref: タグ `v0.10.1`（commit `19c7bd01f8a4d96d45926e57d09baf841339f412`、bundle `0.10.1` の正式リリース）
 - 導入 profile: `codex-improvement` の手動統合。共通正本は `.claude/knowledge/agentic-rules/`、core は `.claude/rules/agentic-core.md`。配布版との対応と差分は `docs/agentic-harness.md`。
-- ローカル逸脱: `.claude/knowledge/agentic-rules/agentic-engineering-rules.md` §6.10 から、レビューコメント marker・レビュアー session UUID・repository variables による merge ゲート手続きの bullet 3 件を削除している（#129 で本リポジトリでは廃止済み。merge 可否は branch protection と通常の CI quality gates で判定する）。今回の固定版では上流でも削除済みのため追加差分はない。更新時も再導入しないこと。
+- ローカル逸脱: `.claude/knowledge/agentic-rules/agentic-engineering-rules.md` §6.10 から、レビューコメント marker・レビュアー session UUID・repository variables による merge ゲート手続きの bullet 3 件を削除している（#129 で本リポジトリでは廃止済み。merge 可否は branch protection と通常の CI quality gates で判定する）。v0.10.1 でも上流で削除済みのため追加差分はない。更新時も再導入しないこと。
 
 ### 両クライアント共通の改善手順
 

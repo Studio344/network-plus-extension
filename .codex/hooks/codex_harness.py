@@ -737,13 +737,13 @@ def hook(payload):
         print("Evidence gate failed; retry budget exhausted. Work remains incomplete: " +
               "; ".join(errors[:5]), file=sys.stderr)
         return {}
+    if active:
+        active_report["completion"] = {"status": "pass", "fingerprint": current}
+        write_json(active_path, active_report)
     state.update({"session_id": sid, "status": "pass" if active else "no_change",
                   "baseline": current, "last_report": active or state.get("last_report"),
                   "active_report": None, "active_run_id": None, "errors": []})
     write_json(path, state)
-    if active:
-        active_report["completion"] = {"status": "pass", "fingerprint": current}
-        write_json(active, active_report)
     return {}
 
 
