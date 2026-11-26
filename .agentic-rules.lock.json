@@ -3,10 +3,10 @@
   "platforms": {
     "codex": {
       "repository": "himiyosh/agentic-rules",
-      "ref": "a0248b7a876de1ddaa21fea5569b08ed7d94fe0f",
-      "commit": "a0248b7a876de1ddaa21fea5569b08ed7d94fe0f",
-      "bundleVersion": "0.10.0",
-      "manifestSha256": "ca454fa909d0296dcb4d42830ac1889362e513438503d0cf0081106c25f882a8",
+      "ref": "v0.10.1",
+      "commit": "19c7bd01f8a4d96d45926e57d09baf841339f412",
+      "bundleVersion": "0.10.1",
+      "manifestSha256": "d9d74d03bddb396a76c211c7b9b875e303cb0f86ddf8b609e137bd30f98db710",
       "platform": "codex",
       "profiles": [
         "codex-improvement"
@@ -16,7 +16,7 @@
           "id": "codex-requirements-reviewer",
           "source": ".codex/agents/requirements_reviewer.toml",
           "target": ".codex/agents/requirements_reviewer.toml",
-          "sha256": "bba5396ed1fae2df58d4a8e59c6e3a3c37f831111cf502cb520c1cdd929136fd"
+          "sha256": "69f2ebe8bded8917aabaaa80de72bbb65934c0d2da6b15fe5dde3cb44a467743"
         },
         {
           "id": "codex-design-architect",
@@ -40,13 +40,13 @@
           "id": "codex-ux-reviewer",
           "source": ".codex/agents/ux_reviewer.toml",
           "target": ".codex/agents/ux_reviewer.toml",
-          "sha256": "cce7bab1ff366e90e21479ae0636e329c61a92af202a6b127100a80e8ee531f8"
+          "sha256": "3a08675438da686703881516e955812bba2f8f83542b7d5d3ac65062a0fe7cd5"
         },
         {
           "id": "codex-qa-reviewer",
           "source": ".codex/agents/qa_reviewer.toml",
           "target": ".codex/agents/qa_reviewer.toml",
-          "sha256": "af95e6a0addf1e082ec871457f35eb99353926b081720e9a10afc42b6678ec0e"
+          "sha256": "d493260c3b9496f68d4341b1d12778d40f627abfb40d45a25b922f295418d802"
         },
         {
           "id": "codex-reliability-reviewer",
@@ -64,7 +64,7 @@
           "id": "codex-release-reviewer",
           "source": ".codex/agents/release_reviewer.toml",
           "target": ".codex/agents/release_reviewer.toml",
-          "sha256": "e0a257679356d8acfe749d6667b02d50887ee81768ac203959ef020ecae00fe7"
+          "sha256": "53c654f0fd61910397f13d252393216fc825353678b35822bba2756301aea0a1"
         },
         {
           "id": "codex-improvement-hooks",
@@ -76,13 +76,13 @@
           "id": "codex-improvement-harness-script",
           "source": ".codex/hooks/codex_harness.py",
           "target": ".codex/hooks/codex_harness.py",
-          "sha256": "209bc0bf2c8b4419e6e519a22538bebb2066c571e6869df0b6c316e10682a6e2"
+          "sha256": "0a92d193368ac2b3887d3acdfd2d63a81b065f95efb7e84e1a18f3f4d78d4139"
         },
         {
           "id": "codex-improvement-harness-guide",
           "source": "docs/codex-improvement-harness.md",
           "target": ".claude/knowledge/agentic-rules/docs/codex-improvement-harness.md",
-          "sha256": "834738f13f30f7f6f5bc697b6937e2211c73cd085fb69a1b78fbc3feafcf2949"
+          "sha256": "c2895fa7bbf9eee3ebb129a4766c576457ad2f528d33855e1328ae59c7927457"
         },
         {
           "id": "codex-agentic-core",
@@ -94,7 +94,7 @@
           "id": "codex-agentic-engineering",
           "source": "agentic-engineering-rules.md",
           "target": ".claude/knowledge/agentic-rules/agentic-engineering-rules.md",
-          "sha256": "df4d4121d4f1e295635a2159c59eb4d868c64bb04c47c83e958fa39ac60b0abf"
+          "sha256": "680f6c9a0b76055eb44c6ad93dca0b0c2b5083d1e3644cc007fbc549a491f02d"
         },
         {
           "id": "codex-agent-persona",
@@ -106,7 +106,7 @@
           "id": "codex-agentic-knowledge",
           "source": "agentic-knowledge-system-rules.md",
           "target": ".claude/knowledge/agentic-rules/agentic-knowledge-system-rules.md",
-          "sha256": "dc7e960b3f1b923b7fcef28955bb0e522d634b8c89c198ae071910cd621ce1b9"
+          "sha256": "bf397c4e2ee96956ee7a851085681b5fd94a8b314a51f173a97d32eeb84ed7e3"
         },
         {
           "id": "codex-loop-graph",
