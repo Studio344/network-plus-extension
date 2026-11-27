@@ -2,6 +2,7 @@
 /* global DataTransfer, document -- Browser callbacks are executed in the isolated panel. */
 // Render the listing graphics and current workbench from local, synthetic data.
 // Usage: CHROME_BIN=/path/to/chrome npm run store:screenshots
+// Pass -- --promo-only to refresh just the two promotional tiles.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -224,15 +225,46 @@ const BRAND_CSS =
   '.brand{width:100%;height:100%;position:relative;overflow:hidden;background:' +
   'radial-gradient(ellipse at 76% 42%,#54402d 0,transparent 58%),linear-gradient(125deg,#171514,#27211b 83%)}' +
   '.lines{position:absolute;inset:0;opacity:.37;background:repeating-linear-gradient(0deg,transparent 0 35px,#d8aa7c33 35px 36px)}' +
+  '.promo-network{position:absolute;inset:0;width:100%;height:100%}' +
+  '.wide .promo-network{inset:39px 0 auto auto;width:704px;height:448px;opacity:.88}' +
   '.mark,.mascot{position:absolute;object-fit:contain}.mark{filter:drop-shadow(0 14px 28px #110d0a95)}' +
-  '.small .mark{width:150px;left:193px;top:56px}.small .mascot{width:119px;left:84px;bottom:40px}' +
-  '.wide .mark{width:216px;right:120px;top:149px}.wide .mascot{width:186px;right:282px;bottom:94px}' +
-  '.copy{position:absolute;left:88px;top:166px}.copy h1{font-size:104px;line-height:1;margin:0;letter-spacing:-.045em}' +
+  '.small .mark{width:150px;left:185px;top:56px}.small .mascot{width:119px;left:84px;bottom:47px}' +
+  '.wide .mark{width:216px;right:120px;top:135px}.wide .mascot{width:186px;right:282px;bottom:108px}' +
+  '.copy{position:absolute;left:88px;top:174px}.copy h1{font-size:104px;line-height:1;margin:0;letter-spacing:-.045em}' +
   '.copy p{font-size:37px;font-weight:550;color:#f1c69d;margin:27px 0 0}' +
   '.shot{height:100%;padding:18px 24px 24px;background:linear-gradient(155deg,#30271e,#141311 46%)}' +
   '.shot header{height:94px;display:flex;align-items:flex-start;gap:18px}' +
   '.shot header img{width:61px;height:61px;margin-top:2px}.shot h1{font-size:36px;line-height:1.1;margin:0;font-weight:760;letter-spacing:-.025em}' +
   '.shot p{font-size:17px;color:#e0c4a7;margin:7px 0 0}.panel{width:1232px;height:664px;display:block;border-radius:10px;outline:1px solid #97704d}';
+
+const PROMO_NETWORK = `<svg class="promo-network" viewBox="0 0 440 280" aria-hidden="true">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 88h65l27-28h58l21 21h46M22 112h89l18-18h37l14 14h31"
+          stroke="#d6a169" stroke-opacity=".65" stroke-width="2"/>
+    <path d="M86 40h48l19 20M139 94l17-18h23M170 222h42l22-22h102l28-29h55"
+          stroke="#af8af3" stroke-opacity=".54" stroke-width="2"/>
+    <path d="M324 146h46l20-21h36M161 250h89l17-17h101l19-19h37"
+          stroke="#79d8bc" stroke-opacity=".48" stroke-width="2"/>
+    <path d="M343 67h33m11 21h30m-62 17h38m-26 86h40m-25 48h39"
+          stroke="#d6a169" stroke-opacity=".61" stroke-width="4.5"/>
+    <path d="M391 105h27m-47 46h38m-104 82h38"
+          stroke="#8ce7c9" stroke-opacity=".72" stroke-width="4.5"/>
+    <path d="M354 67h20m-38 147h29"
+          stroke="#b094f0" stroke-opacity=".74" stroke-width="4.5"/>
+  </g>
+  <g fill="#e3ad73" opacity=".86">
+    <circle cx="22" cy="88" r="3.8"/><circle cx="114" cy="60" r="3.3"/>
+    <circle cx="166" cy="94" r="3.2"/><circle cx="419" cy="171" r="3.4"/>
+  </g>
+  <g fill="#a88ddf" opacity=".82">
+    <circle cx="86" cy="40" r="3.4"/><circle cx="22" cy="112" r="3.1"/>
+    <circle cx="212" cy="222" r="3.7"/><circle cx="336" cy="200" r="3.1"/>
+  </g>
+  <g fill="#8ce7c9" opacity=".86">
+    <circle cx="390" cy="125" r="3.5"/><circle cx="250" cy="250" r="3.2"/>
+    <circle cx="424" cy="214" r="3.5"/>
+  </g>
+</svg>`;
 
 async function renderGraphic(cdp, width, height, markup, transparent = false) {
   const html =
@@ -262,8 +294,10 @@ async function renderGraphic(cdp, width, height, markup, transparent = false) {
 
 async function main() {
   if (!process.env.CHROME_BIN) throw new Error('Set CHROME_BIN to render the store artwork.');
+  const promoOnly = process.argv.includes('--promo-only');
+  const screenshots = promoOnly ? [] : SCREENSHOTS;
   const captures = new Map();
-  for (const screenshot of SCREENSHOTS) captures.set(screenshot.file, await captureScene(screenshot));
+  for (const screenshot of screenshots) captures.set(screenshot.file, await captureScene(screenshot));
   const page = await launchPanelPage({ executable: process.env.CHROME_BIN, width: 400, height: 300 });
   const output = new Map();
   try {
@@ -275,7 +309,7 @@ async function main() {
       '<style>svg{width:300px;height:300px;display:block}</style>' + vector,
       true,
     );
-    output.set('logo-300.png', logo);
+    if (!promoOnly) output.set('logo-300.png', logo);
     const mark = '<img alt="" class="mark" src="' + dataUrl(logo) + '">';
     const mascot = '<img alt="" class="mascot" src="' + dataUrl(bytes('assets/support-otter.png')) + '">';
     output.set(
@@ -284,7 +318,7 @@ async function main() {
         page.cdp,
         440,
         280,
-        '<div class="brand small"><div class="lines"></div>' + mark + mascot + '</div>',
+        '<div class="brand small"><div class="lines"></div>' + PROMO_NETWORK + mark + mascot + '</div>',
       ),
     );
     output.set(
@@ -294,13 +328,14 @@ async function main() {
         1400,
         560,
         '<div class="brand wide"><div class="lines"></div>' +
+          PROMO_NETWORK +
           '<div class="copy"><h1>Network+</h1><p>Inspect HTTP and WebSocket traffic</p></div>' +
           mark +
           mascot +
           '</div>',
       ),
     );
-    for (const screenshot of SCREENSHOTS) {
+    for (const screenshot of screenshots) {
       const panel = '<img class="panel" alt="" src="' + dataUrl(captures.get(screenshot.file)) + '">';
       const heading =
         '<header><img alt="" src="' +

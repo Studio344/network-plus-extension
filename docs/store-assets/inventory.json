@@ -21,7 +21,7 @@
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [],
-      "state": "Text-free tile with the current icon and bundled otter"
+      "state": "Text-free tile with the current icon, bundled otter, and connected lines illustrating network traffic"
     },
     {
       "file": "chrome-marquee-1400x560.png",
@@ -32,7 +32,7 @@
       "syntheticOnly": true,
       "containsSensitiveData": false,
       "domains": [],
-      "state": "Charcoal marquee with the current icon, bundled otter, and HTTP and WebSocket feature tagline"
+      "state": "Charcoal marquee with the current icon, bundled otter, connected network traces, and HTTP and WebSocket feature tagline"
     },
     {
       "file": "screenshot-1-request-detail-1280x800.png",

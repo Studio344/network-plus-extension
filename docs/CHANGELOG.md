@@ -4,6 +4,7 @@ All notable changes to Network+ for DevTools. Versions follow [Semantic Versioni
 
 ## Unreleased
 
+- 🔧 **Promotional artwork** — Restore the network lines and junctions and balance the artwork in the charcoal store tiles.
 - 🔧 **Store submission** — Publish Release now submits each new release to both stores, or uploads drafts when store images changed.
 - 📝 **README tour** — Refresh the banner and animated demo, and surface install links and first steps in English and Japanese.
 
