@@ -12,7 +12,7 @@ This dossier is a repository-local recommendation for a future Chrome Web Store 
 - **ZIP** — `network-plus-extension-1.20.0.zip`
 - **Size** — `429567 bytes`
 - **SHA-256** — `8b26aa13d5807b1b33ec26622e6d77803a00374a394f33de1bca13a6b70f9ca6`
-- **Download after publication** — https://github.com/himiyosh/network-plus-extension/releases/download/v1.20.0/network-plus-extension-1.20.0.zip
+- **Download after publication** — https://github.com/Studio344/network-plus-extension/releases/download/v1.20.0/network-plus-extension-1.20.0.zip
 
 Two `TZ=UTC npm run extension:package` builds produced identical bytes. The archive was built from reviewed commit `3bd37f6c3aea0f2008bce02adf1157b7d39854bd` with the version update applied. Public observation of the release is a post-merge step and is not claimed here. Verify the downloaded GitHub asset against this archive after publication. The digest is safe to publish and is useful for integrity checking, but it is not a publisher signature. Only upload after obtaining the ZIP from the trusted release route and comparing the complete digest.
 
@@ -41,9 +41,9 @@ These are external account, payment, identity, and agreement actions. They are i
 
 **Category recommendation:** `Developer Tools`
 
-**Homepage URL:** https://github.com/himiyosh/network-plus-extension
+**Homepage URL:** https://github.com/Studio344/network-plus-extension
 
-**Support URL:** https://github.com/himiyosh/network-plus-extension/issues/new/choose
+**Support URL:** https://github.com/Studio344/network-plus-extension/issues/new/choose
 
 ### Detailed description
 
@@ -123,7 +123,7 @@ Use the current dashboard labels and apply this conservative mapping:
 | Sale or advertising use | None. Data is not sold, used for creditworthiness, or used for personalized, retargeted, or interest-based advertising. |
 | Limited-use certification | Certify only after confirming that the live statements match the submitted version. The repository behavior is designed to satisfy allowed-use, allowed-transfer, prohibited-advertising, and prohibited-human-access limits. |
 
-**Privacy policy URL:** https://github.com/himiyosh/network-plus-extension/blob/main/docs/privacy.md
+**Privacy policy URL:** https://github.com/Studio344/network-plus-extension/blob/main/docs/privacy.md
 
 The policy URL must be opened in a signed-out browser after these changes are merged and before it is entered in the dashboard.
 

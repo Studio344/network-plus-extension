@@ -561,7 +561,7 @@ const main = async () => {
 
   const notes = options.notesFile
     ? fs.readFileSync(options.notesFile, 'utf8').trim()
-    : `Network+ for DevTools v${version}. Release notes: https://github.com/himiyosh/network-plus-extension/releases/tag/v${version}`;
+    : `Network+ for DevTools v${version}. Release notes: https://github.com/Studio344/network-plus-extension/releases/tag/v${version}`;
 
   const secrets = [process.env.EDGE_API_KEY, process.env.CHROME_CLIENT_SECRET, process.env.CHROME_REFRESH_TOKEN].filter(
     Boolean,

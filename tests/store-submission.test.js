@@ -698,7 +698,7 @@ describe('guided secret setup', () => {
     expect(ENVIRONMENT).toBe('store-submission');
     const workflow = readRepoFile(path.join('.github', 'workflows', 'store-submit.yml'));
     expect(workflow).toContain(`environment: ${ENVIRONMENT}`);
-    expect(REPO).toBe('himiyosh/network-plus-extension');
+    expect(REPO).toBe('Studio344/network-plus-extension');
   });
 
   // The value goes over stdin; putting it in argv would expose it to any

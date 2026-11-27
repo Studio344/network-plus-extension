@@ -36,11 +36,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/himiyosh/network-plus-extension.git"
+    "url": "git+https://github.com/Studio344/network-plus-extension.git"
   },
-  "homepage": "https://github.com/himiyosh/network-plus-extension",
+  "homepage": "https://github.com/Studio344/network-plus-extension",
   "bugs": {
-    "url": "https://github.com/himiyosh/network-plus-extension/issues/new/choose"
+    "url": "https://github.com/Studio344/network-plus-extension/issues/new/choose"
   },
   "engines": {
     "node": "^22.0.0 || ^24.0.0"

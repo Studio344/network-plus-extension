@@ -66,7 +66,7 @@ afterEach(() => {
 describe('release version integrity', () => {
   const DEFAULT_REPOSITORY = {
     type: 'git',
-    url: 'git+https://github.com/himiyosh/network-plus-extension.git',
+    url: 'git+https://github.com/Studio344/network-plus-extension.git',
   };
   const EN_CONFIG = README_CONFIGS.find((config) => config.path === 'README.md');
   const JA_CONFIG = README_CONFIGS.find((config) => config.path === 'README.ja.md');
@@ -113,13 +113,13 @@ describe('release version integrity', () => {
 
   test('normalizes GitHub repository metadata into a canonical release base URL', () => {
     expect(getGitHubReleaseBaseUrl(DEFAULT_REPOSITORY)).toBe(
-      'https://github.com/himiyosh/network-plus-extension/releases',
+      'https://github.com/Studio344/network-plus-extension/releases',
     );
     expect(getGitHubReleaseBaseUrl('https://github.com/example/network-plus-extension.git')).toBe(
       'https://github.com/example/network-plus-extension/releases',
     );
     expect(getLatestReleaseUrl(DEFAULT_REPOSITORY)).toBe(
-      'https://github.com/himiyosh/network-plus-extension/releases/latest',
+      'https://github.com/Studio344/network-plus-extension/releases/latest',
     );
   });
 
