@@ -15,7 +15,7 @@
 const { spawn } = require('child_process');
 const readline = require('readline');
 
-const REPO = 'himiyosh/network-plus-extension';
+const REPO = 'Studio344/network-plus-extension';
 const ENVIRONMENT = 'store-submission';
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

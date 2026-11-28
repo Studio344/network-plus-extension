@@ -1,11 +1,12 @@
 # Changelog
 
-All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/himiyosh/network-plus-extension/releases).
+All notable changes to Network+ for DevTools. Versions follow [Semantic Versioning](https://semver.org/); `version` is bumped once per release rather than per commit. Published builds are listed under [GitHub Releases](https://github.com/Studio344/network-plus-extension/releases).
 
 ## Unreleased
 
 - 🔧 **Store submission** — Publish Release now submits each new release to both stores, or uploads drafts when store images changed.
 - 📝 **README tour** — Refresh the banner and animated demo, and surface install links and first steps in English and Japanese.
+- 🔧 **Repository links** — Point package, README, issue templates, privacy policy, store docs, and release scripts at the Studio344 repository.
 
 ## v1.20.0 - 2026-11-19
 

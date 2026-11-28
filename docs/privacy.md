@@ -68,7 +68,7 @@ Following a link opens the destination in a normal browser tab, where that site'
 
 ## Support
 
-To file a bug report with the developer, choose `Report a problem` from the Network+ toolbar menu and describe what happened in Google Forms. Questions and public reports can be filed at https://github.com/himiyosh/network-plus-extension/issues/new/choose. The reviewed output from `Copy safe support summary` is optional for GitHub Issues. Keep raw traffic, credentials, customer data, full HAR files, and other sensitive material out of both routes.
+To file a bug report with the developer, choose `Report a problem` from the Network+ toolbar menu and describe what happened in Google Forms. Questions and public reports can be filed at https://github.com/Studio344/network-plus-extension/issues/new/choose. The reviewed output from `Copy safe support summary` is optional for GitHub Issues. Keep raw traffic, credentials, customer data, full HAR files, and other sensitive material out of both routes.
 
 ## Policy changes
 

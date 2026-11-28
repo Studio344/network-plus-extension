@@ -55,7 +55,7 @@ produced `invalid_client` until the right value was re-set.
 Pipe from the sourced `.env` straight into `gh`, one line, no clipboard:
 
 ```bash
-source ./.env.cws && printf '%s' "$CWS_CLIENT_SECRET" | gh secret set CHROME_CLIENT_SECRET --env store-submission --repo himiyosh/network-plus-extension
+source ./.env.cws && printf '%s' "$CWS_CLIENT_SECRET" | gh secret set CHROME_CLIENT_SECRET --env store-submission --repo Studio344/network-plus-extension
 ```
 
 Swap the variable and secret name as needed. Multi-line commands with `\`

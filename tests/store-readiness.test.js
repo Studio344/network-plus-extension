@@ -62,10 +62,10 @@ describe('browser store submission kits', () => {
     const packageJson = JSON.parse(read(root, packagePath));
     packageJson.description = '';
     packageJson.homepage = '';
-    packageJson.bugs.url = 'https://github.com/himiyosh/network-plus-extension/issues';
+    packageJson.bugs.url = 'https://github.com/Studio344/network-plus-extension/issues';
     packageJson.repository = {
       type: 'https',
-      url: 'https://github.com/himiyosh/network-plus-extension',
+      url: 'https://github.com/Studio344/network-plus-extension',
     };
     packageJson.keywords = [];
     write(root, packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
@@ -73,10 +73,10 @@ describe('browser store submission kits', () => {
     expect(validate(root)).toEqual(
       expect.arrayContaining([
         'package description must match manifest description',
-        'package homepage must be https://github.com/himiyosh/network-plus-extension',
-        'package support URL must be https://github.com/himiyosh/network-plus-extension/issues/new/choose',
+        'package homepage must be https://github.com/Studio344/network-plus-extension',
+        'package support URL must be https://github.com/Studio344/network-plus-extension/issues/new/choose',
         'package repository type must be git',
-        'package repository URL must be git+https://github.com/himiyosh/network-plus-extension.git',
+        'package repository URL must be git+https://github.com/Studio344/network-plus-extension.git',
         'package keywords must match the reviewed truthful set: network debugging, developer tools, HTTP inspector, HAR export, request filtering, response timing, Edge DevTools',
       ]),
     );
@@ -198,8 +198,8 @@ describe('browser store submission kits', () => {
     expect(validate(root)).toContain('unexpected store asset path: docs/store-assets/unlisted.png');
     expect(
       extractPublicUrls(
-        'Website https://github.com/himiyosh/network-plus-extension. Ignore `edge://extensions/` and `data:text/html,test`.',
+        'Website https://github.com/Studio344/network-plus-extension. Ignore `edge://extensions/` and `data:text/html,test`.',
       ),
-    ).toEqual(['https://github.com/himiyosh/network-plus-extension']);
+    ).toEqual(['https://github.com/Studio344/network-plus-extension']);
   });
 });

@@ -8,7 +8,7 @@
 
 </div>
 
-**Try it now:** [Latest release ZIP](https://github.com/himiyosh/network-plus-extension/releases/latest) · [Chrome Web Store](https://chromewebstore.google.com/detail/mhidipnhdnonbjkfklcohmnnmfggjlpo) · [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/network-for-devtools/dhmafmhaagefmichhmmkknapalhmlmal)
+**Try it now:** [Latest release ZIP](https://github.com/Studio344/network-plus-extension/releases/latest) · [Chrome Web Store](https://chromewebstore.google.com/detail/mhidipnhdnonbjkfklcohmnnmfggjlpo) · [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/network-for-devtools/dhmafmhaagefmichhmmkknapalhmlmal)
 
 ## See Network+ in action
 
@@ -31,7 +31,7 @@
 
 ### Install from the release ZIP
 
-1. Download the [latest release ZIP](https://github.com/himiyosh/network-plus-extension/releases/latest).
+1. Download the [latest release ZIP](https://github.com/Studio344/network-plus-extension/releases/latest).
 2. Extract it into a new folder. Open `chrome://extensions/` or `edge://extensions/` and turn on **Developer mode**.
 3. Choose **Load unpacked** and select the folder containing `manifest.json`. Open DevTools and select **Network+**.
 
@@ -43,7 +43,7 @@ An unpacked install must be updated manually. To try the source, follow the same
 
 Captures are processed locally. Sanitized output is the default for copy and export. Review the result before sharing, especially when using full export. [Privacy notice](docs/privacy.md)
 
-Use **Report a problem** in the toolbar menu or open the [report form](https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform). The toolbar pre-fills optional version and environment details. For a public [GitHub issue](https://github.com/himiyosh/network-plus-extension/issues/new/choose), use **Copy safe support summary** from Keyboard Shortcuts and review the copied text before posting. Leave out real traffic and credentials.
+Use **Report a problem** in the toolbar menu or open the [report form](https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform). The toolbar pre-fills optional version and environment details. For a public [GitHub issue](https://github.com/Studio344/network-plus-extension/issues/new/choose), use **Copy safe support summary** from Keyboard Shortcuts and review the copied text before posting. Leave out real traffic and credentials.
 
 ## Project links
 

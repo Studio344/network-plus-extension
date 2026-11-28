@@ -70,7 +70,7 @@ const buildReleaseNotes = ({ version, date, body, archive }) =>
     '2. Open `edge://extensions/` in Microsoft Edge, or `chrome://extensions/` in Google Chrome, and turn on Developer mode.',
     '3. Choose **Load unpacked** and select the extracted folder.',
     '',
-    `Full changelog: [docs/CHANGELOG.md](https://github.com/himiyosh/network-plus-extension/blob/v${version}/docs/CHANGELOG.md)`,
+    `Full changelog: [docs/CHANGELOG.md](https://github.com/Studio344/network-plus-extension/blob/v${version}/docs/CHANGELOG.md)`,
     '',
   ].join('\n');
 

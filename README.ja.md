@@ -8,7 +8,7 @@
 
 </div>
 
-**今すぐ試す:** [最新リリースのZIP](https://github.com/himiyosh/network-plus-extension/releases/latest) · [Chrome Web Store](https://chromewebstore.google.com/detail/mhidipnhdnonbjkfklcohmnnmfggjlpo) · [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/network-for-devtools/dhmafmhaagefmichhmmkknapalhmlmal)
+**今すぐ試す:** [最新リリースのZIP](https://github.com/Studio344/network-plus-extension/releases/latest) · [Chrome Web Store](https://chromewebstore.google.com/detail/mhidipnhdnonbjkfklcohmnnmfggjlpo) · [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/network-for-devtools/dhmafmhaagefmichhmmkknapalhmlmal)
 
 ## 操作デモ
 
@@ -31,7 +31,7 @@
 
 ### リリース ZIP からインストール
 
-1. [最新リリースのZIP](https://github.com/himiyosh/network-plus-extension/releases/latest)をダウンロードします。
+1. [最新リリースのZIP](https://github.com/Studio344/network-plus-extension/releases/latest)をダウンロードします。
 2. ZIPを展開し、`chrome://extensions/` または `edge://extensions/` で **デベロッパー モード** を有効にします。
 3. **展開して読み込み** を選び、`manifest.json` があるフォルダーを指定します。DevToolsの **Network+** タブを開きます。
 
@@ -43,7 +43,7 @@
 
 記録した通信は端末内で処理します。コピーとエクスポートはサニタイズ済みが既定です。完全版を含め、共有前に内容を確認してください。 [プライバシー通知](docs/privacy.md)
 
-不具合はツールバーの **不具合を報告** または [報告フォーム](https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform) から報告できます。ツールバーから開くと、バージョンなど任意の環境情報が入ります。公開の [GitHub Issue](https://github.com/himiyosh/network-plus-extension/issues/new/choose) に貼る場合は、キーボードショートカット画面の **安全なサポート情報をコピー** を使い、内容を確認してください。実通信や認証情報は投稿に含めないでください。
+不具合はツールバーの **不具合を報告** または [報告フォーム](https://docs.google.com/forms/d/e/1FAIpQLScPzbNqgDnYQEjHr0yFsBA9ANAoB_n1SlTUe1AYEhTC_iJk3w/viewform) から報告できます。ツールバーから開くと、バージョンなど任意の環境情報が入ります。公開の [GitHub Issue](https://github.com/Studio344/network-plus-extension/issues/new/choose) に貼る場合は、キーボードショートカット画面の **安全なサポート情報をコピー** を使い、内容を確認してください。実通信や認証情報は投稿に含めないでください。
 
 ## プロジェクト情報
 

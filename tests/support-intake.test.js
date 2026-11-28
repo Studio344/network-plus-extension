@@ -2,13 +2,13 @@ const fs = require('fs');
 const path = require('path');
 
 const repositoryRoot = path.join(__dirname, '..');
-const rawIssuesUrl = 'https://github.com/himiyosh/network-plus-extension/issues';
+const rawIssuesUrl = 'https://github.com/Studio344/network-plus-extension/issues';
 const chooserUrl = `${rawIssuesUrl}/new/choose`;
-const privacyUrl = 'https://github.com/himiyosh/network-plus-extension/blob/main/docs/privacy.md';
+const privacyUrl = 'https://github.com/Studio344/network-plus-extension/blob/main/docs/privacy.md';
 const safetyWarning = '**Public issue - sanitized text only.**';
 const compactSafetyDirection = 'Do not paste or attach real traffic or files.';
 const unfinishedPattern = /\b(?:TODO|TBD|FIXME|CHANGEME|PLACEHOLDER)\b/i;
-const rawIssuesRoutePattern = /https:\/\/github\.com\/himiyosh\/network-plus-extension\/issues(?=["'`)\s.,]|$)/g;
+const rawIssuesRoutePattern = /https:\/\/github\.com\/Studio344\/network-plus-extension\/issues(?=["'`)\s.,]|$)/g;
 
 const read = (file) => fs.readFileSync(path.join(repositoryRoot, file), 'utf8');
 
@@ -184,7 +184,7 @@ describe('safe public support intake', () => {
   test('disables blank issues and links only to verified public guidance', () => {
     expect(config).toContain('blank_issues_enabled: false');
     expect(config).toContain(privacyUrl);
-    expect(config).toContain('https://github.com/himiyosh/network-plus-extension#readme');
+    expect(config).toContain('https://github.com/Studio344/network-plus-extension#readme');
     expect(config).not.toMatch(/security|vulnerabilit|private report/i);
     expect(config).not.toMatch(unfinishedPattern);
   });
